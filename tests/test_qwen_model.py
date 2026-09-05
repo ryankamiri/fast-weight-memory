@@ -10,6 +10,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM, Qwen3Mode
 from architectures.qwen.configuration import FWQwen3Config
 from architectures.qwen.model import FWQwen3Model, FWQwen3ModelOutput
 from architectures.states.model_state import FWModelState
+from architectures.cache.sliding_window import SlidingWindowKVCache
 
 
 class ModelTests(unittest.TestCase):
@@ -242,6 +243,93 @@ class ModelTests(unittest.TestCase):
             torch.testing.assert_close(torch.cat(parts, dim=1), expected.last_hidden_state, atol=2e-6, rtol=2e-5)
             self.assert_states_close(state, expected.state)
 
+    def test_eviction_prefill_decode_masks_and_all_layer_states(self):
+        for window in (1, 2, 5):
+            config = self.config()
+            config.teacher_window_size = window
+            config.student_window_size = min(window, 2)
+            model = FWQwen3Model(config).eval()
+            ids = torch.randint(0, 40, (2, 23))
+            with torch.no_grad():
+                for i in config.fast_weight_layers:
+                    model.layers[i].mlp.teacher_conv.weight.normal_(std=0.2)
+                    model.layers[i].mlp.student_conv.weight.normal_(std=0.2)
+                expected = model(ids, use_cache=False)
+                full_cached = model(ids, use_cache=True)
+                for ends in (list(range(1, 24)), [3, 4, 5, 6, 7, 8, 23], [9, 10, 11, 17, 18, 23]):
+                    state = None
+                    start = 0
+                    parts = []
+                    for end in ends:
+                        offset = max(0, start - (window - 1))
+                        captured = []
+
+                        def capture(module, args, kwargs):
+                            captured.append((kwargs["teacher_attention_mask"], kwargs["student_attention_mask"]))
+
+                        handle = model.layers[0].register_forward_pre_hook(capture, with_kwargs=True)
+                        try:
+                            result = model(
+                                ids[:, start:end], state=state, use_cache=True,
+                                attention_mask=torch.ones(2, end - offset, dtype=torch.bool),
+                            )
+                        finally:
+                            handle.remove()
+                        q = torch.arange(start, end)[:, None]
+                        k = torch.arange(offset, end)[None, :]
+                        for mask, size in zip(captured[0], (window, config.student_window_size)):
+                            allowed = ((q >= k) & (k > q - size))[None, None].expand(2, -1, -1, -1)
+                            torch.testing.assert_close(mask == 0, allowed)
+                        state = result.state
+                        parts.append(result.last_hidden_state)
+                        self.assertEqual(state.tokens_seen, end)
+                        for i, layer in enumerate(state.past_key_values.layers):
+                            self.assertEqual(layer.get_seq_length(), end)
+                            self.assertEqual(layer.keys.shape[-2], min(end, window - 1))
+                        for mlp_state in state.mlp_states.values():
+                            self.assertEqual(mlp_state.pending_count, end % config.chunk_size)
+                        start = end
+                    torch.testing.assert_close(torch.cat(parts, dim=1), expected.last_hidden_state, atol=2e-6, rtol=2e-5)
+                    self.assert_states_close(state, expected.state)
+                    for actual_layer, expected_layer in zip(state.past_key_values.layers, full_cached.past_key_values.layers):
+                        torch.testing.assert_close(actual_layer.keys, expected_layer.keys, atol=2e-6, rtol=2e-5)
+                        torch.testing.assert_close(actual_layer.values, expected_layer.values, atol=2e-6, rtol=2e-5)
+
+    def test_ordinary_padding_mask_tracks_retained_keys(self):
+        model = FWQwen3Model(self.config(fast_weight_layers=[])).eval()
+        padding = torch.ones_like(self.ids, dtype=torch.bool)
+        padding[0, :2] = False
+        with torch.no_grad():
+            expected = model(self.ids, attention_mask=padding)
+            first = model(self.ids[:, :7], attention_mask=padding[:, :7], use_cache=True)
+            # Teacher window 5 retains positions 3-6 before reading positions 7-10.
+            tail = model(self.ids[:, 7:], state=first.state, use_cache=True, attention_mask=padding[:, 3:])
+            torch.testing.assert_close(tail.last_hidden_state, expected.last_hidden_state[:, 7:])
+
+    def test_eviction_training_gradients_without_checkpointing(self):
+        full_model = FWQwen3Model(self.config()).train()
+        split_model = copy.deepcopy(full_model)
+        full = full_model(self.ids)
+        first = split_model(self.ids[:, :7], use_cache=True)
+        tail = split_model(self.ids[:, 7:], state=first.state, use_cache=True)
+        torch.testing.assert_close(tail.last_hidden_state, full.last_hidden_state[:, 7:])
+        full.last_hidden_state[:, 7:, 0].sum().backward()
+        tail.last_hidden_state[..., 0].sum().backward()
+        for (name, a), (_, b) in zip(full_model.named_parameters(), split_model.named_parameters()):
+            torch.testing.assert_close(a.grad, b.grad, atol=2e-6, rtol=2e-5, msg=name)
+
+    def test_reject_wrong_cache_geometry_and_old_full_history_mask(self):
+        model = FWQwen3Model(self.config()).eval()
+        for cache in (SlidingWindowKVCache(3, 2), SlidingWindowKVCache(1, 5)):
+            with self.assertRaisesRegex(ValueError, "window and layer count"):
+                model(self.ids, state=FWModelState(past_key_values=cache), use_cache=True)
+        with torch.no_grad():
+            first = model(self.ids[:, :7], use_cache=True)
+            with self.assertRaisesRegex(ValueError, "retained keys"):
+                model(self.ids[:, 7:8], state=first.state, use_cache=True,
+                      attention_mask=torch.ones(2, 8, dtype=torch.bool))
+            self.assertEqual(first.past_key_values.get_seq_length(), 7)
+
     def test_training_gradients_causality_and_state_lifetime(self):
         model = FWQwen3Model(self.config()).train()
         output = model(self.ids, use_cache=False)
@@ -368,7 +456,7 @@ class ModelTests(unittest.TestCase):
             tail = model(self.ids[:, 7:], state=first.state, use_cache=True)
             torch.testing.assert_close(tail.last_hidden_state, expected.last_hidden_state[:, 7:])
             self.assert_states_close(tail.state, expected.state)
-            self.assertFalse(any(tail.past_key_values.is_sliding))
+            self.assertTrue(all(tail.past_key_values.is_sliding))
 
     def test_mlp_only_continuation_without_kv_cache(self):
         model = FWQwen3Model(self.config())

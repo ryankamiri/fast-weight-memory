@@ -4,7 +4,6 @@ import torch
 from torch import nn
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
-from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import logging
 from transformers.models.qwen3.modeling_qwen3 import (
@@ -16,6 +15,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 from .configuration import FWQwen3Config
 from .decoder import FWQwen3DecoderLayer
 from .mlp import FWQwen3MLP
+from ..cache.sliding_window import SlidingWindowKVCache
 from ..states.model_state import FWModelState
 
 logger = logging.get_logger(__name__)
@@ -86,7 +86,7 @@ class FWQwen3Model(Qwen3PreTrainedModel):
             if attention_mask.device != hidden_states.device:
                 raise ValueError("attention_mask must be on the input device")
             if attention_mask.dtype != torch.bool or attention_mask.shape != (B, S_kv):
-                raise ValueError("attention_mask must be boolean [B, S_kv], including cached tokens")
+                raise ValueError("attention_mask must be boolean [B, S_kv], covering retained keys plus new tokens")
             if self.config.fast_weight_layers and not attention_mask.all():
                 raise ValueError("Padded fast-weight batches need per-example chunk state; not supported yet")
 
@@ -112,7 +112,8 @@ class FWQwen3Model(Qwen3PreTrainedModel):
         input_ids: Int[torch.Tensor, "B S"],
         state: FWModelState | None = None,
         use_cache: bool = False,
-        attention_mask: Bool[torch.Tensor, "B S_kv"] | None = None, # True=valid token, False=padding; causal/window masks are built internally.
+        # True=valid token; columns cover retained KV history plus this call's tokens.
+        attention_mask: Bool[torch.Tensor, "B S_kv"] | None = None,
         output_hidden_states: bool = False,
     ) -> FWQwen3ModelOutput:
         # KV cache and MLP memory always enter together through session state.
@@ -134,18 +135,21 @@ class FWQwen3Model(Qwen3PreTrainedModel):
             raise ValueError("At least one input token is required")
 
         if past_key_values is not None:
-            # Mask positions below describe an untrimmed contiguous KV sequence.
-            if type(past_key_values) is not DynamicCache or any(past_key_values.is_sliding):
-                raise ValueError("This baseline requires a full, non-sliding DynamicCache")
+            if not isinstance(past_key_values, SlidingWindowKVCache):
+                raise ValueError("State must use SlidingWindowKVCache")
+            if (past_key_values.window_size != self.config.teacher_window_size
+                    or len(past_key_values.layers) != len(self.layers)):
+                raise ValueError("KV cache window and layer count must match the model")
             if not use_cache:
                 raise ValueError("A supplied KV cache requires use_cache=True")
         
-        past_length = past_key_values.get_seq_length() if past_key_values is not None else 0
-        tokens_seen = state.tokens_seen if state is not None else past_length
+        tokens_seen = state.tokens_seen if state is not None else 0
         mlp_states = {} if state is None else state.mlp_states
 
-        if past_key_values is not None and tokens_seen != past_length:
-            raise ValueError("State tokens_seen and KV cache length disagree; old states are not snapshots")
+        if past_key_values is not None and any(
+            layer.get_seq_length() != tokens_seen for layer in past_key_values.layers
+        ):
+            raise ValueError("State tokens_seen and KV token counts disagree; old states are not snapshots")
         if tokens_seen and self.config.fast_weight_layers and set(mlp_states) != set(self.config.fast_weight_layers):
             raise ValueError("Continuing a fast-weight session requires all its layer MLP states")
         if set(mlp_states) - set(self.config.fast_weight_layers):
@@ -159,15 +163,19 @@ class FWQwen3Model(Qwen3PreTrainedModel):
         cache_position: Int[torch.Tensor, "S"] = torch.arange(tokens_seen, tokens_seen + S, device=hidden_states.device)
         position_ids: Int[torch.Tensor, "1 S"] = cache_position.unsqueeze(0)
         
-        # With no KV history, keys are just this call's tokens, even if MLP
-        # memory has been carried over from an earlier training segment.
-        key_positions = torch.arange(past_length + S, device=hidden_states.device) if past_key_values is not None else cache_position
+        if past_key_values is None:
+            # MLP-only continuation has no earlier attention keys.
+            key_positions = cache_position
+        else:
+            # All layers retain the same teacher-sized history. After eviction,
+            # key_offset = tokens_seen - retained_length, not zero.
+            S_kv, key_offset = past_key_values.get_mask_sizes(cache_position, layer_idx=0)
+            key_positions = torch.arange(key_offset, key_offset + S_kv, device=hidden_states.device)
         masks = self._prepare_masks(attention_mask, hidden_states, cache_position, key_positions)
         if use_cache and past_key_values is None:
             if tokens_seen:
                 raise ValueError("Cannot reconstruct earlier KV history from MLP state; start a fresh cached session")
-            # No config: keep full KV history even for sliding-attention layers.
-            past_key_values = DynamicCache()
+            past_key_values = SlidingWindowKVCache(len(self.layers), self.config.teacher_window_size)
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         next_mlp_states = {}
