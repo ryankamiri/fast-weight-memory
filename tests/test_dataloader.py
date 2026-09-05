@@ -1,13 +1,47 @@
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
 from datasets import Dataset
+from datasets import load_dataset as load_hf_dataset
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from data.dataloader import CausalLMCollator, create_dataloader
 
 
 class DataLoaderTests(unittest.TestCase):
+    def test_record_ranges_are_disjoint_with_multiple_workers(self):
+        with TemporaryDirectory() as folder:
+            paths = []
+            for shard in range(2):
+                path = Path(folder) / f"train-{shard}.parquet"
+                rows = [{"source_record_index": i, "input_ids": [i] * (3 if i == 2 else 4)}
+                        for i in range(shard * 6, (shard + 1) * 6)]
+                pq.write_table(pa.Table.from_pylist(rows), path, row_group_size=2)
+                paths.append(str(path))
+
+            def load_local(dataset_id, **kwargs):
+                return load_hf_dataset("parquet", data_files={"train": paths}, **kwargs)
+
+            for workers in (0, 2):
+                with patch("data.dataloader.load_dataset", side_effect=load_local):
+                    val = create_dataloader("local", seq_len=4, num_workers=workers,
+                                            start=0, end=4, shuffle=False)
+                    training = create_dataloader("local", seq_len=4, num_workers=workers,
+                                                 start=4, end=11, seed=42)
+                    duplicate = create_dataloader("local", seq_len=4, num_workers=workers,
+                                                  start=4, end=11, seed=42)
+                val_ids = [int(item["input_ids"][0, 0]) for item in val]
+                train_ids = [int(item["input_ids"][0, 0]) for item in training]
+                repeat_ids = [int(item["input_ids"][0, 0]) for item in duplicate]
+                self.assertEqual(sorted(val_ids), [0, 1, 3])
+                self.assertEqual(sorted(train_ids), list(range(4, 11)))
+                self.assertEqual(train_ids, repeat_ids)
+                self.assertFalse(set(val_ids) & set(train_ids))
+
     def test_collator_preserves_tokens_and_does_not_shift_labels(self):
         result = CausalLMCollator()([
             {"input_ids": [1, 2, 3]}, {"input_ids": [5, 6, 7]},

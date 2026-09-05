@@ -3,3 +3,6 @@
 __pycache__/
 *.py[cod]
 /datasets/
+/wandb/
+/fs-qwen-*.out
+/fs-qwen-*.err
