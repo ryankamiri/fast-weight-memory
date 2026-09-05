@@ -17,19 +17,9 @@ class FWQwen3Attention(Qwen3Attention):
         config, 
         layer_idx: int,
         is_fast_weight_layer: bool = False,
-        teacher_window_size: int | None = None,
-        student_window_size: int | None = None,
     ):
         super().__init__(config, layer_idx)
-        if is_fast_weight_layer:
-            for window in (teacher_window_size, student_window_size):
-                if type(window) is not int or window <= 0:
-                    raise ValueError("Fast-weight layers require positive integer window sizes")
-            if student_window_size > teacher_window_size:
-                raise ValueError("Student window must not exceed teacher window")
         self.is_fast_weight_layer = is_fast_weight_layer
-        self.teacher_window_size = teacher_window_size
-        self.student_window_size = student_window_size
 
     @jaxtyped(typechecker=beartype)
     def forward(
@@ -39,12 +29,12 @@ class FWQwen3Attention(Qwen3Attention):
             Float[torch.Tensor, "#B S d_head"],
             Float[torch.Tensor, "#B S d_head"],
         ],
-        attention_mask: Float[torch.Tensor, "#B #h_q #S S_kv"] | Bool[torch.Tensor, "#B #h_q #S S_kv"] | None = None,
+        teacher_attention_mask: Float[torch.Tensor, "#B #h_q #S S_kv"] | Bool[torch.Tensor, "#B #h_q #S S_kv"] | None = None,
+        student_attention_mask: Float[torch.Tensor, "#B #h_q #S S_kv"] | Bool[torch.Tensor, "#B #h_q #S S_kv"] | None = None,
+        position_ids: Int[torch.Tensor, "#B S"] | None = None,
         past_key_values: Cache | None = None,
         cache_position: Int[torch.Tensor, "S"] | None = None,
         output_attentions: bool = False,
-        position_ids: Int[torch.Tensor, "#B S"] | None = None,
-        student_attention_mask: Float[torch.Tensor, "#B #h_q #S S_kv"] | Bool[torch.Tensor, "#B #h_q #S S_kv"] | None = None,
     ) -> tuple[
         Float[torch.Tensor, "B S d_model"] | tuple[
             Float[torch.Tensor, "B S d_model"],
@@ -55,13 +45,13 @@ class FWQwen3Attention(Qwen3Attention):
         # normal forward pass
         if not self.is_fast_weight_layer:
             return super().forward(
-                hidden_states, position_embeddings, attention_mask,
+                hidden_states, position_embeddings, teacher_attention_mask,
                 past_key_values=past_key_values, cache_position=cache_position,
                 output_attentions=output_attentions, position_ids=position_ids,
             )
         if output_attentions:
             raise ValueError("Dual-window SDPA does not support output_attentions=True")
-        if attention_mask is None or student_attention_mask is None:
+        if teacher_attention_mask is None or student_attention_mask is None:
             raise ValueError("Dual-window mode requires prepared teacher and student attention masks")
 
         B, S, d_model = hidden_states.shape
@@ -95,7 +85,7 @@ class FWQwen3Attention(Qwen3Attention):
             query, 
             key, 
             value, 
-            attention_mask,
+            teacher_attention_mask,
             dropout=self.attention_dropout if self.training else 0.0,
             scaling=self.scaling, 
             is_causal=False,

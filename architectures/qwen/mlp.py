@@ -38,24 +38,38 @@ class FWQwen3MLP(Qwen3MLP):
         self.lr = float(lr)
 
         if is_fast_weight_layer:
-            self.W_proj = nn.Parameter(torch.eye(self.hidden_size)) if use_projection else None
-            self.beta_proj = nn.Parameter(torch.zeros(self.hidden_size)) if dynamic_beta else None
-            self.teacher_conv = self._make_conv(conv_kernel_size) if use_conv else None
-            self.student_conv = self._make_conv(conv_kernel_size) if use_conv else None
+            self.W_proj = nn.Parameter(torch.empty(self.hidden_size, self.hidden_size)) if use_projection else None
+            self.beta_proj = nn.Parameter(torch.empty(self.hidden_size)) if dynamic_beta else None
+            self.teacher_conv = nn.Conv1d(
+                self.intermediate_size,
+                self.intermediate_size,
+                conv_kernel_size,
+                groups=self.intermediate_size,
+                bias=False,
+            ) if use_conv else None
+            self.student_conv = nn.Conv1d(
+                self.intermediate_size,
+                self.intermediate_size,
+                conv_kernel_size,
+                groups=self.intermediate_size,
+                bias=False,
+            ) if use_conv else None
+            self.reset_fast_weight_parameters()
 
-    def _make_conv(self, kernel_size):
-        conv = nn.Conv1d(
-            self.intermediate_size, 
-            self.intermediate_size,
-            kernel_size, 
-            groups=self.intermediate_size, 
-            bias=False
-        )
-        # Identity causal filter: the last kernel entry multiplies this token.
-        with torch.no_grad():
-            conv.weight.zero_()
-            conv.weight[:, 0, -1] = 1
-        return conv
+    @torch.no_grad()
+    def reset_fast_weight_parameters(self):
+        """Initialize only the added learned parameters, not Qwen weights or session state."""
+        if not self.is_fast_weight_layer:
+            return
+        if self.W_proj is not None:
+            nn.init.eye_(self.W_proj)
+        if self.beta_proj is not None:
+            nn.init.zeros_(self.beta_proj)
+        for conv in (self.teacher_conv, self.student_conv):
+            if conv is not None:
+                # Identity causal filter: the last tap multiplies this token.
+                nn.init.zeros_(conv.weight)
+                conv.weight[:, 0, -1] = 1
 
     @property
     def W_base(self):

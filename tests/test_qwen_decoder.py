@@ -23,7 +23,6 @@ class DecoderTests(unittest.TestCase):
     def fast_layer(self):
         return FWQwen3DecoderLayer(
             self.config, 0, is_fast_weight_layer=True,
-            teacher_window_size=5, student_window_size=2,
             chunk_size=4, conv_kernel_size=3,
         ).eval()
 
@@ -33,7 +32,7 @@ class DecoderTests(unittest.TestCase):
         return dict(
             position_embeddings=self.rope(self.x[:, start:end], positions[None]),
             cache_position=positions,
-            attention_mask=((distance >= 0) & (distance < 5))[None, None],
+            teacher_attention_mask=((distance >= 0) & (distance < 5))[None, None],
             student_attention_mask=((distance >= 0) & (distance < student_window))[None, None],
         )
 
@@ -44,7 +43,9 @@ class DecoderTests(unittest.TestCase):
         self.assertEqual(set(layer.state_dict()), set(base.state_dict()))
         kwargs = self.inputs()
         kwargs.pop("student_attention_mask")
-        torch.testing.assert_close(layer(self.x, **kwargs), base(self.x, **kwargs), rtol=0, atol=0)
+        actual = layer(self.x, **kwargs)
+        kwargs["attention_mask"] = kwargs.pop("teacher_attention_mask")
+        torch.testing.assert_close(actual, base(self.x, **kwargs), rtol=0, atol=0)
 
     def test_dual_residuals_match_manual_composition_and_gradients(self):
         layer = self.fast_layer()
@@ -71,6 +72,7 @@ class DecoderTests(unittest.TestCase):
         kwargs = self.inputs(student_window=5)
         actual, state = layer(self.x, **kwargs)
         kwargs.pop("student_attention_mask")
+        kwargs["attention_mask"] = kwargs.pop("teacher_attention_mask")
         torch.testing.assert_close(actual, base(self.x, **kwargs))
         torch.testing.assert_close(state.W_fast, torch.zeros_like(state.W_fast))
 

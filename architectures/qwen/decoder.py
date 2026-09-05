@@ -18,8 +18,6 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
         config,
         layer_idx: int,
         is_fast_weight_layer: bool = False,
-        teacher_window_size: int | None = None,
-        student_window_size: int | None = None,
         chunk_size: int = 1024,
         lr: float = 0.3,
         use_projection: bool = True,
@@ -34,8 +32,6 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
         self.self_attn = FWQwen3Attention(
             config, layer_idx,
             is_fast_weight_layer=is_fast_weight_layer,
-            teacher_window_size=teacher_window_size,
-            student_window_size=student_window_size,
         )
         self.mlp = FWQwen3MLP(
             config,
@@ -54,18 +50,18 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: Float[torch.Tensor, "B S d_model"],
-        attention_mask: Float[torch.Tensor, "#B #h_q #S S_kv"] | Bool[torch.Tensor, "#B #h_q #S S_kv"] | None = None,
-        position_ids: Int[torch.Tensor, "#B S"] | None = None,
-        past_key_values: Cache | None = None,
-        use_cache: bool = False,
-        cache_position: Int[torch.Tensor, "S"] | None = None,
         position_embeddings: tuple[
             Float[torch.Tensor, "#B S d_head"],
             Float[torch.Tensor, "#B S d_head"],
         ] | None = None,
-        output_attentions: bool = False,
+        teacher_attention_mask: Float[torch.Tensor, "#B #h_q #S S_kv"] | Bool[torch.Tensor, "#B #h_q #S S_kv"] | None = None,
         student_attention_mask: Float[torch.Tensor, "#B #h_q #S S_kv"] | Bool[torch.Tensor, "#B #h_q #S S_kv"] | None = None,
+        position_ids: Int[torch.Tensor, "#B S"] | None = None,
+        past_key_values: Cache | None = None,
+        cache_position: Int[torch.Tensor, "S"] | None = None,
+        use_cache: bool = False,
         state: FWMLPState | None = None,
+        output_attentions: bool = False,
     ) -> Float[torch.Tensor, "B S d_model"] | tuple[Float[torch.Tensor, "B S d_model"], FWMLPState]:
         if position_embeddings is None:
             raise ValueError("position_embeddings must be supplied by the model's RoPE module")
@@ -77,7 +73,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
         attention_output, _ = self.self_attn(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
-            attention_mask=attention_mask,
+            teacher_attention_mask=teacher_attention_mask,
             past_key_values=past_key_values,
             cache_position=cache_position,
             output_attentions=output_attentions,

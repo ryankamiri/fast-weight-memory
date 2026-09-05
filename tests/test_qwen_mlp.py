@@ -29,6 +29,40 @@ class MLPTests(unittest.TestCase):
         torch.testing.assert_close(model(self.teacher), base(self.teacher), rtol=0, atol=0)
         self.assertFalse(hasattr(model, "W_fast"))
 
+    def test_fast_parameter_defaults_and_reset(self):
+        model = self.model()
+        original = {name: value.clone() for name, value in model.state_dict().items()}
+        torch.testing.assert_close(model.W_proj, torch.eye(8))
+        torch.testing.assert_close(model.beta_proj, torch.zeros(8))
+        for conv in (model.teacher_conv, model.student_conv):
+            torch.testing.assert_close(conv.weight[..., :-1], torch.zeros_like(conv.weight[..., :-1]))
+            torch.testing.assert_close(conv.weight[..., -1], torch.ones_like(conv.weight[..., -1]))
+        parameters = dict(model.named_parameters())
+        with torch.no_grad():
+            model.W_proj.fill_(2)
+            model.beta_proj.fill_(2)
+            model.teacher_conv.weight.fill_(2)
+            model.student_conv.weight.fill_(2)
+        model.reset_fast_weight_parameters()
+        for name, value in model.state_dict().items():
+            torch.testing.assert_close(value, original[name])
+        # Reset in-place so optimizer parameter references remain valid.
+        for name, value in model.named_parameters():
+            self.assertIs(value, parameters[name])
+
+    def test_reset_with_optional_parameters_disabled(self):
+        for options in (
+            {"is_fast_weight_layer": False},
+            {"is_fast_weight_layer": True, "use_projection": False},
+            {"is_fast_weight_layer": True, "use_conv": False},
+            {"is_fast_weight_layer": True, "dynamic_beta": False},
+        ):
+            model = FWQwen3MLP(self.config, **options)
+            original = {name: value.clone() for name, value in model.state_dict().items()}
+            model.reset_fast_weight_parameters()
+            for name, value in model.state_dict().items():
+                torch.testing.assert_close(value, original[name])
+
     def test_independent_chunk_recurrence(self):
         model = self.model(use_conv=False)
         with torch.no_grad():

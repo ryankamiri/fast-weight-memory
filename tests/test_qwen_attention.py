@@ -21,10 +21,9 @@ class AttentionTests(unittest.TestCase):
         self.rope = Qwen3RotaryEmbedding(self.config)
         self.x = torch.randn(2, 9, 32)
 
-    def wrapped(self, teacher=5, student=3):
+    def wrapped(self):
         wrapped = FWQwen3Attention(
             self.config, 0, is_fast_weight_layer=True,
-            teacher_window_size=teacher, student_window_size=student,
         )
         wrapped.load_state_dict(self.base.state_dict())
         return wrapped.eval()
@@ -37,10 +36,9 @@ class AttentionTests(unittest.TestCase):
         return tuple(((distance >= 0) & (distance < window))[None, None]
                      for window in (teacher, student))
 
-    def run_dual(self, wrapped, x, start=0, **kwargs):
-        teacher, student = self.masks(start, start + x.shape[1],
-                                      wrapped.teacher_window_size, wrapped.student_window_size)
-        return wrapped(x, self.embeddings(x, start), attention_mask=teacher,
+    def run_dual(self, wrapped, x, start=0, teacher=5, student=3, **kwargs):
+        teacher, student = self.masks(start, start + x.shape[1], teacher, student)
+        return wrapped(x, self.embeddings(x, start), teacher_attention_mask=teacher,
                        student_attention_mask=student, **kwargs)
 
     def reference(self, x, window, padding=None):
@@ -77,7 +75,7 @@ class AttentionTests(unittest.TestCase):
             torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-4)
 
     def test_equal_windows(self):
-        (teacher, student), _ = self.run_dual(self.wrapped(4, 4), self.x)
+        (teacher, student), _ = self.run_dual(self.wrapped(), self.x, teacher=4, student=4)
         torch.testing.assert_close(teacher, student, rtol=0, atol=0)
 
     def test_padding_and_4d_masks(self):
@@ -113,11 +111,6 @@ class AttentionTests(unittest.TestCase):
         outputs, _ = self.run_dual(wrapped, changed)
         for a, b in zip(original, outputs):
             torch.testing.assert_close(a[:, :5], b[:, :5])
-
-    def test_invalid_windows(self):
-        for teacher, student in ((None, 2), (2, 3), (0, 1), (3, -1)):
-            with self.assertRaises(ValueError):
-                self.wrapped(teacher, student)
 
     def test_runtime_shape_checks(self):
         wrapped = self.wrapped()
