@@ -6,6 +6,24 @@ from data.prolong import stream_prolong
 
 
 class ProLongTests(unittest.TestCase):
+    def test_resume_skips_completed_shards_and_rows(self):
+        shards = [
+            {"compression": None, "raw_data": {"basename": f"shard.{i}.mds"}, "samples": 2}
+            for i in range(2)
+        ]
+        reader = MagicMock()
+        reader.__getitem__.side_effect = lambda j: {"id": 2 + j}
+        with (
+            patch("data.prolong.HfApi"),
+            patch("data.prolong.hf_hub_download", return_value="/cache/books/index.json") as download,
+            patch("data.prolong.Path.read_text", return_value=json.dumps({"shards": shards})),
+            patch("data.prolong.MDSReader.from_json", return_value=reader),
+        ):
+            self.assertEqual(list(stream_prolong(start_record=3)), [{"id": 3}])
+            self.assertEqual(download.call_count, 2)
+            self.assertTrue(download.call_args.args[1].endswith("shard.1.mds"))
+            reader.__getitem__.assert_called_once_with(1)
+
     def test_custom_dataset_id(self):
         shard = {"compression": None, "raw_data": {"basename": "shard.mds"}, "samples": 1}
         with (
