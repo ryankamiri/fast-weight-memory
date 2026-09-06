@@ -31,10 +31,14 @@ class MLPTests(unittest.TestCase):
 
     def test_fast_parameter_defaults_and_reset(self):
         model = self.model()
+        torch.manual_seed(123)
+        model.reset_fast_weight_parameters()
         original = {name: value.clone() for name, value in model.state_dict().items()}
-        torch.testing.assert_close(model.W_proj, torch.eye(8))
-        torch.testing.assert_close(model.beta_proj, torch.zeros(8))
-        for conv in (model.teacher_conv, model.student_conv):
+        torch.testing.assert_close(model.W_proj, model.W_proj.diagonal().diag())
+        self.assertGreater(model.W_proj.diagonal().abs().sum().item(), 0)
+        self.assertGreater(model.beta_proj.abs().sum().item(), 0)
+        torch.testing.assert_close(model.student_conv.weight, torch.zeros_like(model.student_conv.weight))
+        for conv in (model.teacher_conv,):
             torch.testing.assert_close(conv.weight[..., :-1], torch.zeros_like(conv.weight[..., :-1]))
             torch.testing.assert_close(conv.weight[..., -1], torch.ones_like(conv.weight[..., -1]))
         parameters = dict(model.named_parameters())
@@ -43,6 +47,7 @@ class MLPTests(unittest.TestCase):
             model.beta_proj.fill_(2)
             model.teacher_conv.weight.fill_(2)
             model.student_conv.weight.fill_(2)
+        torch.manual_seed(123)
         model.reset_fast_weight_parameters()
         for name, value in model.state_dict().items():
             torch.testing.assert_close(value, original[name])
@@ -58,7 +63,10 @@ class MLPTests(unittest.TestCase):
             {"is_fast_weight_layer": True, "dynamic_beta": False},
         ):
             model = FWQwen3MLP(self.config, **options)
+            torch.manual_seed(123)
+            model.reset_fast_weight_parameters()
             original = {name: value.clone() for name, value in model.state_dict().items()}
+            torch.manual_seed(123)
             model.reset_fast_weight_parameters()
             for name, value in model.state_dict().items():
                 torch.testing.assert_close(value, original[name])
@@ -109,6 +117,8 @@ class MLPTests(unittest.TestCase):
 
     def test_read_uses_raw_teacher_but_writes_use_convolution(self):
         model = self.model()
+        with torch.no_grad():
+            model.student_conv.weight[..., -1] = 1
         teacher = self.teacher[:, :3]
         student = self.student[:, :3]
         initial = torch.randn(2, 8, 12) * 0.01
@@ -124,11 +134,11 @@ class MLPTests(unittest.TestCase):
 
     def test_zero_default_equal_streams_and_reset(self):
         model = self.model()
-        result, state = model(self.teacher, self.teacher)
+        result, state = model(self.teacher, self.student)
         expected = model.down_proj(model.act_fn(model.gate_proj(self.teacher)) * model.up_proj(self.teacher))
         torch.testing.assert_close(result, expected)
         torch.testing.assert_close(state.W_fast, torch.zeros_like(state.W_fast))
-        fresh, _ = model(self.teacher, self.teacher, state=None)
+        fresh, _ = model(self.teacher, self.student, state=None)
         torch.testing.assert_close(fresh, result)
         self.assertNotIn("W_fast", model.state_dict())
         self.assertNotIn("W_base", model.state_dict())
@@ -147,6 +157,9 @@ class MLPTests(unittest.TestCase):
 
     def test_gradients_and_detach(self):
         model = self.model()
+        # Exercise the active write path, after the zero-initialized filter learns.
+        with torch.no_grad():
+            model.student_conv.weight[..., -1] = 1
         teacher = self.teacher.clone().requires_grad_()
         student = self.student.clone().requires_grad_()
         output, state = model(teacher, student)

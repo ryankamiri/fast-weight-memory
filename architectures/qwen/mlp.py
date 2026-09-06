@@ -62,14 +62,16 @@ class FWQwen3MLP(Qwen3MLP):
         if not self.is_fast_weight_layer:
             return
         if self.W_proj is not None:
-            nn.init.eye_(self.W_proj)
+            nn.init.zeros_(self.W_proj)
+            nn.init.normal_(self.W_proj.diagonal(), std=self.config.initializer_range)
         if self.beta_proj is not None:
-            nn.init.zeros_(self.beta_proj)
+            nn.init.normal_(self.beta_proj, std=self.config.initializer_range)
         for conv in (self.teacher_conv, self.student_conv):
             if conv is not None:
-                # Identity causal filter: the last tap multiplies this token.
                 nn.init.zeros_(conv.weight)
-                conv.weight[:, 0, -1] = 1
+        if self.teacher_conv is not None:
+            # Teacher identity; zero student features keep initial memory writes zero.
+            self.teacher_conv.weight[:, 0, -1] = 1
 
     @property
     def W_base(self):

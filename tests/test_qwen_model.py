@@ -115,6 +115,8 @@ class ModelTests(unittest.TestCase):
         for param in model.parameters():
             param.requires_grad_(False)
         model.layers[0].mlp.W_proj.requires_grad_(True)
+        with torch.no_grad():
+            model.layers[0].mlp.student_conv.weight[..., -1] = 1
         output = model(self.ids, use_cache=False)
         output.last_hidden_state[..., 0].sum().backward()
         grad = model.layers[0].mlp.W_proj.grad
@@ -308,6 +310,11 @@ class ModelTests(unittest.TestCase):
 
     def test_eviction_training_gradients_without_checkpointing(self):
         full_model = FWQwen3Model(self.config()).train()
+        # Test nonzero memory writes across the split, not only the initial baseline.
+        with torch.no_grad():
+            for layer in full_model.layers:
+                if layer.is_fast_weight_layer:
+                    layer.mlp.student_conv.weight[..., -1] = 1
         split_model = copy.deepcopy(full_model)
         full = full_model(self.ids)
         first = split_model(self.ids[:, :7], use_cache=True)
@@ -316,7 +323,25 @@ class ModelTests(unittest.TestCase):
         full.last_hidden_state[:, 7:, 0].sum().backward()
         tail.last_hidden_state[..., 0].sum().backward()
         for (name, a), (_, b) in zip(full_model.named_parameters(), split_model.named_parameters()):
-            torch.testing.assert_close(a.grad, b.grad, atol=2e-6, rtol=2e-5, msg=name)
+            # Splitting SDPA changes FP32 reduction order slightly.
+            torch.testing.assert_close(a.grad, b.grad, atol=1e-5, rtol=2e-5, msg=name)
+
+    def test_initial_fast_weights_preserve_baseline_across_chunks(self):
+        model = FWQwen3Model(self.config()).train()
+        baseline = copy.deepcopy(model)
+        for layer in baseline.layers:
+            if layer.is_fast_weight_layer:
+                layer.mlp.lr = 0
+        actual = model(self.ids)
+        expected = baseline(self.ids)
+        torch.testing.assert_close(actual.last_hidden_state, expected.last_hidden_state, atol=0, rtol=0)
+        for state in actual.state.mlp_states.values():
+            self.assertEqual(torch.count_nonzero(state.W_fast).item(), 0)
+        actual.last_hidden_state[..., 0].sum().backward()
+        for index in model.config.fast_weight_layers:
+            grad = model.layers[index].mlp.student_conv.weight.grad
+            self.assertTrue(torch.isfinite(grad).all())
+            self.assertGreater(grad.abs().sum().item(), 0)
 
     def test_reject_wrong_cache_geometry_and_old_full_history_mask(self):
         model = FWQwen3Model(self.config()).eval()
@@ -386,9 +411,11 @@ class ModelTests(unittest.TestCase):
             for key, value in base.state_dict().items():
                 torch.testing.assert_close(loaded.state_dict()[key], value)
             mlp = loaded.layers[0].mlp
-            torch.testing.assert_close(mlp.W_proj, torch.eye(24))
-            torch.testing.assert_close(mlp.beta_proj, torch.zeros(24))
-            for conv in (mlp.teacher_conv, mlp.student_conv):
+            torch.testing.assert_close(mlp.W_proj, mlp.W_proj.diagonal().diag())
+            self.assertGreater(mlp.W_proj.abs().sum().item(), 0)
+            self.assertGreater(mlp.beta_proj.abs().sum().item(), 0)
+            torch.testing.assert_close(mlp.student_conv.weight, torch.zeros_like(mlp.student_conv.weight))
+            for conv in (mlp.teacher_conv,):
                 torch.testing.assert_close(conv.weight[..., -1], torch.ones(32, 1))
                 torch.testing.assert_close(conv.weight[..., :-1], torch.zeros(32, 1, 2))
 

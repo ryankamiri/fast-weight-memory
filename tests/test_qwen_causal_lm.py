@@ -85,9 +85,11 @@ class CausalLMTests(unittest.TestCase):
                 for key, value in native.state_dict().items():
                     torch.testing.assert_close(loaded.state_dict()[key], value)
                 mlp = loaded.model.layers[0].mlp
-                torch.testing.assert_close(mlp.W_proj, torch.eye(16))
-                torch.testing.assert_close(mlp.beta_proj, torch.zeros(16))
-                for conv in (mlp.teacher_conv, mlp.student_conv):
+                torch.testing.assert_close(mlp.W_proj, mlp.W_proj.diagonal().diag())
+                self.assertGreater(mlp.W_proj.abs().sum().item(), 0)
+                self.assertGreater(mlp.beta_proj.abs().sum().item(), 0)
+                torch.testing.assert_close(mlp.student_conv.weight, torch.zeros_like(mlp.student_conv.weight))
+                for conv in (mlp.teacher_conv,):
                     torch.testing.assert_close(conv.weight[..., -1], torch.ones(24, 1))
                     torch.testing.assert_close(conv.weight[..., :-1], torch.zeros(24, 1, 2))
                 with torch.no_grad():
