@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -29,11 +30,12 @@ class CausalLMTests(unittest.TestCase):
         labels = self.ids.clone()
         labels[:, 3] = -100
         result = model(self.ids, labels=labels, output_hidden_states=True)
+        reference_logits = model.lm_head(result.hidden_states[-1])
         expected = F.cross_entropy(
-            result.logits[:, :-1].float().reshape(-1, 40), labels[:, 1:].reshape(-1),
+            reference_logits[:, :-1].float().reshape(-1, 40), labels[:, 1:].reshape(-1),
         )
         torch.testing.assert_close(result.loss, expected)
-        torch.testing.assert_close(result.logits, model.lm_head(result.hidden_states[-1]))
+        self.assertIsNone(result.logits)
         self.assertEqual(result.state.tokens_seen, 13)
         self.assertIsNone(result.past_key_values)
         result.loss.backward()
@@ -66,7 +68,9 @@ class CausalLMTests(unittest.TestCase):
             with torch.no_grad():
                 actual = loaded(self.ids, labels=self.ids)
                 expected = native(self.ids, labels=self.ids, use_cache=False)
-            torch.testing.assert_close(actual.logits, expected.logits)
+            self.assertIsNone(actual.logits)
+            with torch.no_grad():
+                torch.testing.assert_close(loaded(self.ids).logits, expected.logits)
             torch.testing.assert_close(actual.loss, expected.loss)
 
     def test_missing_fast_weights_and_save_reload(self):
@@ -134,6 +138,36 @@ class CausalLMTests(unittest.TestCase):
         self.assertIsNotNone(model.model.layers[0].mlp.W_proj.grad)
         model.gradient_checkpointing_disable()
         self.assertFalse(model.is_gradient_checkpointing)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "Liger parity requires CUDA")
+    def test_fused_loss_and_gradients_match_cross_entropy(self):
+        for mixed_precision in (False, True):
+            with self.subTest(mixed_precision=mixed_precision):
+                fused = FWQwen3ForCausalLM(self.config(tie_word_embeddings=True)).cuda().train()
+                reference = FWQwen3ForCausalLM(self.config(tie_word_embeddings=True)).cuda().train()
+                reference.load_state_dict(fused.state_dict())
+                fused.gradient_checkpointing_enable()
+                ids = self.ids.cuda()
+                labels = ids.clone()
+                labels[:, 3] = -100
+                context = torch.autocast("cuda", dtype=torch.bfloat16) if mixed_precision else nullcontext()
+                head_calls = []
+                handle = fused.lm_head.register_forward_pre_hook(lambda *args: head_calls.append(True))
+                try:
+                    with context:
+                        result = fused(ids, labels=labels)
+                        logits = reference(ids).logits
+                        expected = F.cross_entropy(logits[:, :-1].float().reshape(-1, 40), labels[:, 1:].reshape(-1))
+                    self.assertIsNone(result.logits)
+                    self.assertEqual(head_calls, [])
+                    torch.testing.assert_close(result.loss, expected, atol=2e-3, rtol=2e-3)
+                    result.loss.backward()
+                    expected.backward()
+                    for (name, actual), (_, wanted) in zip(fused.named_parameters(), reference.named_parameters()):
+                        self.assertIsNotNone(actual.grad, name)
+                        torch.testing.assert_close(actual.grad, wanted.grad, atol=2e-3, rtol=2e-2, msg=name)
+                finally:
+                    handle.remove()
 
 
 if __name__ == "__main__":

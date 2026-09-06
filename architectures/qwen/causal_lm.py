@@ -2,10 +2,12 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.qwen3.modeling_qwen3 import Qwen3PreTrainedModel
+from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
 
 from .configuration import FWQwen3Config
 from .mlp import FWQwen3MLP
@@ -19,7 +21,7 @@ class FWQwen3CausalLMOutput(CausalLMOutputWithPast):
 
 
 class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
-    """State-aware LM wrapper"""
+    """State-aware LM wrapper; labeled forwards return loss without logits."""
 
     config_class = FWQwen3Config
     _tied_weights_keys = ["lm_head.weight"]
@@ -63,12 +65,23 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
             input_ids=input_ids, state=state, use_cache=use_cache,
             attention_mask=attention_mask, output_hidden_states=output_hidden_states,
         )
-        # [B, S_logits, d_model] -> [B, S_logits, vocab_size]; -0 keeps all S.
-        logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(output.last_hidden_state[:, -logits_to_keep:, :])
+        logits = None
         loss = None
         if labels is not None:
-            # HF shifts labels internally: logits at t predict labels at t+1.
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.vocab_size)
+            # Hidden state at t predicts label at t+1; N = B * (S - 1).
+            hidden_states: Float[torch.Tensor, "N d_model"] = output.last_hidden_state[:, :-1].reshape(-1, self.config.hidden_size)
+            targets: Int[torch.Tensor, "N"] = labels[:, 1:].reshape(-1).to(hidden_states.device)
+            if hidden_states.is_cuda:
+                # Fuse projection + loss so full [B, S, vocab_size] logits never exist.
+                loss = LigerFusedLinearCrossEntropyLoss(accum_dtype=torch.float32)(
+                    self.lm_head.weight, hidden_states, targets,
+                )
+            else:
+                # Small local CPU/MPS tests; Liger's kernels require a supported accelerator.
+                loss = F.cross_entropy(self.lm_head(hidden_states).float(), targets)
+        else:
+            # [B, S_logits, d_model] -> [B, S_logits, vocab_size]; -0 keeps all S.
+            logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(output.last_hidden_state[:, -logits_to_keep:, :])
         return FWQwen3CausalLMOutput(
             loss=loss, logits=logits, state=output.state,
             past_key_values=output.past_key_values, hidden_states=output.hidden_states,
