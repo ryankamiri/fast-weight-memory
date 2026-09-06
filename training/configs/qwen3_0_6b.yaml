@@ -40,9 +40,9 @@ training:
   gradient_accumulation_steps: 16
   gradient_checkpointing: true
   max_grad_norm: 1.0
-  eval_every_steps: 100
+  eval_every_steps: 10
   eval_at_end: true
-  log_every_steps: 10
+  log_every_steps: 1
 
 wandb:
   project: fast-weight-memory
