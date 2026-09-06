@@ -12,9 +12,6 @@
 
 set -eo pipefail
 
-# Activate before enabling nounset: Conda activation hooks may read unset variables.
-module load anaconda
-source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate fast-weight-memory
 set -u
 
