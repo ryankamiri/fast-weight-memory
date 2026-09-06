@@ -12,6 +12,7 @@
 
 set -eo pipefail
 
+source /shared/EL9/explorer/anaconda3/2024.06/etc/profile.d/conda.sh
 conda activate fast-weight-memory
 set -u
 
