@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=08:00:00
-#SBATCH --output=fs-qwen-%j.log
-#SBATCH --error=fs-qwen-%j.log
+#SBATCH --output=logs/fs-qwen-%j.log
+#SBATCH --error=logs/fs-qwen-%j.log
 
 set -eo pipefail
 

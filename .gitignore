@@ -6,3 +6,5 @@ __pycache__/
 /wandb/
 /fs-qwen-*.out
 /fs-qwen-*.err
+/logs/*
+!/logs/.gitkeep
