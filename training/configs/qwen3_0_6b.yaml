@@ -2,7 +2,7 @@
 model:
   model_id: Qwen/Qwen3-0.6B-Base
   revision: null
-  fast_weight_layers: []  # Baseline; restore [0, 7, 14, 21] for fast weights.
+  fast_weight_layers: [0, 7, 14, 21]
   teacher_window_size: 8192
   student_window_size: 4096
   chunk_size: 4096
@@ -11,6 +11,7 @@ model:
   use_conv: true
   conv_kernel_size: 5
   dynamic_beta: true
+  normalize_student_features: false 
 
 data:
   dataset_id: ryankamiri/prolong-qwen
@@ -47,4 +48,4 @@ training:
 wandb:
   project: fast-weight-memory
   entity: ryanamiri05-northeastern-university
-  name: qwen3-0.6b-baseline-64k
+  name: qwen3-0.6b-cpt-64k

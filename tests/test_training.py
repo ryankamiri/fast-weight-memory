@@ -51,6 +51,8 @@ class TrainingConfigTests(unittest.TestCase):
     def test_yaml_defaults(self):
         config = load_config(Path(__file__).resolve().parents[1] / "training/configs/qwen3_0_6b.yaml")
         expected = TrainingConfig()
+        expected.training.eval_every_steps = 10
+        expected.training.log_every_steps = 1
         expected.wandb.entity = "ryanamiri05-northeastern-university"
         expected.wandb.name = "qwen3-0.6b-cpt-64k"
         self.assertEqual(config, expected)

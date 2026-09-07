@@ -7,7 +7,13 @@ from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.qwen3.modeling_qwen3 import Qwen3PreTrainedModel
-from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
+
+try:
+    from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
+except ModuleNotFoundError as error:
+    if error.name != "liger_kernel":
+        raise
+    LigerFusedLinearCrossEntropyLoss = None
 
 from .configuration import FWQwen3Config
 from .mlp import FWQwen3MLP
@@ -72,6 +78,8 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
             hidden_states: Float[torch.Tensor, "N d_model"] = output.last_hidden_state[:, :-1].reshape(-1, self.config.hidden_size)
             targets: Int[torch.Tensor, "N"] = labels[:, 1:].reshape(-1).to(hidden_states.device)
             if hidden_states.is_cuda:
+                if LigerFusedLinearCrossEntropyLoss is None:
+                    raise ImportError("CUDA loss requires Liger.")
                 # Fuse projection + loss so full [B, S, vocab_size] logits never exist.
                 loss = LigerFusedLinearCrossEntropyLoss(accum_dtype=torch.float32)(
                     self.lm_head.weight, hidden_states, targets,

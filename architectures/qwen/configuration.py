@@ -17,6 +17,7 @@ class FWQwen3Config(Qwen3Config):
         use_conv: bool = True,
         conv_kernel_size: int = 5,
         dynamic_beta: bool = True,
+        normalize_student_features: bool = False,
         **kwargs,
     ):
         kwargs.pop("model_type", None)
@@ -41,3 +42,4 @@ class FWQwen3Config(Qwen3Config):
         self.use_conv = use_conv
         self.conv_kernel_size = conv_kernel_size
         self.dynamic_beta = dynamic_beta
+        self.normalize_student_features = normalize_student_features

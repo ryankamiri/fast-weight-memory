@@ -26,6 +26,7 @@ class ModelConfig:
     use_conv: bool = True
     conv_kernel_size: int = 5
     dynamic_beta: bool = True
+    normalize_student_features: bool = False
 
 
 @dataclass

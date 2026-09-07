@@ -8,3 +8,5 @@ __pycache__/
 /fs-qwen-*.err
 /logs/*
 !/logs/.gitkeep
+/output/
+/experiment_results/

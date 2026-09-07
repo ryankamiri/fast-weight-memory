@@ -49,6 +49,9 @@ class DecoderTests(unittest.TestCase):
 
     def test_dual_residuals_match_manual_composition_and_gradients(self):
         layer = self.fast_layer()
+        # Exercise active writes rather than the zero-write initialization.
+        with torch.no_grad():
+            layer.mlp.student_conv.weight[..., -1] = 1
         kwargs = self.inputs()
         (teacher, student), _ = layer.self_attn(layer.input_layernorm(self.x), **kwargs)
         teacher_residual = self.x + teacher

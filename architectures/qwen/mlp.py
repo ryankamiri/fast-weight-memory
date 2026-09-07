@@ -25,6 +25,7 @@ class FWQwen3MLP(Qwen3MLP):
         use_conv: bool = True,
         conv_kernel_size: int = 5, 
         dynamic_beta: bool = True,
+        normalize_student_features: bool = False,
     ):
         super().__init__(config)
         if type(chunk_size) is not int or chunk_size < 1:
@@ -36,6 +37,7 @@ class FWQwen3MLP(Qwen3MLP):
         self.is_fast_weight_layer = is_fast_weight_layer
         self.chunk_size = chunk_size
         self.lr = float(lr)
+        self.normalize_student_features = normalize_student_features
 
         if is_fast_weight_layer:
             self.W_proj = nn.Parameter(torch.empty(self.hidden_size, self.hidden_size)) if use_projection else None
@@ -150,8 +152,10 @@ class FWQwen3MLP(Qwen3MLP):
                 correction = correction @ self.W_proj
             # Scale each token's output correction by its learned write gate beta.
             r = (beta[:, start:end] * correction).float()
-            # L2-normalize each token's student features to form its memory write key.
-            k = F.normalize(z_student_hat, p=2, dim=-1, eps=1e-6).float()
+            k = z_student_hat
+            if self.normalize_student_features:
+                k = F.normalize(k, p=2, dim=-1, eps=1e-6)
+            k = k.float()
             state.pending_r = r if state.pending_r is None else torch.cat((state.pending_r, r), dim=1)
             state.pending_k = k if state.pending_k is None else torch.cat((state.pending_k, k), dim=1)
 

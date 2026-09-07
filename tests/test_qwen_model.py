@@ -343,6 +343,15 @@ class ModelTests(unittest.TestCase):
             self.assertTrue(torch.isfinite(grad).all())
             self.assertGreater(grad.abs().sum().item(), 0)
 
+    def test_student_normalization_config_roundtrip(self):
+        self.assertFalse(self.config().normalize_student_features)
+        for enabled in (False, True):
+            config = self.config(normalize_student_features=enabled)
+            restored = FWQwen3Config.from_dict(config.to_dict())
+            model = FWQwen3Model(restored)
+            for layer in model.layers:
+                self.assertEqual(layer.mlp.normalize_student_features, enabled)
+
     def test_reject_wrong_cache_geometry_and_old_full_history_mask(self):
         model = FWQwen3Model(self.config()).eval()
         for cache in (SlidingWindowKVCache(3, 2), SlidingWindowKVCache(1, 5)):

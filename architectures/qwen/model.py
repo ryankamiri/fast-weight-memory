@@ -49,6 +49,7 @@ class FWQwen3Model(Qwen3PreTrainedModel):
                 use_conv=config.use_conv,
                 conv_kernel_size=config.conv_kernel_size,
                 dynamic_beta=config.dynamic_beta,
+                normalize_student_features=config.normalize_student_features,
             )
             for layer_idx in range(config.num_hidden_layers)
         ])

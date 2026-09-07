@@ -71,8 +71,25 @@ class MLPTests(unittest.TestCase):
             for name, value in model.state_dict().items():
                 torch.testing.assert_close(value, original[name])
 
+    def test_optional_student_key_normalization(self):
+        raw = self.model(use_conv=False)
+        self.assertFalse(raw.normalize_student_features)
+        normalized = copy.deepcopy(raw)
+        normalized.normalize_student_features = True
+        for model in (raw, normalized):
+            z = model.act_fn(model.gate_proj(self.student)) * model.up_proj(self.student)
+            keys = F.normalize(z, p=2, dim=-1, eps=1e-6) if model.normalize_student_features else z
+            _, pending = model(self.teacher[:, :2], self.student[:, :2])
+            torch.testing.assert_close(pending.pending_k, keys[:, :2].float())
+            teacher_z = model.act_fn(model.gate_proj(self.teacher)) * model.up_proj(self.teacher)
+            correction = model.down_proj(teacher_z[:, :3] - z[:, :3]) @ model.W_proj
+            beta = (self.student[:, :3] @ model.beta_proj).sigmoid().unsqueeze(-1)
+            expected = model.lr * ((beta * correction).float().transpose(1, 2) @ keys[:, :3].float())
+            _, committed = model(self.teacher[:, :3], self.student[:, :3])
+            torch.testing.assert_close(committed.W_fast, expected)
+
     def test_independent_chunk_recurrence(self):
-        model = self.model(use_conv=False)
+        model = self.model(use_conv=False, normalize_student_features=True)
         with torch.no_grad():
             model.W_proj.normal_()
             model.beta_proj.normal_()
