@@ -15,7 +15,8 @@ from architectures.qwen.causal_lm import FWQwen3ForCausalLM
 from architectures.qwen.configuration import FWQwen3Config
 from data.dataloader import create_dataloader
 from .config import TrainingConfig, load_config
-from .engine import build_scheduler, fast_weight_metrics, train
+from .engine import Progress, build_scheduler, fast_weight_metrics, train
+from .checkpoints import ModelCheckpoints
 
 
 def seed_everything(seed: int):
@@ -105,8 +106,8 @@ def main():
 
     def request_stop(signum, frame):
         if stop.is_set():
-            raise KeyboardInterrupt("Second interrupt: aborting without saving weights")
-        print("Stop requested. Finishing the current microbatch; final validation is best-effort.", flush=True)
+            return
+        print("Stop requested. Skipping final validation and saving the final model at the next safe boundary.", flush=True)
         stop.set()
 
     signal.signal(signal.SIGINT, request_stop)
@@ -126,7 +127,24 @@ def main():
             run.log(metrics)
             print(" | ".join(f"{key}={value:.6g}" for key, value in metrics.items()), flush=True)
 
-        train(model, train_loader, val_loader, optimizer, scheduler, config, device, log, stop.is_set)
+        checkpoints = ModelCheckpoints(config, run.id)
+        progress = Progress()
+        reason = "exception"
+        try:
+            train(
+                model, train_loader, val_loader, optimizer, scheduler, config, device, log,
+                stop.is_set, on_validation=checkpoints.on_validation, progress=progress,
+            )
+            reason = "signal" if stop.is_set() else "completed"
+        finally:
+            if stop.is_set():
+                reason = "signal"
+            try:
+                checkpoints.save_final(model, progress, reason)
+            except Exception as error:
+                if reason != "exception" and not stop.is_set():
+                    raise
+                print(f"Final model save failed: {error}", flush=True)
 
 
 if __name__ == "__main__":

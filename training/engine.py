@@ -108,7 +108,7 @@ def build_scheduler(optimizer, config: TrainingConfig):
 
 
 @torch.no_grad()
-def validate(model, dataloader, device: torch.device) -> dict[str, float]:
+def validate(model, dataloader, device: torch.device, should_stop=lambda: False) -> dict[str, float] | None:
     was_training = model.training
     model.eval()
     loss_sum = 0.0
@@ -117,6 +117,8 @@ def validate(model, dataloader, device: torch.device) -> dict[str, float]:
     collected = {}
     try:
         for batch in dataloader:
+            if should_stop():
+                return None
             batch = {name: value.to(device, non_blocking=True) for name, value in batch.items()}
             count = prediction_count(batch["labels"])
             if count == 0:
@@ -128,6 +130,8 @@ def validate(model, dataloader, device: torch.device) -> dict[str, float]:
             tokens += count
             records += batch["input_ids"].shape[0]
             del output, batch
+        if should_stop():
+            return None  # Never select a best checkpoint from partial validation.
     finally:
         model.train(was_training)
     if tokens == 0:
@@ -148,9 +152,11 @@ def train(
     device: torch.device,
     log: Callable[[dict], None],
     should_stop: Callable[[], bool],
+    on_validation=None,
+    progress: Progress | None = None,
 ) -> Progress:
     """Repeat epochs until max_steps successful updates or an external stop."""
-    progress = Progress()
+    progress = Progress() if progress is None else progress
     group = Accumulation()
     collected = {}
     model.train()
@@ -182,6 +188,9 @@ def train(
             # Do not retain the logits or returned fast-weight state across calls.
             del output, batch
             loss_value = loss.detach().item()
+            if should_stop():
+                del loss
+                break
             # we have a nan in the loss
             if not math.isfinite(loss_value):
                 progress.nan_losses += int(math.isnan(loss_value))
@@ -198,6 +207,8 @@ def train(
             # Match TTCD: average the microbatch gradients over this update.
             (loss / config.training.gradient_accumulation_steps).backward()
             del loss
+            if should_stop():
+                break
             group.batches += 1
             group.prediction_tokens += count
             group.input_tokens += input_tokens
@@ -247,8 +258,12 @@ def train(
 
             if progress.step % config.training.eval_every_steps == 0 and not should_stop():
                 # Run val
-                log(progress.metrics() | validate(model, val_loader, device))
-                last_validation_step = progress.step
+                metrics = validate(model, val_loader, device, should_stop)
+                if metrics is not None:
+                    log(progress.metrics() | metrics)
+                    if on_validation is not None:
+                        on_validation(model, progress, metrics)
+                    last_validation_step = progress.step
             group_started = time.perf_counter()
             if progress.step >= config.training.max_steps:
                 break
@@ -258,6 +273,10 @@ def train(
 
     # A partial accumulation group is discarded, never applied on shutdown.
     optimizer.zero_grad()
-    if config.training.eval_at_end and last_validation_step != progress.step:
-        log(progress.metrics() | validate(model, val_loader, device))
+    if config.training.eval_at_end and last_validation_step != progress.step and not should_stop():
+        metrics = validate(model, val_loader, device, should_stop)
+        if metrics is not None:
+            log(progress.metrics() | metrics)
+            if on_validation is not None:
+                on_validation(model, progress, metrics)
     return progress

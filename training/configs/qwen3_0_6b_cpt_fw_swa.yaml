@@ -1,4 +1,3 @@
-
 model:
   model_id: Qwen/Qwen3-0.6B-Base
   revision: null
@@ -53,4 +52,4 @@ checkpoints:
 wandb:
   project: fast-weight-memory
   entity: ryanamiri05-northeastern-university
-  name: qwen3-0.6b-cpt-64k
+  name: qwen3-0.6b-cpt-fw-swa-64k

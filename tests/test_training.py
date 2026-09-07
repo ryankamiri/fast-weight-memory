@@ -66,7 +66,7 @@ class TrainingConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "overlap"):
             config.validate()
         config.data.train = RecordRange(64)
-        config.scheduler.schedule_steps = 200
+        config.scheduler.schedule_steps = config.scheduler.warmup_steps
         with self.assertRaisesRegex(ValueError, "warmup"):
             config.validate()
 
@@ -146,6 +146,7 @@ class TrainingLoopTests(unittest.TestCase):
         return config
 
     def run_loop(self, model, loader, config, successful_steps=2):
+        config.training.max_steps = min(config.training.max_steps, successful_steps)
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1)
         logs = []
@@ -161,7 +162,7 @@ class TrainingLoopTests(unittest.TestCase):
             progress = train(
                 model, loader, TinyLoader([batch(2)]), optimizer, scheduler,
                 config, torch.device("cpu"), logs.append,
-                lambda: updates >= successful_steps,
+                lambda: False,
             )
         return progress, logs, scheduler
 

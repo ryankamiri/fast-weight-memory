@@ -32,6 +32,13 @@ Edit [training/configs/qwen3_0_6b.yaml](training/configs/qwen3_0_6b.yaml):
 - `optimizer` / `scheduler`: learning rate, warmup, and cosine decay.
 - `training`: update limit, gradient accumulation, seed, and validation frequency.
 - `wandb`: project, account, and run name. Slurm job IDs are appended automatically.
+- `checkpoints`: output directory and switches for best-validation and final model saves.
+
+Models are saved to `checkpoints/<wandb-run-id>/best` and `final`. Best is replaced
+only when validation loss improves. Saves contain model weights, model config,
+and training metadata, not optimizer state or temporary per-book memory.
+Cancellation skips final validation and attempts a final save. Slurm requests a
+five-minute warning before timeout; forced kills cannot guarantee saving.
 
 ## Prepare data
 

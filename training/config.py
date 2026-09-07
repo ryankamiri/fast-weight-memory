@@ -52,7 +52,7 @@ class OptimizerConfig:
 
 @dataclass
 class SchedulerConfig:
-    warmup_steps: int = 200
+    warmup_steps: int = 20
     schedule_steps: int = 10000
     final_lr: float = 1e-6
 
@@ -70,6 +70,13 @@ class LoopConfig:
 
 
 @dataclass
+class CheckpointConfig:
+    output_dir: str = "checkpoints"
+    save_best: bool = True
+    save_final: bool = True
+
+
+@dataclass
 class WandbConfig:
     project: str = "fast-weight-memory"
     entity: str | None = None
@@ -84,11 +91,17 @@ class TrainingConfig:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     training: LoopConfig = field(default_factory=LoopConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
+    checkpoints: CheckpointConfig = field(default_factory=CheckpointConfig)
 
     def to_dict(self):
         return asdict(self)
 
     def validate(self):
+        if not isinstance(self.checkpoints.output_dir, str) or not self.checkpoints.output_dir.strip():
+            raise ValueError("checkpoints.output_dir must be a nonempty path")
+        for flag in (self.checkpoints.save_best, self.checkpoints.save_final):
+            if type(flag) is not bool:
+                raise ValueError("Checkpoint saving flags must be booleans")
         positive_integers = {
             "max_steps": self.training.max_steps,
             "batch_size": self.data.batch_size,
@@ -141,6 +154,7 @@ def load_config(path: str | Path) -> TrainingConfig:
     section_types = {
         "model": ModelConfig, "data": DataConfig, "optimizer": OptimizerConfig,
         "scheduler": SchedulerConfig, "training": LoopConfig, "wandb": WandbConfig,
+        "checkpoints": CheckpointConfig,
     }
     unknown = sections.keys() - section_types.keys()
     if unknown:
