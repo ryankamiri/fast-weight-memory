@@ -34,7 +34,7 @@ class FWQwen3Model(Qwen3PreTrainedModel):
     _supports_flash_attn = False
     _supports_flex_attn = False
 
-    def __init__(self, config: FWQwen3Config):
+    def __init__(self, config: FWQwen3Config, metrics_fn=None):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -50,6 +50,7 @@ class FWQwen3Model(Qwen3PreTrainedModel):
                 conv_kernel_size=config.conv_kernel_size,
                 dynamic_beta=config.dynamic_beta,
                 normalize_student_features=config.normalize_student_features,
+                metrics_fn=metrics_fn,
             )
             for layer_idx in range(config.num_hidden_layers)
         ])

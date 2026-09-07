@@ -25,6 +25,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
         conv_kernel_size: int = 5,
         dynamic_beta: bool = True,
         normalize_student_features: bool = False,
+        metrics_fn=None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -44,6 +45,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
             conv_kernel_size=conv_kernel_size,
             dynamic_beta=dynamic_beta,
             normalize_student_features=normalize_student_features,
+            metrics_fn=metrics_fn,
         )
         self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

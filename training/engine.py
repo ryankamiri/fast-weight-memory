@@ -9,6 +9,38 @@ from typing import Callable
 import torch
 
 from .config import TrainingConfig
+from architectures.qwen.mlp import FWQwen3MLP
+
+
+def fast_weight_metrics(base_weight, fast_weight, base_output, fast_output):
+    """Optional model callback: one ratio per record for the current chunk."""
+    base_norm = torch.linalg.vector_norm(base_weight.float()).clamp_min(1e-8)
+    state_norm = torch.linalg.vector_norm(fast_weight.float(), dim=(-2, -1))
+    base_rms = base_output.float().square().mean(dim=(1, 2)).sqrt()
+    fast_rms = fast_output.float().square().mean(dim=(1, 2)).sqrt()
+    return {
+        "state_relative_norm": state_norm / base_norm,
+        "read_relative_rms": fast_rms / base_rms.clamp_min(1e-8),
+    }
+
+
+def collect_metrics(model, collected):
+    # Read once before backward. Checkpoint recomputation must not be counted.
+    for layer_name, module in model.named_modules():
+        if isinstance(module, FWQwen3MLP):
+            for chunk in module.chunk_metrics:
+                for name, values in chunk.items():
+                    collected.setdefault(f"{layer_name}/{name}", []).append(values.detach())
+            module.chunk_metrics = []
+
+
+def summarize_metrics(collected, phase):
+    result = {}
+    for name, chunks in collected.items():
+        values = torch.cat(chunks)
+        result[f"{phase}/fw/{name}_mean"] = values.mean().item()
+        result[f"{phase}/fw/{name}_max"] = values.max().item()
+    return result
 
 
 @dataclass
@@ -82,6 +114,7 @@ def validate(model, dataloader, device: torch.device) -> dict[str, float]:
     loss_sum = 0.0
     tokens = 0
     records = 0
+    collected = {}
     try:
         for batch in dataloader:
             batch = {name: value.to(device, non_blocking=True) for name, value in batch.items()}
@@ -90,6 +123,7 @@ def validate(model, dataloader, device: torch.device) -> dict[str, float]:
                 raise ValueError("Validation batch has no next-token targets")
             with precision_context(device):
                 output = model(**batch, state=None, use_cache=False)
+            collect_metrics(model, collected)
             loss_sum += output.loss.item() * count
             tokens += count
             records += batch["input_ids"].shape[0]
@@ -99,7 +133,9 @@ def validate(model, dataloader, device: torch.device) -> dict[str, float]:
     if tokens == 0:
         raise ValueError("Validation range has no records matching seq_len")
     loss = loss_sum / tokens
-    return {"val/loss": loss, "val/perplexity": perplexity(loss), "val/records": records}
+    metrics = {"val/loss": loss, "val/perplexity": perplexity(loss), "val/records": records}
+    metrics.update(summarize_metrics(collected, "val"))
+    return metrics
 
 
 def train(
@@ -116,6 +152,7 @@ def train(
     """Repeat epochs until max_steps successful updates or an external stop."""
     progress = Progress()
     group = Accumulation()
+    collected = {}
     model.train()
     optimizer.zero_grad()
     group_started = time.perf_counter()
@@ -141,6 +178,7 @@ def train(
             with precision_context(device):
                 output = model(**batch, state=None, use_cache=False)
                 loss = output.loss
+            collect_metrics(model, collected)
             # Do not retain the logits or returned fast-weight state across calls.
             del output, batch
             loss_value = loss.detach().item()
@@ -151,6 +189,7 @@ def train(
                 progress.skipped_updates += 1
                 optimizer.zero_grad()
                 group = Accumulation()
+                collected = {}
                 del loss
                 log(progress.metrics())
                 group_started = time.perf_counter()
@@ -177,6 +216,7 @@ def train(
                 progress.skipped_updates += 1
                 optimizer.zero_grad()
                 group = Accumulation()
+                collected = {}
                 log(progress.metrics())
                 group_started = time.perf_counter()
                 continue
@@ -200,8 +240,10 @@ def train(
                 }
                 if device.type == "cuda":
                     metrics["gpu/peak_memory_gib"] = torch.cuda.max_memory_allocated(device) / 2**30
+                metrics.update(summarize_metrics(collected, "train"))
                 log(metrics)
             group = Accumulation()
+            collected = {}
 
             if progress.step % config.training.eval_every_steps == 0 and not should_stop():
                 # Run val

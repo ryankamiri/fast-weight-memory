@@ -26,6 +26,7 @@ class FWQwen3MLP(Qwen3MLP):
         conv_kernel_size: int = 5, 
         dynamic_beta: bool = True,
         normalize_student_features: bool = False,
+        metrics_fn=None,
     ):
         super().__init__(config)
         if type(chunk_size) is not int or chunk_size < 1:
@@ -38,6 +39,8 @@ class FWQwen3MLP(Qwen3MLP):
         self.chunk_size = chunk_size
         self.lr = float(lr)
         self.normalize_student_features = normalize_student_features
+        self.metrics_fn = metrics_fn
+        self.chunk_metrics = []
 
         if is_fast_weight_layer:
             self.W_proj = nn.Parameter(torch.empty(self.hidden_size, self.hidden_size)) if use_projection else None
@@ -102,6 +105,7 @@ class FWQwen3MLP(Qwen3MLP):
         student_hidden_states: Float[torch.Tensor, "B S d_model"] | None = None,
         state: FWMLPState | None = None,
     ) -> Float[torch.Tensor, "B S d_model"] | tuple[Float[torch.Tensor, "B S d_model"], FWMLPState]:
+        self.chunk_metrics = []
         if not self.is_fast_weight_layer:
             if state is not None:
                 raise ValueError("state requires is_fast_weight_layer=True")
@@ -126,6 +130,7 @@ class FWQwen3MLP(Qwen3MLP):
 
         # Chunk updates
         outputs: list[Float[torch.Tensor, "B S_chunk d_model"]] = []
+        chunk_metrics = []
         start = 0
         while start < S:
             end = min(S, start + self.chunk_size - state.pending_count)
@@ -140,9 +145,18 @@ class FWQwen3MLP(Qwen3MLP):
             # Read the incoming state BEFORE committing this chunk's writes.
             z_output: Float[torch.Tensor, "B S_chunk d_mlp"] = z_teacher[:, start:end]
             # [B, S_chunk, d_mlp] @ [B, d_mlp, d_model] -> [B, S_chunk, d_model].
-            output: Float[torch.Tensor, "B S_chunk d_model"] = self.down_proj(z_output) + (
+            base_output: Float[torch.Tensor, "B S_chunk d_model"] = self.down_proj(z_output)
+            fast_output: Float[torch.Tensor, "B S_chunk d_model"] = (
                 z_output @ state.W_fast.to(z_output.dtype).transpose(1, 2)
             )
+            output: Float[torch.Tensor, "B S_chunk d_model"] = base_output + fast_output
+            if self.metrics_fn is not None:
+                # Callback returns detached scalar diagnostics, not model state.
+                with torch.no_grad():
+                    chunk_metrics.append(self.metrics_fn(
+                        self.W_base.detach(), state.W_fast.detach(),
+                        base_output.detach(), fast_output.detach(),
+                    ))
             outputs.append(output)
 
             diff: Float[torch.Tensor, "B S_chunk d_mlp"] = z_teacher_hat - z_student_hat
@@ -169,4 +183,5 @@ class FWQwen3MLP(Qwen3MLP):
                 state.teacher_conv_state = None
                 state.student_conv_state = None
             start = end
+        self.chunk_metrics = chunk_metrics
         return torch.cat(outputs, dim=1), state
