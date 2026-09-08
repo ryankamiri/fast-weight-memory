@@ -11,6 +11,7 @@ import torch
 from openai import APIConnectionError
 import httpx
 import yaml
+from datasets import Dataset
 
 from architectures.qwen.causal_lm import FWQwen3ForCausalLM
 from architectures.qwen.configuration import FWQwen3Config
@@ -50,8 +51,19 @@ class LongMemEvalTests(unittest.TestCase):
         original = copy.deepcopy(source)
         prepared = prepare_example(source, CharacterTokenizer())
         for name, value in original.items():
-            self.assertEqual(prepared[name], value)
+            self.assertEqual(prepared[name], str(value) if name == "answer" else value)
         self.assertEqual(source, original)
+
+    def test_mixed_answer_types_serialize_to_parquet(self):
+        sources = [example(), {**example(), "question_id": "numeric", "answer": 42}]
+        rows = [prepare_example(source, CharacterTokenizer()) for source in sources]
+        dataset = Dataset.from_list(rows)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "test.parquet"
+            dataset.to_parquet(path)
+            restored = Dataset.from_parquet(str(path))
+        self.assertEqual(list(restored["answer"]), [sources[0]["answer"], "42"])
+        self.assertTrue(set(sources[0]).issubset(restored.column_names))
 
     def test_three_configs_match_their_launchers(self):
         root = Path(__file__).resolve().parents[1]

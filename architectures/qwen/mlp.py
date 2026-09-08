@@ -36,6 +36,7 @@ class FWQwen3MLP(Qwen3MLP):
         if not math.isfinite(lr) or lr < 0:
             raise ValueError("lr must be finite and nonnegative")
         self.is_fast_weight_layer = is_fast_weight_layer
+        self.fast_weight_reads = True
         self.chunk_size = chunk_size
         self.lr = float(lr)
         self.normalize_student_features = normalize_student_features
@@ -111,7 +112,7 @@ class FWQwen3MLP(Qwen3MLP):
                 raise ValueError("state requires is_fast_weight_layer=True")
             return super().forward(hidden_states)
         
-        if student_hidden_states is None:
+        if self.fast_weight_reads and student_hidden_states is None:
             raise ValueError("Fast-weight mode requires student_hidden_states")
 
         B, S, d_model = hidden_states.shape
@@ -122,6 +123,10 @@ class FWQwen3MLP(Qwen3MLP):
         else:
             # Fields are replaced below, never modified in-place.
             state = replace(state)
+
+        if not self.fast_weight_reads:
+            # Whole-pass ablation: keep the state unchanged and skip all FW work.
+            return super().forward(hidden_states), state
 
         z_teacher: Float[torch.Tensor, "B S d_mlp"] = self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states)
         z_student: Float[torch.Tensor, "B S d_mlp"] = self.act_fn(self.gate_proj(student_hidden_states)) * self.up_proj(student_hidden_states)

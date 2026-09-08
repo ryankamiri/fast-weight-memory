@@ -45,6 +45,9 @@ training:
   eval_at_end: true
   log_every_steps: 1
 
+validation:
+  compare_without_fast_weight_reads: true
+
 checkpoints:
   output_dir: checkpoints
   save_best: true

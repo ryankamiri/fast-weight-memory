@@ -71,6 +71,11 @@ class LoopConfig:
 
 
 @dataclass
+class ValidationConfig:
+    compare_without_fast_weight_reads: bool = True
+
+
+@dataclass
 class CheckpointConfig:
     output_dir: str = "checkpoints"
     save_best: bool = True
@@ -91,6 +96,7 @@ class TrainingConfig:
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     training: LoopConfig = field(default_factory=LoopConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
     checkpoints: CheckpointConfig = field(default_factory=CheckpointConfig)
 
@@ -98,6 +104,8 @@ class TrainingConfig:
         return asdict(self)
 
     def validate(self):
+        if type(self.validation.compare_without_fast_weight_reads) is not bool:
+            raise ValueError("compare_without_fast_weight_reads must be a boolean")
         if not isinstance(self.checkpoints.output_dir, str) or not self.checkpoints.output_dir.strip():
             raise ValueError("checkpoints.output_dir must be a nonempty path")
         for flag in (self.checkpoints.save_best, self.checkpoints.save_final):
@@ -157,6 +165,7 @@ def load_config(path: str | Path) -> TrainingConfig:
         "model": ModelConfig, "data": DataConfig, "optimizer": OptimizerConfig,
         "scheduler": SchedulerConfig, "training": LoopConfig, "wandb": WandbConfig,
         "checkpoints": CheckpointConfig,
+        "validation": ValidationConfig,
     }
     unknown = sections.keys() - section_types.keys()
     if unknown:

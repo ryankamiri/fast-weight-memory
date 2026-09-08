@@ -29,6 +29,21 @@ class MLPTests(unittest.TestCase):
         torch.testing.assert_close(model(self.teacher), base(self.teacher), rtol=0, atol=0)
         self.assertFalse(hasattr(model, "W_fast"))
 
+    def test_disable_reads_preserves_state_and_base_output(self):
+        model = self.model()
+        state = FWMLPState(W_fast=torch.randn(2, 8, 12))
+        before = {name: value.clone() for name, value in model.state_dict().items()}
+        enabled, _ = model(self.teacher, self.student, state)
+        model.fast_weight_reads = False
+        disabled, disabled_state = model(self.teacher, state=state)
+        base = model.down_proj(model.act_fn(model.gate_proj(self.teacher)) * model.up_proj(self.teacher))
+        torch.testing.assert_close(disabled, base)
+        self.assertFalse(torch.allclose(enabled, disabled))
+        for name in vars(state):
+            torch.testing.assert_close(getattr(state, name), getattr(disabled_state, name))
+        for name, value in model.state_dict().items():
+            torch.testing.assert_close(value, before[name])
+
     def test_fast_parameter_defaults_and_reset(self):
         model = self.model()
         torch.manual_seed(123)

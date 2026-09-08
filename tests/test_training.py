@@ -13,6 +13,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 from training.config import RecordRange, TrainingConfig, load_config
 from training.engine import build_scheduler, perplexity, train, validate
 from training.train import load_model, verify_loading
+from architectures.qwen.mlp import FWQwen3MLP
 
 
 class TinyModel(nn.Module):
@@ -96,6 +97,40 @@ class TrainingConfigTests(unittest.TestCase):
 
 
 class TrainingLoopTests(unittest.TestCase):
+    def test_paired_validation_and_restore(self):
+        model = TinyModel()
+        model.mlp = FWQwen3MLP(Qwen3Config(hidden_size=8, intermediate_size=12),
+                              is_fast_weight_layer=True)
+        def forward(input_ids, labels, state=None, use_cache=False):
+            self.assertIsNone(state)
+            self.assertFalse(use_cache)
+            self.assertFalse(model.training)
+            self.assertFalse(torch.is_grad_enabled())
+            return SimpleNamespace(loss=torch.tensor(2.0 if model.mlp.fast_weight_reads else 3.0))
+        model.forward = forward
+        loader = TinyLoader([batch(1), batch(2)])
+        metrics = validate(model, loader, torch.device("cpu"), compare_without_fast_weight_reads=True)
+        self.assertEqual(metrics["val/loss"], 2.0)
+        self.assertEqual(metrics["val/loss_without_fw_reads"], 3.0)
+        self.assertEqual(metrics["val/fw_read_loss_improvement"], 1.0)
+        self.assertAlmostEqual(metrics["val/perplexity_without_fw_reads"], math.exp(3))
+        self.assertTrue(model.training)
+        self.assertTrue(model.mlp.fast_weight_reads)
+        with patch("training.engine._validate_pass", side_effect=[metrics, RuntimeError("failed")]):
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                validate(model, loader, torch.device("cpu"), compare_without_fast_weight_reads=True)
+        self.assertTrue(model.mlp.fast_weight_reads)
+        with patch("training.engine._validate_pass", side_effect=[metrics, None]):
+            self.assertIsNone(validate(model, loader, torch.device("cpu"),
+                                       compare_without_fast_weight_reads=True))
+        self.assertTrue(model.mlp.fast_weight_reads)
+
+    def test_baseline_validation_does_not_repeat(self):
+        model = TinyModel()
+        validate(model, TinyLoader([batch(1)]), torch.device("cpu"),
+                 compare_without_fast_weight_reads=True)
+        self.assertEqual(len(model.calls), 1)
+
     def test_max_steps_stops_without_external_signal_and_validates_once(self):
         model = TinyModel()
         config = self.config()

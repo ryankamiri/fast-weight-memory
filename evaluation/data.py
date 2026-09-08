@@ -38,6 +38,7 @@ def prepare_example(example, tokenizer):
     ]
     return {
         **example,
+        "answer": str(example["answer"]),
         "abstention": example["question_id"].endswith("_abs"),
         "history_ids": prefix_ids + history_ids,
         "question_ids": question_ids,

@@ -108,7 +108,7 @@ def build_scheduler(optimizer, config: TrainingConfig):
 
 
 @torch.no_grad()
-def validate(model, dataloader, device: torch.device, should_stop=lambda: False) -> dict[str, float] | None:
+def _validate_pass(model, dataloader, device: torch.device, should_stop) -> dict[str, float] | None:
     was_training = model.training
     model.eval()
     loss_sum = 0.0
@@ -140,6 +140,31 @@ def validate(model, dataloader, device: torch.device, should_stop=lambda: False)
     metrics = {"val/loss": loss, "val/perplexity": perplexity(loss), "val/records": records}
     metrics.update(summarize_metrics(collected, "val"))
     return metrics
+
+
+def validate(model, dataloader, device: torch.device, should_stop=lambda: False,
+             compare_without_fast_weight_reads: bool = False) -> dict[str, float] | None:
+    layers = [module for module in model.modules()
+              if isinstance(module, FWQwen3MLP) and module.is_fast_weight_layer]
+    previous = [module.fast_weight_reads for module in layers]
+    try:
+        for module in layers:
+            module.fast_weight_reads = True
+        metrics = _validate_pass(model, dataloader, device, should_stop)
+        if metrics is None or not compare_without_fast_weight_reads or not layers:
+            return metrics
+        for module in layers:
+            module.fast_weight_reads = False
+        without_reads = _validate_pass(model, dataloader, device, should_stop)
+        if without_reads is None:
+            return None
+        metrics["val/loss_without_fw_reads"] = without_reads["val/loss"]
+        metrics["val/perplexity_without_fw_reads"] = without_reads["val/perplexity"]
+        metrics["val/fw_read_loss_improvement"] = without_reads["val/loss"] - metrics["val/loss"]
+        return metrics
+    finally:
+        for module, enabled in zip(layers, previous):
+            module.fast_weight_reads = enabled
 
 
 def train(
@@ -258,7 +283,8 @@ def train(
 
             if progress.step % config.training.eval_every_steps == 0 and not should_stop():
                 # Run val
-                metrics = validate(model, val_loader, device, should_stop)
+                metrics = validate(model, val_loader, device, should_stop,
+                                   config.validation.compare_without_fast_weight_reads)
                 if metrics is not None:
                     log(progress.metrics() | metrics)
                     if on_validation is not None:
@@ -274,7 +300,8 @@ def train(
     # A partial accumulation group is discarded, never applied on shutdown.
     optimizer.zero_grad()
     if config.training.eval_at_end and last_validation_step != progress.step and not should_stop():
-        metrics = validate(model, val_loader, device, should_stop)
+        metrics = validate(model, val_loader, device, should_stop,
+                           config.validation.compare_without_fast_weight_reads)
         if metrics is not None:
             log(progress.metrics() | metrics)
             if on_validation is not None:

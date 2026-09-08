@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 from transformers import Qwen3Config
@@ -6,6 +7,7 @@ from transformers.cache_utils import DynamicCache
 from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer, Qwen3RotaryEmbedding
 
 from architectures.qwen.decoder import FWQwen3DecoderLayer
+from architectures.qwen.attention import sdpa_attention_forward
 
 
 class DecoderTests(unittest.TestCase):
@@ -46,6 +48,33 @@ class DecoderTests(unittest.TestCase):
         actual = layer(self.x, **kwargs)
         kwargs["attention_mask"] = kwargs.pop("teacher_attention_mask")
         torch.testing.assert_close(actual, base(self.x, **kwargs), rtol=0, atol=0)
+
+    def test_no_reads_skips_student_attention_and_writes(self):
+        layer = self.fast_layer()
+        kwargs = self.inputs()
+        (teacher, _), _ = layer.self_attn(layer.input_layernorm(self.x), **kwargs)
+        residual = self.x + teacher
+        features = layer.post_attention_layernorm(residual)
+        expected = residual + layer.mlp.down_proj(
+            layer.mlp.act_fn(layer.mlp.gate_proj(features)) * layer.mlp.up_proj(features)
+        )
+        weights = {name: value.clone() for name, value in layer.state_dict().items()}
+        layer.mlp.fast_weight_reads = False
+        kwargs.pop("student_attention_mask")
+        with patch("architectures.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention, \
+             patch.object(layer.mlp, "_convolve", side_effect=AssertionError("FW convolution ran")):
+            actual, state = layer(self.x, **kwargs)
+        self.assertEqual(attention.call_count, 1)
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(state.W_fast, torch.zeros_like(state.W_fast))
+        self.assertEqual(state.pending_count, 0)
+        self.assertEqual(layer.mlp.chunk_metrics, [])
+        for name, value in layer.state_dict().items():
+            torch.testing.assert_close(value, weights[name])
+        layer.mlp.fast_weight_reads = True
+        with patch("architectures.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention:
+            layer(self.x, **self.inputs())
+        self.assertEqual(attention.call_count, 2)
 
     def test_dual_residuals_match_manual_composition_and_gradients(self):
         layer = self.fast_layer()

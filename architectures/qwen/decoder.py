@@ -85,6 +85,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
             position_ids=position_ids,
             student_attention_mask=student_attention_mask,
             persistent_mask=persistent_mask,
+            fast_weight_reads=self.mlp.fast_weight_reads,
         )
 
         if not self.is_fast_weight_layer:
@@ -93,6 +94,13 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.mlp(hidden_states)
             return residual + hidden_states
+
+        if not self.mlp.fast_weight_reads:
+            teacher_residual = residual + attention_output
+            mlp_output, next_state = self.mlp(
+                self.post_attention_layernorm(teacher_residual), state=state,
+            )
+            return teacher_residual + mlp_output, next_state
 
         teacher_attention, student_attention = attention_output
         teacher_residual: Float[torch.Tensor, "B S d_model"] = residual + teacher_attention

@@ -38,6 +38,7 @@ class FWQwen3Attention(Qwen3Attention):
         cache_position: Int[torch.Tensor, "S"] | None = None,
         output_attentions: bool = False,
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
+        fast_weight_reads: bool = True,
     ) -> tuple[
         Float[torch.Tensor, "B S d_model"] | tuple[
             Float[torch.Tensor, "B S d_model"],
@@ -54,7 +55,7 @@ class FWQwen3Attention(Qwen3Attention):
             )
         if self.is_fast_weight_layer and output_attentions:
             raise ValueError("Dual-window SDPA does not support output_attentions=True")
-        if self.is_fast_weight_layer and (teacher_attention_mask is None or student_attention_mask is None):
+        if self.is_fast_weight_layer and (teacher_attention_mask is None or (fast_weight_reads and student_attention_mask is None)):
             raise ValueError("Dual-window mode requires prepared teacher and student attention masks")
 
         B, S, d_model = hidden_states.shape
@@ -103,6 +104,8 @@ class FWQwen3Attention(Qwen3Attention):
             scaling=self.scaling, 
             is_causal=False,
         )
+        if not fast_weight_reads:
+            return self.o_proj(teacher_output.reshape(B, S, h_q * d_head).contiguous()), None
         student_output, _ = sdpa_attention_forward(
             self, 
             query, 
