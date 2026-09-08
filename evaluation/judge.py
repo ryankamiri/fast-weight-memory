@@ -5,7 +5,9 @@ Criteria reference: https://github.com/xiaowu0162/LongMemEval/blob/main/src/eval
 
 import asyncio
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 import json
+from queue import Queue
 import random
 
 from openai import AsyncOpenAI, APIConnectionError, APIStatusError
@@ -93,45 +95,83 @@ def summarize(examples, judgments):
     }
 
 
-async def judge_all(examples, output_dir, config):
-    predictions = read_results(output_dir / "predictions.jsonl")
-    ids = {row["question_id"] for row in examples}
-    if set(predictions) != ids:
-        raise ValueError("Complete generation for every example before judging")
-    ensure_manifest(output_dir / "judge_manifest.json", {
-        "model": config["model"], "rubric_version": "longmemeval-criteria-v1",
-    })
-    path = output_dir / "judgments.jsonl"
-    judgments = read_results(path)
-    if not set(judgments) <= ids:
-        raise ValueError("Unknown question IDs in judgments")
-    if config["concurrency"] < 1:
-        raise ValueError("Judge concurrency must be positive")
-    semaphore = asyncio.Semaphore(config["concurrency"])
-    errors = []
+class BackgroundJudge:
+    """Grade saved predictions off the generation thread; JSONL is the resume ledger."""
 
-    async with AsyncOpenAI(max_retries=0, timeout=120) as client:
-        async def grade(example):
-            qid = example["question_id"]
-            if qid in judgments:
-                return
-            async with semaphore:
-                try:
-                    verdict = await request_verdict(client, example, predictions[qid]["hypothesis"], config["model"])
-                except Exception as error:
-                    if isinstance(error, APIStatusError) and error.status_code in {400, 401, 403, 404}:
-                        raise  # Invalid credentials/model/schema will not improve on another example.
-                    errors.append({"question_id": qid, "error": str(error)})
-                    print(f"Judge failed for {qid}: {error}", flush=True)
-                    return
-                result = {"question_id": qid, **verdict}
-                append_result(path, result)
-                judgments[qid] = result
-                print(f"Judged {len(judgments)}/{len(examples)}", flush=True)
-        await asyncio.gather(*(grade(example) for example in examples))
-    summary = summarize(examples, judgments)
-    summary["errors"] = errors
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(json.dumps(summary, indent=2), flush=True)
-    if errors:
-        raise RuntimeError("Some judgments failed. Re-run with --judge-only to retry missing judgments.")
+    def __init__(self, examples, output_dir, config):
+        self.examples = {row["question_id"]: row for row in examples}
+        self.output_dir = output_dir
+        self.config = config
+        if config["concurrency"] < 1:
+            raise ValueError("Judge concurrency must be positive")
+        ensure_manifest(output_dir / "judge_manifest.json", {
+            "model": config["model"], "rubric_version": "longmemeval-criteria-v1",
+        })
+        self.judgments = read_results(output_dir / "judgments.jsonl")
+        if not self.judgments.keys() <= self.examples.keys():
+            raise ValueError("Unknown question IDs in judgments")
+        self.submitted = set(self.judgments)
+        self.queue = Queue()
+        self.errors = []
+
+    def __enter__(self):
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="judge")
+        self.future = self.executor.submit(asyncio.run, self._run())
+        return self
+
+    def submit(self, prediction):
+        """Call only after the prediction has been saved to predictions.jsonl."""
+        qid = prediction["question_id"]
+        if qid not in self.examples:
+            raise ValueError(f"Unknown question ID: {qid}")
+        if qid not in self.submitted:
+            self.submitted.add(qid)
+            self.queue.put(prediction)
+
+    async def _run(self):
+        semaphore = asyncio.Semaphore(self.config["concurrency"])
+        async with AsyncOpenAI(max_retries=0, timeout=120) as client:
+            async def grade(prediction):
+                qid = prediction["question_id"]
+                async with semaphore:
+                    try:
+                        verdict = await request_verdict(
+                            client, self.examples[qid], prediction["hypothesis"], self.config["model"],
+                        )
+                        result = {"question_id": qid, **verdict}
+                        # One event-loop thread owns all judgment writes.
+                        append_result(self.output_dir / "judgments.jsonl", result)
+                        self.judgments[qid] = result
+                        print(f"Judged {len(self.judgments)}/{len(self.examples)}: {qid}", flush=True)
+                    except Exception as error:
+                        self.errors.append({"question_id": qid, "error": str(error)})
+                        print(f"Judge failed for {qid}: {error}", flush=True)
+
+            tasks = []
+            while (prediction := await asyncio.to_thread(self.queue.get)) is not None:
+                tasks.append(asyncio.create_task(grade(prediction)))
+            await asyncio.gather(*tasks)
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.queue.put(None)
+        try:
+            self.future.result()
+        except Exception as error:
+            self.errors.append({"error": str(error)})
+        finally:
+            self.executor.shutdown(wait=True)
+        summary = summarize(list(self.examples.values()), self.judgments)
+        summary["errors"] = self.errors
+        (self.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        print(json.dumps(summary, indent=2), flush=True)
+        if self.errors and exc_type is None:
+            raise RuntimeError("Some judgments failed. Re-run to retry missing judgments.")
+
+
+async def judge_all(examples, output_dir, config):
+    def run():
+        predictions = read_results(output_dir / "predictions.jsonl")
+        with BackgroundJudge(examples, output_dir, config) as judge:
+            for prediction in predictions.values():
+                judge.submit(prediction)
+    await asyncio.to_thread(run)

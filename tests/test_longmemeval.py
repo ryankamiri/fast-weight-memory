@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import tempfile
+from threading import Event
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -16,7 +17,7 @@ from datasets import Dataset
 from architectures.qwen.causal_lm import FWQwen3ForCausalLM
 from architectures.qwen.configuration import FWQwen3Config
 from evaluation.data import PREFIX, prepare_example
-from evaluation.judge import Verdict, judge_all, request_verdict, rubric, summarize
+from evaluation.judge import BackgroundJudge, Verdict, judge_all, request_verdict, rubric, summarize
 from evaluation.run import configure_model, generate_example
 from evaluation.storage import append_result, ensure_manifest, read_results
 
@@ -164,6 +165,94 @@ class LongMemEvalTests(unittest.TestCase):
         self.assertIn("insufficient", rubric(row))
         self.assertEqual(summarize([row], {})["missing"], 1)
         self.assertEqual(summarize([row], {})["scores"], {})
+
+
+class BackgroundJudgeTests(unittest.TestCase):
+    def test_nonblocking_bounded_judging_and_duplicate_submission(self):
+        started = Event()
+        release = Event()
+        active = 0
+        peak = 0
+        calls = []
+
+        async def verdict(client, row, hypothesis, model):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            calls.append(row["question_id"])
+            if active == 2:
+                started.set()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            active -= 1
+            return {"correct": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            rows = [{**example(), "question_id": str(i), "abstention": False} for i in range(4)]
+            with patch("evaluation.judge.AsyncOpenAI", return_value=AsyncMock()), \
+                 patch("evaluation.judge.request_verdict", side_effect=verdict):
+                with BackgroundJudge(rows, output, {"model": "test", "concurrency": 2}) as judge:
+                    try:
+                        for row in rows:
+                            prediction = {"question_id": row["question_id"], "hypothesis": "answer"}
+                            append_result(output / "predictions.jsonl", prediction)
+                            judge.submit(prediction)
+                            judge.submit(prediction)
+                        self.assertTrue(started.wait(5))
+                        # All generation submissions completed while the first judges are blocked.
+                        self.assertEqual(len(read_results(output / "predictions.jsonl")), 4)
+                    finally:
+                        release.set()
+            self.assertEqual(peak, 2)
+            self.assertEqual(len(calls), 4)
+            self.assertEqual(len(read_results(output / "judgments.jsonl")), 4)
+
+    def test_failure_and_interrupted_tail_resume_only_missing_judgments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            rows = [{**example(), "question_id": str(i), "abstention": False} for i in range(3)]
+            settings = {"model": "test", "concurrency": 2}
+            predictions = [{"question_id": str(i), "hypothesis": "answer"} for i in range(2)]
+            for prediction in predictions:
+                append_result(output / "predictions.jsonl", prediction)
+
+            async def verdict(client, row, hypothesis, model):
+                if row["question_id"] == "1":
+                    raise RuntimeError("network unavailable")
+                return {"correct": True}
+
+            with patch("evaluation.judge.AsyncOpenAI", return_value=AsyncMock()), \
+                 patch("evaluation.judge.request_verdict", side_effect=verdict):
+                with self.assertRaisesRegex(RuntimeError, "Some judgments failed"):
+                    asyncio.run(judge_all(rows, output, settings))
+            self.assertEqual(set(read_results(output / "judgments.jsonl")), {"0"})
+            with (output / "judgments.jsonl").open("ab") as file:
+                file.write(b'{"question_id":')
+            with patch("evaluation.judge.AsyncOpenAI", return_value=AsyncMock()), \
+                 patch("evaluation.judge.request_verdict", new_callable=AsyncMock,
+                       return_value={"correct": False}) as request:
+                asyncio.run(judge_all(rows, output, settings))
+                request.assert_awaited_once()
+                self.assertEqual(request.call_args.args[1]["question_id"], "1")
+            summary = json.loads((output / "summary.json").read_text())
+            self.assertEqual(summary["judged"], 2)
+            self.assertEqual(summary["missing"], 1)  # Third answer has not been generated yet.
+
+    def test_generation_exception_keeps_completed_judgments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            row = {**example(), "abstention": False}
+            prediction = {"question_id": row["question_id"], "hypothesis": "answer"}
+            append_result(output / "predictions.jsonl", prediction)
+            with patch("evaluation.judge.AsyncOpenAI", return_value=AsyncMock()), \
+                 patch("evaluation.judge.request_verdict", new_callable=AsyncMock,
+                       return_value={"correct": True}):
+                with self.assertRaisesRegex(RuntimeError, "generation failed"):
+                    with BackgroundJudge([row], output, {"model": "test", "concurrency": 2}) as judge:
+                        judge.submit(prediction)
+                        raise RuntimeError("generation failed")
+            self.assertIn(row["question_id"], read_results(output / "judgments.jsonl"))
 
 
 class JudgeTests(unittest.IsolatedAsyncioTestCase):

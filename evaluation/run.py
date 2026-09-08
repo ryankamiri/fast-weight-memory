@@ -1,4 +1,4 @@
-"""Generate independent LongMemEval answers, then run resumable API grading."""
+"""Generate independent LongMemEval answers while grading saved answers in the background."""
 
 import argparse
 import asyncio
@@ -17,7 +17,7 @@ import yaml
 from architectures.qwen.causal_lm import FWQwen3ForCausalLM
 from architectures.qwen.configuration import FWQwen3Config
 from evaluation.data import PROMPT_VERSION
-from evaluation.judge import judge_all
+from evaluation.judge import BackgroundJudge, judge_all
 from evaluation.storage import append_result, ensure_manifest, read_results
 from utils.seed import seed_everything
 
@@ -106,7 +106,15 @@ def main():
     if not set(predictions) <= set(ids):
         raise ValueError("Predictions contain unknown question IDs")
     
-    if not args.judge_only and len(predictions) < len(dataset):
+    # Only lightweight reference columns are needed for grading.
+    references = dataset.select_columns(["question_id", "question_type", "question", "answer", "abstention"])
+    if args.judge_only:
+        asyncio.run(judge_all(list(references), output, config["judge"]))
+        return
+
+    def generate_remaining(judge=None):
+        if len(predictions) == len(dataset):
+            return
         if not torch.cuda.is_available():
             raise RuntimeError("Evaluation expects a CUDA GPU")
         device = torch.device("cuda", 0)
@@ -131,14 +139,19 @@ def main():
             result["seconds"] = time.perf_counter() - start
             append_result(output / "predictions.jsonl", result)
             predictions[result["question_id"]] = result
-        
+            if judge is not None:
+                judge.submit(result)
             print(f"Generated {len(predictions)}/{len(dataset)}: {result['question_id']}", flush=True)
         del model
         torch.cuda.empty_cache()
-    if not args.generate_only:
-        # Only lightweight reference columns are needed for grading.
-        references = dataset.select_columns(["question_id", "question_type", "question", "answer", "abstention"])
-        asyncio.run(judge_all(list(references), output, config["judge"]))
+
+    if args.generate_only:
+        generate_remaining()
+    else:
+        with BackgroundJudge(list(references), output, config["judge"]) as judge:
+            for prediction in predictions.values():
+                judge.submit(prediction)
+            generate_remaining(judge)
 
 
 if __name__ == "__main__":
