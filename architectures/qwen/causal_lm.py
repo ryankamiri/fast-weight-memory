@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
@@ -19,6 +20,8 @@ from .configuration import FWQwen3Config
 from .mlp import FWQwen3MLP
 from .model import FWQwen3Model
 from ..states.model_state import FWModelState
+from inference.generation import GenerationOutput, sample_token
+from inference.prefill import prefill
 
 
 @dataclass
@@ -50,6 +53,83 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+
+    @torch.inference_mode()
+    @jaxtyped(typechecker=beartype)
+    def prefill(
+        self,
+        input_ids: Int[torch.Tensor, "B S"],
+        execution_block_size: int | None = None,
+        state: FWModelState | None = None,
+        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
+    ) -> FWQwen3CausalLMOutput:
+        """Prefill the backbone, then project only the final token to logits."""
+        output = prefill(
+            self.model, input_ids, execution_block_size=execution_block_size,
+            state=state, persistent_mask=persistent_mask,
+        )
+        return FWQwen3CausalLMOutput(
+            logits=self.lm_head(output.last_hidden_state[:, -1:, :]),
+            state=output.state, past_key_values=output.past_key_values,
+        )
+
+    @torch.inference_mode()
+    @jaxtyped(typechecker=beartype)
+    def generate(
+        self,
+        input_ids: Int[torch.Tensor, "1 S"],
+        state: FWModelState | None = None,
+        max_new_tokens: int = 256,
+        do_sample: bool = True,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 50,
+        eos_token_id: int | list[int] | None = None,
+        execution_block_size: int | None = None,
+        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
+        generator: torch.Generator | None = None,
+    ) -> GenerationOutput:
+        """Prefill new input, then decode one unpadded sequence with session state."""
+        if self.training:
+            raise ValueError("generate requires evaluation mode; call model.eval() first")
+        if type(max_new_tokens) is not int or max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be a positive integer")
+        if do_sample:
+            if not math.isfinite(temperature) or temperature <= 0:
+                raise ValueError("temperature must be finite and positive")
+            if not math.isfinite(top_p) or not 0 < top_p <= 1:
+                raise ValueError("top_p must be in (0, 1]")
+            if type(top_k) is not int or top_k < 0:
+                raise ValueError("top_k must be a nonnegative integer; 0 disables filtering")
+            if generator is not None and torch.device(generator.device) != input_ids.device:
+                raise ValueError("generator must be on the input device")
+        if eos_token_id is None:
+            eos_token_id = self.config.eos_token_id
+        eos_ids = [] if eos_token_id is None else eos_token_id
+        if type(eos_ids) is int:
+            eos_ids = [eos_ids]
+        if any(type(token) is not int or not 0 <= token < self.vocab_size for token in eos_ids):
+            raise ValueError("EOS token IDs must be valid vocabulary IDs")
+
+        output = self.prefill(
+            input_ids, execution_block_size=execution_block_size,
+            state=state, persistent_mask=persistent_mask,
+        )
+        generated = []
+        stop_reason = "max_new_tokens"
+        for _ in range(max_new_tokens):
+            next_token = sample_token(
+                output.logits[:, -1, :], do_sample, temperature, top_k, top_p, generator,
+            )
+            generated.append(next_token)
+            output = self(next_token, state=output.state, use_cache=True, logits_to_keep=1)
+            if next_token.item() in eos_ids:
+                stop_reason = "eos"
+                break
+        return GenerationOutput(
+            token_ids=torch.cat(generated, dim=1), state=output.state,
+            stop_reason=stop_reason,
+        )
 
     @jaxtyped(typechecker=beartype)
     def forward(

@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=fs-qwen-eval-swa
+#SBATCH --partition=gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:h200:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=08:00:00
+#SBATCH --output=logs/fs-qwen-eval-swa-%j.log
+#SBATCH --error=logs/fs-qwen-eval-swa-%j.log
+
+set -eo pipefail
+
+source /shared/EL9/explorer/anaconda3/2024.06/etc/profile.d/conda.sh
+conda activate fast-weight-memory
+set -u
+
+# Submit from the repo root. Extra arguments may select --generate-only or --judge-only.
+# The evaluator loads credentials from the repo's .env file or submitting shell.
+cd "${SLURM_SUBMIT_DIR}"
+export PYTHONUNBUFFERED=1
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=4
+
+if (( $# < 1 )); then
+    echo "Usage: sbatch $0 CHECKPOINT [OUTPUT_DIR] [extra evaluator arguments]" >&2
+    exit 2
+fi
+
+# A single process: each example owns its KV cache and fast-weight state.
+exec torchrun --standalone --nnodes=1 --nproc-per-node=1 \
+    -m evaluation.run \
+    --config evaluation/configs/longmemeval_swa.yaml \
+    --checkpoint "$1" \
+    --output-dir "${2:-output/longmemeval/swa}" "${@:3}"

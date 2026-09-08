@@ -6,7 +6,6 @@ import torch
 from architectures.cache.sliding_window import SlidingWindowKVCache
 from architectures.qwen.configuration import FWQwen3Config
 from architectures.qwen.causal_lm import FWQwen3ForCausalLM
-from inference.prefill import prefill
 
 
 class PersistentKVTests(unittest.TestCase):
@@ -44,9 +43,9 @@ class PersistentKVTests(unittest.TestCase):
         model = self.model([])
         model.config.max_persistent_tokens = 2
         ids = torch.ones(1, 4, dtype=torch.long)
-        result = prefill(model, ids, 2, persistent_mask=torch.tensor([True, False, False, False]))
+        result = model.prefill(ids, 2, persistent_mask=torch.tensor([True, False, False, False]))
         with self.assertRaisesRegex(ValueError, "max_persistent_tokens=2"):
-            prefill(model, ids, 1, state=result.state, persistent_mask=torch.ones(4, dtype=torch.bool))
+            model.prefill(ids, 1, state=result.state, persistent_mask=torch.ones(4, dtype=torch.bool))
         self.assertEqual(result.state.past_key_values.get_seq_length(), 4)
         with self.assertRaisesRegex(ValueError, "max_persistent_tokens=2"):
             model(ids, persistent_mask=torch.ones(4, dtype=torch.bool))
@@ -135,7 +134,7 @@ class PersistentKVTests(unittest.TestCase):
                 persistent[7] = True
                 reference = model(ids, persistent_mask=persistent).logits
                 for block_size in (1, 2, 6, 12):
-                    result = prefill(model, ids[:, :12], block_size, persistent_mask=persistent[:12])
+                    result = model.prefill(ids[:, :12], block_size, persistent_mask=persistent[:12])
                     torch.testing.assert_close(result.logits, reference[:, 11:12], atol=2e-6, rtol=2e-5)
                     for position in range(12, 15):
                         result = model(ids[:, position:position + 1], state=result.state, use_cache=True)
@@ -149,8 +148,8 @@ class PersistentKVTests(unittest.TestCase):
     def test_omitting_flags_matches_explicit_false(self):
         model = self.model([0])
         ids = torch.randint(0, 40, (1, 12))
-        a = prefill(model, ids, 3)
-        b = prefill(model, ids, 3, persistent_mask=torch.zeros(12, dtype=torch.bool))
+        a = model.prefill(ids, 3)
+        b = model.prefill(ids, 3, persistent_mask=torch.zeros(12, dtype=torch.bool))
         torch.testing.assert_close(a.logits, b.logits)
 
 

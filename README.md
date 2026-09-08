@@ -40,14 +40,47 @@ and training metadata, not optimizer state or temporary per-book memory.
 Cancellation skips final validation and attempts a final save. Slurm requests a
 five-minute warning before timeout; forced kills cannot guarantee saving.
 
+## Evaluate
+
+Set `OPENAI_API_KEY` in `.env` using `.env.example` as a template. Prepare the
+evaluation dataset as described below.
+
+Submit from the repo root on Explorer, replacing each run ID with its matching
+checkpoint:
+
+```bash
+mkdir -p logs
+sbatch evaluation/fs_qwen_eval_full.sbatch checkpoints/FULL_RUN/best
+sbatch evaluation/fs_qwen_eval_swa.sbatch checkpoints/SWA_RUN/best
+sbatch evaluation/fs_qwen_eval_fw_swa.sbatch checkpoints/FW_RUN/best
+```
+
+Edit `evaluation/configs/longmemeval_{full,swa,fw_swa}.yaml` for dataset variant,
+generation settings, and judge limits. Each job generates answers, then grades
+them with Luna through paid API calls. Results go to `output/longmemeval/<mode>/`
+and logs to `logs/`. Rerun the same command to resume with an unchanged checkpoint
+and results directory.
+
 ## Prepare data
 
 Training uses [Qwen-tokenized ProLong](https://huggingface.co/datasets/ryankamiri/prolong-qwen).
 To rebuild it, decode the source tokens and re-tokenize for Qwen with:
 
 ```bash
-uv run python -m scripts.prepare_prolong --repo-id your-account/prolong-qwen
+uv run python -m scripts.prepare_prolong --repo-id ryankamiri/prolong-qwen
 ```
 
 Conversion writes local Parquet shards, then uploads to Hugging Face. Rerun the
 same command to resume from completed shards.
+
+Evaluation uses LongMemEval with Qwen-tokenized prompts. Preparation preserves
+all original fields and adds token IDs and lengths without truncating histories:
+
+```bash
+uv run python -m scripts.prepare_longmemeval --variant oracle --upload
+```
+
+Use `--variant s` or `--variant m` to prepare the other variants. Files are saved
+under `datasets/longmemeval-qwen/<variant>/` and uploaded to
+`ryankamiri/longmemeval-qwen`. Omit `--upload` to prepare locally only. Set
+`HF_TOKEN` in `.env` or use `hf auth login` for uploads.

@@ -7,6 +7,8 @@ dependencies = [
     "beartype>=0.22.9",
     "datasets>=5.0.1",
     "jaxtyping>=0.3.7",
+    "openai>=2.0",
+    "python-dotenv>=1.0",
     "liger-kernel>=0.6.4; sys_platform == 'linux'",
     "pyyaml>=6.0.2",
     "torch==2.9.1",

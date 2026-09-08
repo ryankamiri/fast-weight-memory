@@ -9,7 +9,6 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
 from architectures.qwen.configuration import FWQwen3Config
 from architectures.qwen.causal_lm import FWQwen3ForCausalLM
-from inference.prefill import prefill
 
 
 class CausalLMTests(unittest.TestCase):
@@ -111,9 +110,9 @@ class CausalLMTests(unittest.TestCase):
         calls = []
         handle = model.lm_head.register_forward_pre_hook(lambda module, args: calls.append(args[0].shape))
         try:
-            first = prefill(model, self.ids[:, :3])
+            first = model.prefill(self.ids[:, :3])
             calls.clear()
-            actual = prefill(model, self.ids[:, 3:], execution_block_size=3, state=first.state)
+            actual = model.prefill(self.ids[:, 3:], execution_block_size=3, state=first.state)
         finally:
             handle.remove()
         self.assertEqual(calls, [torch.Size([2, 1, 16])])

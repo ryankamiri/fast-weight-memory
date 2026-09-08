@@ -1,12 +1,10 @@
 import argparse
 from dataclasses import asdict
 import os
-import random
 import signal
 from threading import Event
 
 from huggingface_hub import HfApi
-import numpy as np
 import torch
 from transformers import Qwen3Config
 import wandb
@@ -14,15 +12,10 @@ import wandb
 from architectures.qwen.causal_lm import FWQwen3ForCausalLM
 from architectures.qwen.configuration import FWQwen3Config
 from data.dataloader import create_dataloader
+from utils.seed import seed_everything
 from .config import TrainingConfig, load_config
 from .engine import Progress, build_scheduler, fast_weight_metrics, train
 from .checkpoints import ModelCheckpoints
-
-
-def seed_everything(seed: int):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
 
 def verify_loading(model, loading_info):

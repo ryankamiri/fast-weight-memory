@@ -355,7 +355,7 @@ class ModelTests(unittest.TestCase):
     def test_reject_wrong_cache_geometry_and_old_full_history_mask(self):
         model = FWQwen3Model(self.config()).eval()
         for cache in (SlidingWindowKVCache(3, 2), SlidingWindowKVCache(1, 5)):
-            with self.assertRaisesRegex(ValueError, "window and layer count"):
+            with self.assertRaisesRegex(ValueError, "window, persistent-token limit, and layer count"):
                 model(self.ids, state=FWModelState(past_key_values=cache), use_cache=True)
         with torch.no_grad():
             first = model(self.ids[:, :7], use_cache=True)
