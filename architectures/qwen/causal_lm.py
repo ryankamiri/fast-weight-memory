@@ -61,6 +61,7 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
         labels: Int[torch.Tensor, "B S"] | None = None,
         logits_to_keep: int = 0,
         output_hidden_states: bool = False,
+        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
     ) -> FWQwen3CausalLMOutput:
         if type(logits_to_keep) is not int or logits_to_keep < 0:
             raise ValueError("logits_to_keep must be a nonnegative integer")
@@ -70,6 +71,7 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
         output = self.model(
             input_ids=input_ids, state=state, use_cache=use_cache,
             attention_mask=attention_mask, output_hidden_states=output_hidden_states,
+            persistent_mask=persistent_mask,
         )
         logits = None
         loss = None

@@ -66,6 +66,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
         use_cache: bool = False,
         state: FWMLPState | None = None,
         output_attentions: bool = False,
+        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
     ) -> Float[torch.Tensor, "B S d_model"] | tuple[Float[torch.Tensor, "B S d_model"], FWMLPState]:
         if position_embeddings is None:
             raise ValueError("position_embeddings must be supplied by the model's RoPE module")
@@ -83,6 +84,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             position_ids=position_ids,
             student_attention_mask=student_attention_mask,
+            persistent_mask=persistent_mask,
         )
 
         if not self.is_fast_weight_layer:

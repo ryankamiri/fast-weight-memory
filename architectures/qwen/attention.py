@@ -6,6 +6,8 @@ from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3Attention,
     apply_rotary_pos_emb,
+    eager_attention_forward,
+    ALL_ATTENTION_FUNCTIONS,
 )
 
 
@@ -35,6 +37,7 @@ class FWQwen3Attention(Qwen3Attention):
         past_key_values: Cache | None = None,
         cache_position: Int[torch.Tensor, "S"] | None = None,
         output_attentions: bool = False,
+        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
     ) -> tuple[
         Float[torch.Tensor, "B S d_model"] | tuple[
             Float[torch.Tensor, "B S d_model"],
@@ -43,15 +46,15 @@ class FWQwen3Attention(Qwen3Attention):
         Float[torch.Tensor, "B h_q S S_kv"] | None,
     ]:
         # normal forward pass
-        if not self.is_fast_weight_layer:
+        if not self.is_fast_weight_layer and persistent_mask is None:
             return super().forward(
                 hidden_states, position_embeddings, teacher_attention_mask,
                 past_key_values=past_key_values, cache_position=cache_position,
                 output_attentions=output_attentions, position_ids=position_ids,
             )
-        if output_attentions:
+        if self.is_fast_weight_layer and output_attentions:
             raise ValueError("Dual-window SDPA does not support output_attentions=True")
-        if teacher_attention_mask is None or student_attention_mask is None:
+        if self.is_fast_weight_layer and (teacher_attention_mask is None or student_attention_mask is None):
             raise ValueError("Dual-window mode requires prepared teacher and student attention masks")
 
         B, S, d_model = hidden_states.shape
@@ -71,10 +74,20 @@ class FWQwen3Attention(Qwen3Attention):
                 "sin": sin,
                 "cos": cos,
                 "cache_position": cache_position,
+                "persistent_mask": persistent_mask,
             }
             key, value = past_key_values.update(
                 key, value, self.layer_idx, cache_kwargs,
             )
+        if not self.is_fast_weight_layer:
+            interface = eager_attention_forward if self.config._attn_implementation == "eager" else ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+            output, weights = interface(
+                self, query, key, value, teacher_attention_mask,
+                dropout=self.attention_dropout if self.training else 0.0,
+                scaling=self.scaling, sliding_window=self.sliding_window,
+                output_attentions=output_attentions,
+            )
+            return self.o_proj(output.reshape(B, S, h_q * d_head).contiguous()), weights
         # Local annotations alone do not run checks. These also bind the KV
         # sequence length after caching, which can differ from the query's S.
         assert isinstance(query, Float[torch.Tensor, "B h_q S d_head"])

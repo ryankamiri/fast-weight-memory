@@ -4,6 +4,7 @@ model:
   fast_weight_layers: []
   teacher_window_size: 8192
   student_window_size: 4096
+  max_persistent_tokens: 512  # Budget for evaluation instructions, additional to the window.
   chunk_size: 4096
   fast_weight_lr: 0.3
   use_projection: true

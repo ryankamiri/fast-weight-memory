@@ -78,6 +78,7 @@ class FWQwen3Model(Qwen3PreTrainedModel):
         hidden_states: Float[torch.Tensor, "B S d_model"],
         query_positions: Int[torch.Tensor, "S"],
         key_positions: Int[torch.Tensor, "S_kv"],
+        key_persistent: Bool[torch.Tensor, "S_kv"] | None = None,
     ) -> dict[str, Float[torch.Tensor, "#B 1 S S_kv"]]:
         B, S, d_model = hidden_states.shape
         S_kv = key_positions.shape[0]
@@ -95,7 +96,10 @@ class FWQwen3Model(Qwen3PreTrainedModel):
         def make_mask(window_size: int) -> Float[torch.Tensor, "#B 1 S S_kv"]:
             left_edge = query_positions - window_size
             # Batch dimension is 1 initially, or B after applying the caller mask.
-            allowed: Bool[torch.Tensor, "#B 1 S S_kv"] = causal & (key_positions[None, :] > left_edge[:, None])[None, None]
+            visible = key_positions[None, :] > left_edge[:, None]
+            if key_persistent is not None:
+                visible = visible | key_persistent[None, :]
+            allowed: Bool[torch.Tensor, "#B 1 S S_kv"] = causal & visible[None, None]
             if attention_mask is not None:
                 allowed = allowed & attention_mask[:, None, None, :]
             mask: Float[torch.Tensor, "#B 1 S S_kv"] = torch.zeros(allowed.shape, device=hidden_states.device, dtype=hidden_states.dtype)
@@ -114,9 +118,9 @@ class FWQwen3Model(Qwen3PreTrainedModel):
         input_ids: Int[torch.Tensor, "B S"],
         state: FWModelState | None = None,
         use_cache: bool = False,
-        # True=valid token; columns cover retained KV history plus this call's tokens.
         attention_mask: Bool[torch.Tensor, "B S_kv"] | None = None,
         output_hidden_states: bool = False,
+        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
     ) -> FWQwen3ModelOutput:
         # KV cache and MLP memory always enter together through session state.
         past_key_values = state.past_key_values if state is not None else None
@@ -135,13 +139,16 @@ class FWQwen3Model(Qwen3PreTrainedModel):
         B, S, d_model = hidden_states.shape
         if S == 0:
             raise ValueError("At least one input token is required")
+        if persistent_mask is not None and persistent_mask.device != hidden_states.device:
+            raise ValueError("persistent_mask must be on the input device")
 
         if past_key_values is not None:
             if not isinstance(past_key_values, SlidingWindowKVCache):
                 raise ValueError("State must use SlidingWindowKVCache")
             if (past_key_values.window_size != self.config.teacher_window_size
+                    or past_key_values.max_persistent_tokens != self.config.max_persistent_tokens
                     or len(past_key_values.layers) != len(self.layers)):
-                raise ValueError("KV cache window and layer count must match the model")
+                raise ValueError("KV cache window, persistent-token limit, and layer count must match the model")
             if not use_cache:
                 raise ValueError("A supplied KV cache requires use_cache=True")
         
@@ -165,19 +172,27 @@ class FWQwen3Model(Qwen3PreTrainedModel):
         cache_position: Int[torch.Tensor, "S"] = torch.arange(tokens_seen, tokens_seen + S, device=hidden_states.device)
         position_ids: Int[torch.Tensor, "1 S"] = cache_position.unsqueeze(0)
         
-        if past_key_values is None:
-            # MLP-only continuation has no earlier attention keys.
-            key_positions = cache_position
-        else:
-            # All layers retain the same teacher-sized history. After eviction,
-            # key_offset = tokens_seen - retained_length, not zero.
-            S_kv, key_offset = past_key_values.get_mask_sizes(cache_position, layer_idx=0)
-            key_positions = torch.arange(key_offset, key_offset + S_kv, device=hidden_states.device)
-        masks = self._prepare_masks(attention_mask, hidden_states, cache_position, key_positions)
         if use_cache and past_key_values is None:
             if tokens_seen:
                 raise ValueError("Cannot reconstruct earlier KV history from MLP state; start a fresh cached session")
-            past_key_values = SlidingWindowKVCache(len(self.layers), self.config.teacher_window_size)
+            past_key_values = SlidingWindowKVCache(
+                len(self.layers), self.config.teacher_window_size, self.config.max_persistent_tokens,
+            )
+        if past_key_values is None:
+            # MLP-only continuation has no earlier attention keys.
+            key_positions = cache_position
+            key_persistent = persistent_mask
+            if persistent_mask is not None and int(persistent_mask.sum()) > self.config.max_persistent_tokens:
+                raise ValueError(f"Persistent tokens exceed max_persistent_tokens={self.config.max_persistent_tokens}")
+        else:
+            # Retained positions can have gaps. Use cache-owned metadata instead
+            # of reconstructing a contiguous range from the stored tensor length.
+            key_positions, key_persistent = past_key_values.layers[0].attention_metadata(
+                cache_position, persistent_mask,
+            )
+        masks = self._prepare_masks(
+            attention_mask, hidden_states, cache_position, key_positions, key_persistent,
+        )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         next_mlp_states = {}
@@ -196,6 +211,7 @@ class FWQwen3Model(Qwen3PreTrainedModel):
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
                 state=mlp_states.get(layer_idx),
+                persistent_mask=persistent_mask,
             )
             if is_fast:
                 hidden_states, next_mlp_states[layer_idx] = layer_output

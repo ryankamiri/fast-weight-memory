@@ -11,6 +11,7 @@ class FWQwen3Config(Qwen3Config):
         fast_weight_layers: list[int] | None = None,
         teacher_window_size: int = 8192,
         student_window_size: int = 4096,
+        max_persistent_tokens: int = 512,
         chunk_size: int = 4096,
         lr: float = 0.3,
         use_projection: bool = True,
@@ -33,6 +34,9 @@ class FWQwen3Config(Qwen3Config):
                 raise ValueError("Teacher and student windows must be positive integers")
         if student_window_size > teacher_window_size:
             raise ValueError("Student window must not exceed teacher window")
+        if type(max_persistent_tokens) is not int or max_persistent_tokens < 0:
+            raise ValueError("max_persistent_tokens must be a nonnegative integer")
+        self.max_persistent_tokens = max_persistent_tokens
         self.fast_weight_layers = list(fast_weight_layers)
         self.teacher_window_size = teacher_window_size
         self.student_window_size = student_window_size
