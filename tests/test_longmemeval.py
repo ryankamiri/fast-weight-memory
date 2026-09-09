@@ -96,14 +96,14 @@ class LongMemEvalTests(unittest.TestCase):
     def test_new_configs_and_matched_fw_read_ablation(self):
         root = Path(__file__).resolve().parents[1]
         configs = {}
-        for name in ("instruct_full", "instruct_swa", "fw_swa_no_reads", "fw_swa", "swa"):
+        for name in ("instruct_full", "instruct_swa", "base_full", "base_swa", "fw_swa_no_reads", "fw_swa", "swa"):
             path = root / f"evaluation/configs/longmemeval_{name}.yaml"
             configs[name] = yaml.safe_load(path.read_text())
             self.assertNotIn("#", path.read_text())
             launcher = (root / f"evaluation/fs_qwen_eval_{name}.sbatch").read_text()
             self.assertIn(f"--config evaluation/configs/longmemeval_{name}.yaml", launcher)
             self.assertIn("conda activate fast-weight-memory", launcher)
-            position = 1 if name.startswith("instruct") else 2
+            position = 1 if name.startswith(("instruct", "base")) else 2
             self.assertIn(f'${{{position}:-output/longmemeval/{name}-${{SLURM_JOB_ID}}}}', launcher)
         self.assertTrue(configs["fw_swa"]["model"]["fast_weight_read_scale"])
         self.assertFalse(configs["fw_swa_no_reads"]["model"]["fast_weight_read_scale"])
@@ -119,6 +119,34 @@ class LongMemEvalTests(unittest.TestCase):
             self.assertEqual(configs[name]["model"]["teacher_window_size"], window)
             self.assertEqual(configs[name]["prompt_format"], "chat")
             self.assertIn(151645, configs[name]["generation"]["eos_token_id"])
+        for mode in ("full", "swa"):
+            base = configs[f"base_{mode}"]
+            instruct = configs[f"instruct_{mode}"]
+            self.assertEqual(base["mode"], mode)
+            self.assertEqual(base["model"]["model_id"], "Qwen/Qwen3-0.6B-Base")
+            self.assertEqual(base["prompt_format"], "completion")
+            self.assertEqual(base["generation"]["eos_token_id"], [151643])
+            matched = {
+                **base,
+                "prompt_format": "chat",
+                "model": {**base["model"], "model_id": "Qwen/Qwen3-0.6B"},
+                "generation": {**base["generation"], "eos_token_id": [151645, 151643]},
+            }
+            self.assertEqual(matched, instruct)
+
+    def test_half_reads_config_matches_full_reads(self):
+        root = Path(__file__).resolve().parents[1]
+        config_path = "evaluation/configs/longmemeval_fw_swa_half_reads.yaml"
+        half = yaml.safe_load((root / config_path).read_text())
+        full = yaml.safe_load((root / "evaluation/configs/longmemeval_fw_swa.yaml").read_text())
+        self.assertEqual(half["model"]["fast_weight_read_scale"], 0.5)
+        self.assertEqual(half["dataset"]["revision"], "bdb33409edba22c15721d57cb0b5a76d1620e6ba")
+        half["model"]["fast_weight_read_scale"] = 1.0
+        half["dataset"]["revision"] = full["dataset"]["revision"]
+        self.assertEqual(half, full)
+        launcher = (root / "evaluation/fs_qwen_eval_fw_swa_half_reads.sbatch").read_text()
+        self.assertIn(f"--config {config_path}", launcher)
+        self.assertIn("fw_swa_half_reads-${SLURM_JOB_ID}", launcher)
 
     def test_instruct_prompt_uses_raw_fields_and_persists_only_system_message(self):
         row = prepare_example(example(), CharacterTokenizer())
