@@ -7,6 +7,7 @@ model:
   max_persistent_tokens: 512  # Budget for evaluation instructions, additional to the window.
   chunk_size: 4096
   fast_weight_lr: 0.3
+  fast_weight_read_scale: 1.0
   use_projection: true
   use_conv: true
   conv_kernel_size: 5
@@ -46,7 +47,7 @@ training:
   log_every_steps: 1
 
 validation:
-  compare_without_fast_weight_reads: false
+  fast_weight_read_scales: [1.0]
 
 checkpoints:
   output_dir: checkpoints

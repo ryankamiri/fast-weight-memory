@@ -25,7 +25,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
         conv_kernel_size: int = 5,
         dynamic_beta: bool = True,
         normalize_student_features: bool = False,
-        metrics_fn=None,
+        fast_weight_read_scale: float = 1.0,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -45,7 +45,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
             conv_kernel_size=conv_kernel_size,
             dynamic_beta=dynamic_beta,
             normalize_student_features=normalize_student_features,
-            metrics_fn=metrics_fn,
+            fast_weight_read_scale=fast_weight_read_scale,
         )
         self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -85,7 +85,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
             position_ids=position_ids,
             student_attention_mask=student_attention_mask,
             persistent_mask=persistent_mask,
-            fast_weight_reads=self.mlp.fast_weight_reads,
+            fast_weight_read_scale=self.mlp.fast_weight_read_scale,
         )
 
         if not self.is_fast_weight_layer:
@@ -95,7 +95,7 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
             hidden_states = self.mlp(hidden_states)
             return residual + hidden_states
 
-        if not self.mlp.fast_weight_reads:
+        if self.mlp.fast_weight_read_scale == 0:
             teacher_residual = residual + attention_output
             mlp_output, next_state = self.mlp(
                 self.post_attention_layernorm(teacher_residual), state=state,

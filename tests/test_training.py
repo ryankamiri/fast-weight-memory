@@ -71,6 +71,14 @@ class TrainingConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "warmup"):
             config.validate()
 
+    def test_invalid_read_scales(self):
+        for scales in ([], [0.0], [1.0, 1.0], [1.0, -0.5], [1.0, float("nan")], [True, 0.0]):
+            with self.subTest(scales=scales):
+                config = TrainingConfig()
+                config.validation.fast_weight_read_scales = scales
+                with self.assertRaises(ValueError):
+                    config.validate()
+
     def test_unknown_yaml_setting_is_rejected(self):
         with TemporaryDirectory() as folder:
             path = Path(folder) / "config.yaml"
@@ -106,29 +114,33 @@ class TrainingLoopTests(unittest.TestCase):
             self.assertFalse(use_cache)
             self.assertFalse(model.training)
             self.assertFalse(torch.is_grad_enabled())
-            return SimpleNamespace(loss=torch.tensor(2.0 if model.mlp.fast_weight_reads else 3.0))
+            return SimpleNamespace(loss=torch.tensor(3.0 - model.mlp.fast_weight_read_scale))
         model.forward = forward
+        model.mlp.fast_weight_read_scale = 0.25
         loader = TinyLoader([batch(1), batch(2)])
-        metrics = validate(model, loader, torch.device("cpu"), compare_without_fast_weight_reads=True)
+        metrics = validate(model, loader, torch.device("cpu"), fast_weight_read_scales=[1.0, 0.5, 0.0])
         self.assertEqual(metrics["val/loss"], 2.0)
-        self.assertEqual(metrics["val/loss_without_fw_reads"], 3.0)
-        self.assertEqual(metrics["val/fw_read_loss_improvement"], 1.0)
-        self.assertAlmostEqual(metrics["val/perplexity_without_fw_reads"], math.exp(3))
+        self.assertEqual(metrics["val/loss_fw_read_scale_0.5"], 2.5)
+        self.assertEqual(metrics["val/fw_read_loss_improvement_scale_0.5"], 0.5)
+        self.assertAlmostEqual(metrics["val/perplexity_fw_read_scale_0.5"], math.exp(2.5))
+        self.assertEqual(metrics["val/loss_fw_read_scale_0"], 3.0)
+        self.assertEqual(metrics["val/fw_read_loss_improvement_scale_1"], 1.0)
+        self.assertAlmostEqual(metrics["val/perplexity_fw_read_scale_0"], math.exp(3))
         self.assertTrue(model.training)
-        self.assertTrue(model.mlp.fast_weight_reads)
+        self.assertEqual(model.mlp.fast_weight_read_scale, 0.25)
         with patch("training.engine._validate_pass", side_effect=[metrics, RuntimeError("failed")]):
             with self.assertRaisesRegex(RuntimeError, "failed"):
-                validate(model, loader, torch.device("cpu"), compare_without_fast_weight_reads=True)
-        self.assertTrue(model.mlp.fast_weight_reads)
+                validate(model, loader, torch.device("cpu"), fast_weight_read_scales=[1.0, 0.5, 0.0])
+        self.assertEqual(model.mlp.fast_weight_read_scale, 0.25)
         with patch("training.engine._validate_pass", side_effect=[metrics, None]):
             self.assertIsNone(validate(model, loader, torch.device("cpu"),
-                                       compare_without_fast_weight_reads=True))
-        self.assertTrue(model.mlp.fast_weight_reads)
+                                       fast_weight_read_scales=[1.0, 0.5, 0.0]))
+        self.assertEqual(model.mlp.fast_weight_read_scale, 0.25)
 
     def test_baseline_validation_does_not_repeat(self):
         model = TinyModel()
         validate(model, TinyLoader([batch(1)]), torch.device("cpu"),
-                 compare_without_fast_weight_reads=True)
+                 fast_weight_read_scales=[1.0, 0.5, 0.0])
         self.assertEqual(len(model.calls), 1)
 
     def test_max_steps_stops_without_external_signal_and_validates_once(self):

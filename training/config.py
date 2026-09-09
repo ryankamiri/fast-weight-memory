@@ -23,6 +23,7 @@ class ModelConfig:
     max_persistent_tokens: int = 512
     chunk_size: int = 4096
     fast_weight_lr: float = 0.3
+    fast_weight_read_scale: float = 1.0
     use_projection: bool = True
     use_conv: bool = True
     conv_kernel_size: int = 5
@@ -72,7 +73,7 @@ class LoopConfig:
 
 @dataclass
 class ValidationConfig:
-    compare_without_fast_weight_reads: bool = True
+    fast_weight_read_scales: list[float] = field(default_factory=lambda: [1.0, 0.5, 0.0])
 
 
 @dataclass
@@ -104,8 +105,14 @@ class TrainingConfig:
         return asdict(self)
 
     def validate(self):
-        if type(self.validation.compare_without_fast_weight_reads) is not bool:
-            raise ValueError("compare_without_fast_weight_reads must be a boolean")
+        scales = self.validation.fast_weight_read_scales
+        if not isinstance(scales, list) or not scales:
+            raise ValueError("fast_weight_read_scales must be a nonempty list")
+        for scale in [self.model.fast_weight_read_scale, *scales]:
+            if type(scale) not in (int, float) or not math.isfinite(scale) or scale < 0:
+                raise ValueError("Fast-weight read scales must be finite nonnegative numbers")
+        if 1.0 not in scales or len(set(scales)) != len(scales):
+            raise ValueError("Validation read scales must include 1.0 and have no duplicates")
         if not isinstance(self.checkpoints.output_dir, str) or not self.checkpoints.output_dir.strip():
             raise ValueError("checkpoints.output_dir must be a nonempty path")
         for flag in (self.checkpoints.save_best, self.checkpoints.save_final):

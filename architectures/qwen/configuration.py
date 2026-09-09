@@ -1,3 +1,5 @@
+import math
+
 from transformers import Qwen3Config
 
 
@@ -19,6 +21,7 @@ class FWQwen3Config(Qwen3Config):
         conv_kernel_size: int = 5,
         dynamic_beta: bool = True,
         normalize_student_features: bool = False,
+        fast_weight_read_scale: float = 1.0,
         **kwargs,
     ):
         kwargs.pop("model_type", None)
@@ -47,3 +50,6 @@ class FWQwen3Config(Qwen3Config):
         self.conv_kernel_size = conv_kernel_size
         self.dynamic_beta = dynamic_beta
         self.normalize_student_features = normalize_student_features
+        if type(fast_weight_read_scale) not in (int, float) or not math.isfinite(fast_weight_read_scale) or fast_weight_read_scale < 0:
+            raise ValueError("fast_weight_read_scale must be a finite nonnegative number")
+        self.fast_weight_read_scale = float(fast_weight_read_scale)

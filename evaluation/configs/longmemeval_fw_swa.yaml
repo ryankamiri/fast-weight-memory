@@ -1,4 +1,10 @@
 mode: fw_swa
+model:
+  teacher_window_size: 4096
+  student_window_size: 2048
+  chunk_size: 1024
+  fast_weight_read_scale: 1.0
+
 dataset:
   repo_id: ryankamiri/longmemeval-qwen
   revision: null
@@ -14,5 +20,5 @@ generation:
   top_k: 50
 
 judge:
-  model: gpt-5.6-luna
+  model: gpt-5.6-terra
   concurrency: 32

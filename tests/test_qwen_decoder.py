@@ -59,7 +59,7 @@ class DecoderTests(unittest.TestCase):
             layer.mlp.act_fn(layer.mlp.gate_proj(features)) * layer.mlp.up_proj(features)
         )
         weights = {name: value.clone() for name, value in layer.state_dict().items()}
-        layer.mlp.fast_weight_reads = False
+        layer.mlp.fast_weight_read_scale = 0.0
         kwargs.pop("student_attention_mask")
         with patch("architectures.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention, \
              patch.object(layer.mlp, "_convolve", side_effect=AssertionError("FW convolution ran")):
@@ -68,10 +68,9 @@ class DecoderTests(unittest.TestCase):
         torch.testing.assert_close(actual, expected)
         torch.testing.assert_close(state.W_fast, torch.zeros_like(state.W_fast))
         self.assertEqual(state.pending_count, 0)
-        self.assertEqual(layer.mlp.chunk_metrics, [])
         for name, value in layer.state_dict().items():
             torch.testing.assert_close(value, weights[name])
-        layer.mlp.fast_weight_reads = True
+        layer.mlp.fast_weight_read_scale = 0.5
         with patch("architectures.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention:
             layer(self.x, **self.inputs())
         self.assertEqual(attention.call_count, 2)

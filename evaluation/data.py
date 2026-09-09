@@ -1,4 +1,4 @@
-"""A fixed completion-style prompt for base Qwen checkpoints."""
+"""LongMemEval history formatting for base and instruction-tuned Qwen."""
 
 from datetime import datetime
 
@@ -17,7 +17,7 @@ PREFIX = (
 PROMPT_VERSION = "completion-v1"
 
 
-def prepare_example(example, tokenizer):
+def format_history_and_question(example):
     dates = example["haystack_dates"]
     sessions = example["haystack_sessions"]
     if len(dates) != len(sessions):
@@ -29,21 +29,44 @@ def prepare_example(example, tokenizer):
         + "\n"
         for index, (date, turns) in enumerate(ordered)
     )
-    question = f"Current date: {example['question_date']}\nQuestion: {example['question']}\nAnswer:"
-    # Encode the three explicit input segments separately. This defines our input
-    # format and gives exact persistent/history/question boundaries, without
-    # assuming that independently encoded pieces equal a joint BPE encoding.
-    prefix_ids, history_ids, question_ids = [
-        tokenizer.encode(text, add_special_tokens=False) for text in (PREFIX, history, question)
-    ]
-    return {
+    question = f"Current date: {example['question_date']}\nQuestion: {example['question']}"
+    return history, question
+
+
+def prepare_example(example, tokenizer, prompt_format="completion"):
+    """Prepare one source record with a shared token/metadata schema."""
+    history, question = format_history_and_question(example)
+    if prompt_format == "chat":
+        system = [{"role": "system", "content": PREFIX.strip()}]
+        prefix_ids = tokenizer.apply_chat_template(
+            system, tokenize=True, add_generation_prompt=False, enable_thinking=False,
+        )
+        input_ids = tokenizer.apply_chat_template(
+            system + [{"role": "user", "content": history + question}],
+            tokenize=True, add_generation_prompt=True, enable_thinking=False,
+        )
+        if input_ids[:len(prefix_ids)] != prefix_ids:
+            raise ValueError("Chat template must preserve the leading system message")
+    elif prompt_format == "completion":
+        # Keep the original segment tokenization so previous base-model runs
+        # remain comparable. Joint BPE encoding can change boundary tokens.
+        prefix_ids, history_ids, question_ids = [
+            tokenizer.encode(text, add_special_tokens=False)
+            for text in (PREFIX, history, question + "\nAnswer:")
+        ]
+        input_ids = prefix_ids + history_ids + question_ids
+    else:
+        raise ValueError("prompt_format must be completion or chat")
+
+    prepared = {
         **example,
         "answer": str(example["answer"]),
         "abstention": example["question_id"].endswith("_abs"),
-        "history_ids": prefix_ids + history_ids,
-        "question_ids": question_ids,
+        "input_ids": input_ids,
         "persistent_prefix_length": len(prefix_ids),
-        "history_length": len(prefix_ids) + len(history_ids),
-        "question_length": len(question_ids),
-        "prompt_length": len(prefix_ids) + len(history_ids) + len(question_ids),
+        "prompt_length": len(input_ids),
     }
+    # Discard only obsolete derived columns from older prepared datasets.
+    for name in ("history_ids", "question_ids", "history_length", "question_length"):
+        prepared.pop(name, None)
+    return prepared

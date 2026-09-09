@@ -14,7 +14,7 @@ from architectures.qwen.configuration import FWQwen3Config
 from data.dataloader import create_dataloader
 from utils.seed import seed_everything
 from .config import TrainingConfig, load_config
-from .engine import Progress, build_scheduler, fast_weight_metrics, train
+from .engine import Progress, build_scheduler, train
 from .checkpoints import ModelCheckpoints
 
 
@@ -50,7 +50,6 @@ def load_model(config: TrainingConfig):
     model, loading_info = FWQwen3ForCausalLM.from_pretrained(
         settings.model_id, revision=settings.revision, config=model_config,
         dtype=torch.float32, attn_implementation="sdpa", output_loading_info=True,
-        metrics_fn=fast_weight_metrics,
     )
     verify_loading(model, loading_info)
     if config.training.gradient_checkpointing:

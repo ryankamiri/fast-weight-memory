@@ -38,9 +38,9 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
     _supports_flash_attn = False
     _supports_flex_attn = False
 
-    def __init__(self, config: FWQwen3Config, metrics_fn=None):
+    def __init__(self, config: FWQwen3Config):
         super().__init__(config)
-        self.model = FWQwen3Model(config, metrics_fn=metrics_fn)
+        self.model = FWQwen3Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()

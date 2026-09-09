@@ -1,8 +1,9 @@
-mode: swa
+mode: fw_swa
 model:
   teacher_window_size: 4096
   student_window_size: 2048
   chunk_size: 1024
+  fast_weight_read_scale: 0.0
 
 dataset:
   repo_id: ryankamiri/longmemeval-qwen

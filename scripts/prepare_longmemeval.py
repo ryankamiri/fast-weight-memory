@@ -33,7 +33,7 @@ def main():
     if len({row['question_id'] for row in rows}) != len(rows):
         raise ValueError("Duplicate question IDs")
     metadata = {
-        "schema_version": 2,  # Original source columns plus tokenization columns.
+        "schema_version": 3,  # Original source columns plus a single input_ids sequence.
         "source": SOURCE, "source_revision": SOURCE_REVISION,
         "tokenizer": TOKENIZER, "tokenizer_revision": revision,
         "variant": args.variant, "prompt_version": PROMPT_VERSION, "prefix": PREFIX,

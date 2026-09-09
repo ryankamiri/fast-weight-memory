@@ -34,7 +34,7 @@ class MLPTests(unittest.TestCase):
         state = FWMLPState(W_fast=torch.randn(2, 8, 12))
         before = {name: value.clone() for name, value in model.state_dict().items()}
         enabled, _ = model(self.teacher, self.student, state)
-        model.fast_weight_reads = False
+        model.fast_weight_read_scale = 0.0
         disabled, disabled_state = model(self.teacher, state=state)
         base = model.down_proj(model.act_fn(model.gate_proj(self.teacher)) * model.up_proj(self.teacher))
         torch.testing.assert_close(disabled, base)
@@ -69,6 +69,24 @@ class MLPTests(unittest.TestCase):
         # Reset in-place so optimizer parameter references remain valid.
         for name, value in model.named_parameters():
             self.assertIs(value, parameters[name])
+
+    def test_read_scale_changes_output_not_local_write_rule(self):
+        model = self.model(use_conv=False, use_projection=False)
+        initial = FWMLPState(W_fast=torch.randn(2, 8, 12))
+        full, full_state = model(self.teacher, self.student, initial)
+        base = model.down_proj(model.act_fn(model.gate_proj(self.teacher)) * model.up_proj(self.teacher))
+        for scale in (0.5, 2.0):
+            model.fast_weight_read_scale = scale
+            scaled, scaled_state = model(self.teacher, self.student, initial)
+            torch.testing.assert_close(scaled, base + scale * (full - base))
+            for name in vars(full_state):
+                torch.testing.assert_close(getattr(scaled_state, name), getattr(full_state, name))
+
+    def test_read_scale_rejects_invalid_values(self):
+        model = self.model()
+        for value in (-1.0, float('nan'), float('inf'), True, '0.5'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                model.fast_weight_read_scale = value
 
     def test_reset_with_optional_parameters_disabled(self):
         for options in (

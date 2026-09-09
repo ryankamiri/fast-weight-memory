@@ -12,37 +12,6 @@ from .config import TrainingConfig
 from architectures.qwen.mlp import FWQwen3MLP
 
 
-def fast_weight_metrics(base_weight, fast_weight, base_output, fast_output):
-    """Optional model callback: one ratio per record for the current chunk."""
-    base_norm = torch.linalg.vector_norm(base_weight.float()).clamp_min(1e-8)
-    state_norm = torch.linalg.vector_norm(fast_weight.float(), dim=(-2, -1))
-    base_rms = base_output.float().square().mean(dim=(1, 2)).sqrt()
-    fast_rms = fast_output.float().square().mean(dim=(1, 2)).sqrt()
-    return {
-        "state_relative_norm": state_norm / base_norm,
-        "read_relative_rms": fast_rms / base_rms.clamp_min(1e-8),
-    }
-
-
-def collect_metrics(model, collected):
-    # Read once before backward. Checkpoint recomputation must not be counted.
-    for layer_name, module in model.named_modules():
-        if isinstance(module, FWQwen3MLP):
-            for chunk in module.chunk_metrics:
-                for name, values in chunk.items():
-                    collected.setdefault(f"{layer_name}/{name}", []).append(values.detach())
-            module.chunk_metrics = []
-
-
-def summarize_metrics(collected, phase):
-    result = {}
-    for name, chunks in collected.items():
-        values = torch.cat(chunks)
-        result[f"{phase}/fw/{name}_mean"] = values.mean().item()
-        result[f"{phase}/fw/{name}_max"] = values.max().item()
-    return result
-
-
 @dataclass
 class Progress:
     step: int = 0
@@ -114,7 +83,6 @@ def _validate_pass(model, dataloader, device: torch.device, should_stop) -> dict
     loss_sum = 0.0
     tokens = 0
     records = 0
-    collected = {}
     try:
         for batch in dataloader:
             if should_stop():
@@ -125,7 +93,6 @@ def _validate_pass(model, dataloader, device: torch.device, should_stop) -> dict
                 raise ValueError("Validation batch has no next-token targets")
             with precision_context(device):
                 output = model(**batch, state=None, use_cache=False)
-            collect_metrics(model, collected)
             loss_sum += output.loss.item() * count
             tokens += count
             records += batch["input_ids"].shape[0]
@@ -138,33 +105,43 @@ def _validate_pass(model, dataloader, device: torch.device, should_stop) -> dict
         raise ValueError("Validation range has no records matching seq_len")
     loss = loss_sum / tokens
     metrics = {"val/loss": loss, "val/perplexity": perplexity(loss), "val/records": records}
-    metrics.update(summarize_metrics(collected, "val"))
     return metrics
 
 
 def validate(model, dataloader, device: torch.device, should_stop=lambda: False,
-             compare_without_fast_weight_reads: bool = False) -> dict[str, float] | None:
+             fast_weight_read_scales=(1.0, 0.5, 0.0)) -> dict[str, float] | None:
     layers = [module for module in model.modules()
               if isinstance(module, FWQwen3MLP) and module.is_fast_weight_layer]
-    previous = [module.fast_weight_reads for module in layers]
+    previous = [module.fast_weight_read_scale for module in layers]
     try:
+        # Standard validation/checkpoint selection always uses full-strength reads.
         for module in layers:
-            module.fast_weight_reads = True
+            module.fast_weight_read_scale = 1.0
         metrics = _validate_pass(model, dataloader, device, should_stop)
-        if metrics is None or not compare_without_fast_weight_reads or not layers:
+        if metrics is None or not layers:
             return metrics
-        for module in layers:
-            module.fast_weight_reads = False
-        without_reads = _validate_pass(model, dataloader, device, should_stop)
-        if without_reads is None:
-            return None
-        metrics["val/loss_without_fw_reads"] = without_reads["val/loss"]
-        metrics["val/perplexity_without_fw_reads"] = without_reads["val/perplexity"]
-        metrics["val/fw_read_loss_improvement"] = without_reads["val/loss"] - metrics["val/loss"]
+
+        losses = {1.0: metrics["val/loss"]}
+        for scale in fast_weight_read_scales:
+            if scale == 1.0:
+                result = metrics
+            else:
+                for module in layers:
+                    module.fast_weight_read_scale = scale
+                result = _validate_pass(model, dataloader, device, should_stop)
+                if result is None:
+                    return None
+            losses[scale] = result["val/loss"]
+            metrics[f"val/loss_fw_read_scale_{scale:g}"] = result["val/loss"]
+            metrics[f"val/perplexity_fw_read_scale_{scale:g}"] = result["val/perplexity"]
+        if 0.0 in losses:
+            for scale, loss in losses.items():
+                if scale != 0:
+                    metrics[f"val/fw_read_loss_improvement_scale_{scale:g}"] = losses[0.0] - loss
         return metrics
     finally:
-        for module, enabled in zip(layers, previous):
-            module.fast_weight_reads = enabled
+        for module, scale in zip(layers, previous):
+            module.fast_weight_read_scale = scale
 
 
 def train(
@@ -183,7 +160,6 @@ def train(
     """Repeat epochs until max_steps successful updates or an external stop."""
     progress = Progress() if progress is None else progress
     group = Accumulation()
-    collected = {}
     model.train()
     optimizer.zero_grad()
     group_started = time.perf_counter()
@@ -209,7 +185,6 @@ def train(
             with precision_context(device):
                 output = model(**batch, state=None, use_cache=False)
                 loss = output.loss
-            collect_metrics(model, collected)
             # Do not retain the logits or returned fast-weight state across calls.
             del output, batch
             loss_value = loss.detach().item()
@@ -223,7 +198,6 @@ def train(
                 progress.skipped_updates += 1
                 optimizer.zero_grad()
                 group = Accumulation()
-                collected = {}
                 del loss
                 log(progress.metrics())
                 group_started = time.perf_counter()
@@ -252,7 +226,6 @@ def train(
                 progress.skipped_updates += 1
                 optimizer.zero_grad()
                 group = Accumulation()
-                collected = {}
                 log(progress.metrics())
                 group_started = time.perf_counter()
                 continue
@@ -276,15 +249,13 @@ def train(
                 }
                 if device.type == "cuda":
                     metrics["gpu/peak_memory_gib"] = torch.cuda.max_memory_allocated(device) / 2**30
-                metrics.update(summarize_metrics(collected, "train"))
                 log(metrics)
             group = Accumulation()
-            collected = {}
 
             if progress.step % config.training.eval_every_steps == 0 and not should_stop():
                 # Run val
                 metrics = validate(model, val_loader, device, should_stop,
-                                   config.validation.compare_without_fast_weight_reads)
+                                   config.validation.fast_weight_read_scales)
                 if metrics is not None:
                     log(progress.metrics() | metrics)
                     if on_validation is not None:
@@ -301,7 +272,7 @@ def train(
     optimizer.zero_grad()
     if config.training.eval_at_end and last_validation_step != progress.step and not should_stop():
         metrics = validate(model, val_loader, device, should_stop,
-                           config.validation.compare_without_fast_weight_reads)
+                           config.validation.fast_weight_read_scales)
         if metrics is not None:
             log(progress.metrics() | metrics)
             if on_validation is not None:

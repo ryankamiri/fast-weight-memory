@@ -33,4 +33,4 @@ exec torchrun --standalone --nnodes=1 --nproc-per-node=1 \
     -m evaluation.run \
     --config evaluation/configs/longmemeval_fw_swa.yaml \
     --checkpoint "$1" \
-    --output-dir "${2:-output/longmemeval/fw_swa}" "${@:3}"
+    --output-dir "${2:-output/longmemeval/fw_swa-${SLURM_JOB_ID}}" "${@:3}"

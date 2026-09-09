@@ -1,3 +1,5 @@
+import math
+
 import torch
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
@@ -38,7 +40,7 @@ class FWQwen3Attention(Qwen3Attention):
         cache_position: Int[torch.Tensor, "S"] | None = None,
         output_attentions: bool = False,
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
-        fast_weight_reads: bool = True,
+        fast_weight_read_scale: float = 1.0,
     ) -> tuple[
         Float[torch.Tensor, "B S d_model"] | tuple[
             Float[torch.Tensor, "B S d_model"],
@@ -55,9 +57,11 @@ class FWQwen3Attention(Qwen3Attention):
             )
         if self.is_fast_weight_layer and output_attentions:
             raise ValueError("Dual-window SDPA does not support output_attentions=True")
-        if self.is_fast_weight_layer and (teacher_attention_mask is None or (fast_weight_reads and student_attention_mask is None)):
+        if self.is_fast_weight_layer and (teacher_attention_mask is None or (fast_weight_read_scale != 0 and student_attention_mask is None)):
             raise ValueError("Dual-window mode requires prepared teacher and student attention masks")
 
+        if type(fast_weight_read_scale) not in (int, float) or not math.isfinite(fast_weight_read_scale) or fast_weight_read_scale < 0:
+            raise ValueError("fast_weight_read_scale must be a finite nonnegative number")
         B, S, d_model = hidden_states.shape
         h_q = self.config.num_attention_heads
         h_kv = self.config.num_key_value_heads
@@ -104,7 +108,7 @@ class FWQwen3Attention(Qwen3Attention):
             scaling=self.scaling, 
             is_causal=False,
         )
-        if not fast_weight_reads:
+        if fast_weight_read_scale == 0:
             return self.o_proj(teacher_output.reshape(B, S, h_q * d_head).contiguous()), None
         student_output, _ = sdpa_attention_forward(
             self, 
