@@ -103,7 +103,7 @@ class FWQwen3Model(Qwen3PreTrainedModel):
             if attention_mask is not None:
                 allowed = allowed & attention_mask[:, None, None, :]
             mask: Float[torch.Tensor, "#B 1 S S_kv"] = torch.zeros(allowed.shape, device=hidden_states.device, dtype=hidden_states.dtype)
-            return mask.masked_fill(~allowed, torch.finfo(hidden_states.dtype).min)
+            return mask.masked_fill_(~allowed, torch.finfo(hidden_states.dtype).min)
 
         # every layer's main attention uses the teacher window,
         # regardless of native layer_types or the input sequence length.

@@ -86,7 +86,7 @@ class LongMemEvalTests(unittest.TestCase):
             self.assertNotIn("execution_block_size", config)
             self.assertEqual(config["generation"]["execution_block_size"], 4096)
             self.assertNotIn("#", (root / config_path).read_text())
-            launcher = (root / f"evaluation/fs_qwen_eval_{mode}.sbatch").read_text()
+            launcher = (root / f"evaluation/sbatch/fs_qwen_eval_{mode}.sbatch").read_text()
             self.assertIn(f"--config {config_path}", launcher)
             self.assertIn("conda activate fast-weight-memory", launcher)
             self.assertIn("--gres=gpu:h200:1", launcher)
@@ -100,7 +100,7 @@ class LongMemEvalTests(unittest.TestCase):
             path = root / f"evaluation/configs/longmemeval_{name}.yaml"
             configs[name] = yaml.safe_load(path.read_text())
             self.assertNotIn("#", path.read_text())
-            launcher = (root / f"evaluation/fs_qwen_eval_{name}.sbatch").read_text()
+            launcher = (root / f"evaluation/sbatch/fs_qwen_eval_{name}.sbatch").read_text()
             self.assertIn(f"--config evaluation/configs/longmemeval_{name}.yaml", launcher)
             self.assertIn("conda activate fast-weight-memory", launcher)
             position = 1 if name.startswith(("instruct", "base")) else 2
@@ -144,7 +144,7 @@ class LongMemEvalTests(unittest.TestCase):
         half["model"]["fast_weight_read_scale"] = 1.0
         half["dataset"]["revision"] = full["dataset"]["revision"]
         self.assertEqual(half, full)
-        launcher = (root / "evaluation/fs_qwen_eval_fw_swa_half_reads.sbatch").read_text()
+        launcher = (root / "evaluation/sbatch/fs_qwen_eval_fw_swa_half_reads.sbatch").read_text()
         self.assertIn(f"--config {config_path}", launcher)
         self.assertIn("fw_swa_half_reads-${SLURM_JOB_ID}", launcher)
 

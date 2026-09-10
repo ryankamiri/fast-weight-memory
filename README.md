@@ -50,9 +50,9 @@ checkpoint:
 
 ```bash
 mkdir -p logs
-sbatch evaluation/fs_qwen_eval_full.sbatch checkpoints/FULL_RUN/best
-sbatch evaluation/fs_qwen_eval_swa.sbatch checkpoints/SWA_RUN/best
-sbatch evaluation/fs_qwen_eval_fw_swa.sbatch checkpoints/FW_RUN/best
+sbatch evaluation/sbatch/fs_qwen_eval_full.sbatch checkpoints/FULL_RUN/best
+sbatch evaluation/sbatch/fs_qwen_eval_swa.sbatch checkpoints/SWA_RUN/best
+sbatch evaluation/sbatch/fs_qwen_eval_fw_swa.sbatch checkpoints/FW_RUN/best
 ```
 
 Edit `evaluation/configs/longmemeval_{full,swa,fw_swa}.yaml` for dataset variant,
