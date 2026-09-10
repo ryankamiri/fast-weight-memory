@@ -19,7 +19,7 @@ data:
   revision: null
   train: {start: 64, end: null}
   val: {start: 0, end: 64}
-  batch_size: 1
+  batch_size: 2
   seq_len: 65536
   num_workers: 2
   shuffle_buffer_size: 128
@@ -57,4 +57,4 @@ checkpoints:
 wandb:
   project: fast-weight-memory
   entity: ryanamiri05-northeastern-university
-  name: qwen3-0.6b-cpt-fw-swa-4k-2k-2k-64k
+  name: qwen3-0.6b-cpt-fw-swa-4k-2k-2k-64k-bs2
