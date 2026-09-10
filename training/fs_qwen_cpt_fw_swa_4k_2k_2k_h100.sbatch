@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=fs-qwen-cpt-fw-swa-4k-2k-2k
-#SBATCH --partition=gpu
+#SBATCH --partition=sharing
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:h200:1
+#SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=08:00:00
+#SBATCH --mem=32G
+#SBATCH --time=01:00:00
 #SBATCH --output=logs/fs-qwen-cpt-fw-swa-4k-2k-2k-%j.log
 #SBATCH --error=logs/fs-qwen-cpt-fw-swa-4k-2k-2k-%j.log
 
