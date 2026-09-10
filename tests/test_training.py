@@ -49,12 +49,14 @@ def batch(value, size=1, length=4):
 
 
 class TrainingConfigTests(unittest.TestCase):
-    def test_2k_chunk_changes_only_chunk_size_and_run_name(self):
+    def test_2k_chunk_matches_recipe_with_current_batch_size(self):
         folder = Path(__file__).resolve().parents[1] / "training/configs"
         original = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml")
         larger_chunk = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_2k.yaml")
         self.assertEqual(larger_chunk.model.chunk_size, 2048)
+        self.assertEqual(larger_chunk.data.batch_size, 2)
         original.model.chunk_size = 2048
+        original.data.batch_size = 2
         original.wandb.name = "qwen3-0.6b-cpt-fw-swa-4k-2k-2k-64k"
         self.assertEqual(larger_chunk, original)
 
@@ -64,8 +66,10 @@ class TrainingConfigTests(unittest.TestCase):
         fw = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml")
         self.assertEqual(swa.model.teacher_window_size, 4096)
         self.assertEqual(swa.model.fast_weight_layers, [])
+        self.assertEqual(swa.data.batch_size, 2)
         self.assertEqual(swa.validation.fast_weight_read_scales, [1.0])
         fw.model.fast_weight_layers = []
+        fw.data.batch_size = 2
         fw.validation.fast_weight_read_scales = [1.0]
         fw.wandb.name = "qwen3-0.6b-cpt-swa-4k-64k"
         self.assertEqual(swa, fw)

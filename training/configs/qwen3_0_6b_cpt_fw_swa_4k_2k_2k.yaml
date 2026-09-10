@@ -19,7 +19,7 @@ data:
   revision: null
   train: {start: 64, end: null}
   val: {start: 0, end: 64}
-  batch_size: 1
+  batch_size: 2
   seq_len: 65536
   num_workers: 2
   shuffle_buffer_size: 128
