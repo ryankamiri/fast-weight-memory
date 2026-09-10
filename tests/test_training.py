@@ -49,6 +49,18 @@ def batch(value, size=1, length=4):
 
 
 class TrainingConfigTests(unittest.TestCase):
+    def test_native_4k_swa_matches_fw_training_recipe(self):
+        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        swa = load_config(folder / "qwen3_0_6b_cpt_swa_4k.yaml")
+        fw = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml")
+        self.assertEqual(swa.model.teacher_window_size, 4096)
+        self.assertEqual(swa.model.fast_weight_layers, [])
+        self.assertEqual(swa.validation.fast_weight_read_scales, [1.0])
+        fw.model.fast_weight_layers = []
+        fw.validation.fast_weight_read_scales = [1.0]
+        fw.wandb.name = "qwen3-0.6b-cpt-swa-4k-64k"
+        self.assertEqual(swa, fw)
+
     def test_yaml_defaults(self):
         config = load_config(Path(__file__).resolve().parents[1] / "training/configs/qwen3_0_6b.yaml")
         expected = TrainingConfig()
