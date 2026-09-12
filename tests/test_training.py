@@ -81,6 +81,21 @@ class TrainingConfigTests(unittest.TestCase):
         original.wandb.name += "-bs2"
         self.assertEqual(batch_two, original)
 
+    def test_window_decomposition_configs_change_only_named_windows(self):
+        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        teacher_8k = load_config(folder / "qwen3_0_6b_cpt_fw_swa_8k_2k_2k.yaml")
+        expected_teacher_8k = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_2k.yaml")
+        expected_teacher_8k.model.teacher_window_size = 8192
+        expected_teacher_8k.wandb.name = "qwen3-0.6b-cpt-fw-swa-8k-2k-2k-64k"
+        self.assertEqual(teacher_8k, expected_teacher_8k)
+
+        student_4k = load_config(folder / "qwen3_0_6b_cpt_fw_swa_8k_4k_2k.yaml")
+        expected_student_4k = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_2k.yaml")
+        expected_student_4k.model.teacher_window_size = 8192
+        expected_student_4k.model.student_window_size = 4096
+        expected_student_4k.wandb.name = "qwen3-0.6b-cpt-fw-swa-8k-4k-2k-64k"
+        self.assertEqual(student_4k, expected_student_4k)
+
     def test_yaml_defaults(self):
         config = load_config(Path(__file__).resolve().parents[1] / "training/configs/qwen3_0_6b.yaml")
         expected = TrainingConfig()
