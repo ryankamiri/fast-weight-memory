@@ -96,6 +96,37 @@ class TrainingConfigTests(unittest.TestCase):
         expected_student_4k.wandb.name = "qwen3-0.6b-cpt-fw-swa-8k-4k-2k-64k"
         self.assertEqual(student_4k, expected_student_4k)
 
+    def test_small_window_configs_change_one_variable_per_transition(self):
+        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        recipes = [
+            ("qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml", 4096, 2048, 1024),
+            ("qwen3_0_6b_cpt_fw_swa_4k_1k_1k.yaml", 4096, 1024, 1024),
+            ("qwen3_0_6b_cpt_fw_swa_2k_1k_1k.yaml", 2048, 1024, 1024),
+            ("qwen3_0_6b_cpt_fw_swa_2k_1k_512.yaml", 2048, 1024, 512),
+        ]
+        configs = [load_config(folder / filename) for filename, *_ in recipes]
+
+        for config, (_, teacher, student, chunk) in zip(configs, recipes):
+            self.assertEqual(
+                (config.model.teacher_window_size, config.model.student_window_size, config.model.chunk_size),
+                (teacher, student, chunk),
+            )
+            self.assertEqual(config.data.batch_size, 1)
+            self.assertEqual(config.training.gradient_accumulation_steps, 16)
+
+        for previous, current in zip(configs, configs[1:]):
+            previous_values = previous.to_dict()
+            current_values = current.to_dict()
+            previous_values["wandb"]["name"] = current_values["wandb"]["name"]
+            changed_model_fields = {
+                key for key in previous_values["model"]
+                if previous_values["model"][key] != current_values["model"][key]
+            }
+            self.assertEqual(len(changed_model_fields), 1)
+            for key in changed_model_fields:
+                previous_values["model"][key] = current_values["model"][key]
+            self.assertEqual(previous_values, current_values)
+
     def test_yaml_defaults(self):
         config = load_config(Path(__file__).resolve().parents[1] / "training/configs/qwen3_0_6b.yaml")
         expected = TrainingConfig()
