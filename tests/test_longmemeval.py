@@ -170,6 +170,33 @@ class LongMemEvalTests(unittest.TestCase):
         self.assertIn("--gres=gpu:a100:1", launcher)
         self.assertIn("--config evaluation/configs/longmemeval_fw_swa_native_4k.yaml", launcher)
 
+    def test_small_window_alpha_configs_share_one_evaluation_recipe(self):
+        root = Path(__file__).resolve().parents[1]
+        suffixes = ("_no_reads", "_half_reads", "")
+        configs = [
+            yaml.safe_load(
+                (root / f"evaluation/configs/longmemeval_fw_swa_2k_1k_512{suffix}.yaml").read_text()
+            )
+            for suffix in suffixes
+        ]
+        self.assertEqual([config["model"]["fast_weight_read_scale"] for config in configs], [0.0, 0.5, 1.0])
+        for config in configs:
+            self.assertEqual(
+                [config["model"][key] for key in ("teacher_window_size", "student_window_size", "chunk_size")],
+                [2048, 1024, 512],
+            )
+            config["model"]["fast_weight_read_scale"] = 1.0
+        self.assertEqual(configs[0], configs[2])
+        self.assertEqual(configs[1], configs[2])
+
+        for suffix in suffixes:
+            launcher = (
+                root / f"evaluation/sbatch/fs_qwen_eval_fw_swa_2k_1k_512{suffix}.sbatch"
+            ).read_text()
+            self.assertIn("--partition=gpu-short", launcher)
+            self.assertIn("--gres=gpu:a100:1", launcher)
+            self.assertIn("--time=02:00:00", launcher)
+
     def test_instruct_prompt_uses_raw_fields_and_persists_only_system_message(self):
         row = prepare_example(example(), CharacterTokenizer())
         row["history_ids"] = [999999]  # These completion tokens must not be reused.

@@ -1,0 +1,24 @@
+mode: fw_swa
+model:
+  teacher_window_size: 2048
+  student_window_size: 1024
+  chunk_size: 512
+  fast_weight_read_scale: 0.0
+
+dataset:
+  repo_id: ryankamiri/longmemeval-qwen
+  revision: bdb33409edba22c15721d57cb0b5a76d1620e6ba
+  variant: oracle
+
+seed: 42
+generation:
+  execution_block_size: 4096
+  max_new_tokens: 256
+  do_sample: true
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+
+judge:
+  model: gpt-5.6-terra
+  concurrency: 32
