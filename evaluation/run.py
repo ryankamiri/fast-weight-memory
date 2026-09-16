@@ -19,6 +19,7 @@ import yaml
 from architectures.qwen.causal_lm import FWQwen3ForCausalLM
 from architectures.qwen.configuration import FWQwen3Config
 from evaluation.data import PROMPT_VERSION, prepare_example
+from evaluation.diagnostic_judge import diagnose_all
 from evaluation.judge import BackgroundJudge, judge_all
 from evaluation.storage import append_result, ensure_manifest, read_results
 from utils.seed import seed_everything
@@ -80,26 +81,17 @@ def main():
     parser.add_argument("--checkpoint", type=Path, help="Saved checkpoint; omit when YAML supplies model_id")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--judge-only", action="store_true")
+    parser.add_argument("--diagnostics-only", action="store_true")
     parser.add_argument("--generate-only", action="store_true")
     args = parser.parse_args()
     load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
 
-    if args.judge_only and args.generate_only:
+    if sum((args.judge_only, args.diagnostics_only, args.generate_only)) > 1:
         parser.error("Choose at most one phase override")
     if not args.generate_only and not os.environ.get("OPENAI_API_KEY"):
         parser.error("Set OPENAI_API_KEY in .env or your shell for judging, or use --generate-only")
     
     config = yaml.safe_load(args.config.read_text())
-    model_settings = config.get("model", {})
-    model_id = model_settings.get("model_id")
-    if (args.checkpoint is None) == (model_id is None):
-        parser.error("Supply either --checkpoint or model.model_id in the YAML, not both")
-    model_source = str(args.checkpoint.resolve()) if args.checkpoint is not None else model_id
-    prompt_format = config.get("prompt_format", "completion")
-    if prompt_format not in {"completion", "chat"}:
-        parser.error("prompt_format must be completion or chat")
-    args.mode = args.mode or config["mode"]
-    config["mode"] = args.mode
     output = args.output_dir
     manifest_path = output / "manifest.json"
     previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else None
@@ -119,6 +111,20 @@ def main():
     ids = dataset["question_id"]
     if len(ids) != len(set(ids)) or len(ids) != metadata["records"]:
         raise ValueError("Prepared dataset has duplicate IDs or inconsistent record count")
+    if args.diagnostics_only:
+        asyncio.run(diagnose_all(list(dataset), output, config["judge"], revision))
+        return
+
+    model_settings = config.get("model", {})
+    model_id = model_settings.get("model_id")
+    if (args.checkpoint is None) == (model_id is None):
+        parser.error("Supply either --checkpoint or model.model_id in the YAML, not both")
+    model_source = str(args.checkpoint.resolve()) if args.checkpoint is not None else model_id
+    prompt_format = config.get("prompt_format", "completion")
+    if prompt_format not in {"completion", "chat"}:
+        parser.error("prompt_format must be completion or chat")
+    args.mode = args.mode or config["mode"]
+    config["mode"] = args.mode
     if args.checkpoint is not None:
         model_config = FWQwen3Config.from_pretrained(model_source)
     else:

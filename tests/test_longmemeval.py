@@ -19,6 +19,13 @@ from architectures.qwen.causal_lm import FWQwen3ForCausalLM
 from architectures.qwen.configuration import FWQwen3Config
 from architectures.qwen.attention import sdpa_attention_forward
 from evaluation.data import PREFIX, format_history_and_question, prepare_example
+from evaluation.diagnostic_judge import (
+    DiagnosticVerdict,
+    diagnose_all,
+    marked_evidence,
+    request_diagnostic,
+    summarize_diagnostics,
+)
 from evaluation.judge import BackgroundJudge, Verdict, judge_all, request_verdict, rubric, summarize
 from evaluation.run import configure_model, generate_example, load_model
 from evaluation.storage import append_result, ensure_manifest, read_results
@@ -528,6 +535,115 @@ class BackgroundJudgeTests(unittest.TestCase):
                         judge.submit(prediction)
                         raise RuntimeError("generation failed")
             self.assertIn(row["question_id"], read_results(output / "judgments.jsonl"))
+
+
+class DiagnosticJudgeTests(unittest.IsolatedAsyncioTestCase):
+    def diagnostic_example(self, question_id="example"):
+        return {
+            **example(),
+            "question_id": question_id,
+            "abstention": False,
+            "haystack_session_ids": ["later-id", "earlier-id"],
+            "haystack_sessions": [
+                [
+                    {"role": "user", "content": "irrelevant", "has_answer": False},
+                    {"role": "assistant", "content": "later evidence", "has_answer": True},
+                ],
+                [{"role": "user", "content": "earlier evidence", "has_answer": True}],
+            ],
+        }
+
+    async def test_explanation_first_and_only_marked_evidence_is_sent(self):
+        self.assertEqual(list(DiagnosticVerdict.model_fields)[0], "explanation")
+        verdict = DiagnosticVerdict(
+            explanation="Both source facts are present, but the comparison is reversed.",
+            evidence_recall="all",
+            reasoning_given_evidence="incorrect",
+        )
+        client = SimpleNamespace(responses=SimpleNamespace(parse=AsyncMock(return_value=SimpleNamespace(
+            output_parsed=verdict, id="diagnostic", model="gpt-5.6-terra", usage=None,
+        ))))
+        row = self.diagnostic_example()
+        with patch("evaluation.diagnostic_judge.asyncio.sleep", new_callable=AsyncMock):
+            result = await request_diagnostic(client, row, "wrong comparison", "gpt-5.6-terra")
+
+        self.assertEqual(result["evidence_recall"], "all")
+        payload = json.loads(client.responses.parse.call_args.kwargs["input"])
+        self.assertEqual(
+            [evidence["content"] for evidence in payload["marked_evidence"]],
+            ["earlier evidence", "later evidence"],
+        )
+        self.assertNotIn("irrelevant", json.dumps(payload["marked_evidence"]))
+        self.assertEqual(marked_evidence(row), payload["marked_evidence"])
+
+    async def test_diagnostics_resume_separately_and_keep_official_correctness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            rows = [self.diagnostic_example(str(i)) for i in range(2)]
+            for index, row in enumerate(rows):
+                append_result(output / "predictions.jsonl", {
+                    "question_id": row["question_id"], "hypothesis": f"answer {index}",
+                })
+                append_result(output / "judgments.jsonl", {
+                    "question_id": row["question_id"], "correct": index == 0,
+                })
+            append_result(output / "diagnostic_judgments.jsonl", {
+                "question_id": "0",
+                "explanation": "Already complete.",
+                "evidence_recall": "all",
+                "reasoning_given_evidence": "correct",
+                "final_correct": True,
+            })
+            official_before = (output / "judgments.jsonl").read_text()
+            verdict = {
+                "explanation": "No source facts are demonstrated.",
+                "evidence_recall": "none",
+                "reasoning_given_evidence": "not_observable",
+                "response_id": "diagnostic",
+                "model": "gpt-5.6-terra",
+                "usage": None,
+            }
+            with patch("evaluation.diagnostic_judge.AsyncOpenAI", return_value=AsyncMock()), patch(
+                "evaluation.diagnostic_judge.request_diagnostic",
+                new_callable=AsyncMock,
+                return_value=verdict,
+            ) as request:
+                await diagnose_all(
+                    rows, output, {"model": "gpt-5.6-terra", "concurrency": 2}, "revision",
+                )
+                request.assert_awaited_once()
+                self.assertEqual(request.call_args.args[1]["question_id"], "1")
+
+            diagnostics = read_results(output / "diagnostic_judgments.jsonl")
+            self.assertEqual(diagnostics["1"]["final_correct"], False)
+            self.assertEqual((output / "judgments.jsonl").read_text(), official_before)
+            summary = json.loads((output / "diagnostic_summary.json").read_text())
+            self.assertEqual(summary["diagnosed"], 2)
+            self.assertEqual(summary["scores"]["overall"]["evidence_recall"]["none"], 1)
+            self.assertEqual(summary["scores"]["overall"]["final_accuracy"], 0.5)
+
+    def test_summary_reports_missing_diagnostics(self):
+        rows = [self.diagnostic_example(str(i)) for i in range(2)]
+        diagnostics = {
+            "0": {
+                "evidence_recall": "partial",
+                "reasoning_given_evidence": "not_observable",
+                "final_correct": False,
+            },
+        }
+        summary = summarize_diagnostics(rows, diagnostics)
+        self.assertEqual(summary["diagnosed"], 1)
+        self.assertEqual(summary["missing"], 1)
+        self.assertEqual(summary["scores"]["overall"]["evidence_recall"]["partial"], 1)
+
+    def test_cpu_launcher_uses_diagnostics_only_without_gpu(self):
+        root = Path(__file__).resolve().parents[1]
+        launcher = (root / "evaluation/sbatch/fs_qwen_diagnostics.sbatch").read_text()
+        self.assertIn("#SBATCH --partition=short", launcher)
+        self.assertIn("#SBATCH --time=48:00:00", launcher)
+        self.assertIn("--diagnostics-only", launcher)
+        self.assertNotIn("--gres=", launcher)
+        self.assertNotIn("torchrun", launcher)
 
 
 class JudgeTests(unittest.IsolatedAsyncioTestCase):
