@@ -13,7 +13,7 @@ def ensure_manifest(path, manifest):
         path.write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-def read_results(path):
+def read_results(path, id_field="question_id"):
     """Repair only an interrupted final line; never ignore corrupt middle rows."""
     rows = {}
     if not path.exists():
@@ -28,9 +28,9 @@ def read_results(path):
                     raise ValueError(f"Corrupt result inside {path}")
                 file.truncate(end - len(line))
                 break
-            if row["question_id"] in rows:
-                raise ValueError(f"Duplicate question ID in {path}")
-            rows[row["question_id"]] = row
+            if row[id_field] in rows:
+                raise ValueError(f"Duplicate {id_field} in {path}")
+            rows[row[id_field]] = row
             if not line.endswith(b"\n"):
                 file.write(b"\n")
     return rows

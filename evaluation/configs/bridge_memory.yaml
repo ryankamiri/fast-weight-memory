@@ -1,0 +1,16 @@
+dataset:
+  repo_id: ryankamiri/ttcd-bridge-memory
+  revision: 591fcef98e1f837ad3cbe7765af5cfaa55469c63
+  variant: t4096-s2048-c1024
+
+geometry:
+  teacher_window_size: 4096
+  student_window_size: 2048
+  chunk_size: 1024
+
+model:
+  base_model_id: Qwen/Qwen3-0.6B-Base
+  full_attention_window_size: 16384
+
+execution_block_size: 1024
+seed: 42
