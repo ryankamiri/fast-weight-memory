@@ -20,7 +20,7 @@ from architectures.qwen.causal_lm import FWQwen3ForCausalLM
 from architectures.qwen.configuration import FWQwen3Config
 from evaluation.data import PROMPT_VERSION, prepare_example
 from evaluation.diagnostic_judge import diagnose_all
-from evaluation.judge import BackgroundJudge, judge_all
+from evaluation.judge import BackgroundJudge, judge_all, judge_backend
 from evaluation.storage import append_result, ensure_manifest, read_results
 from utils.seed import seed_everything
 
@@ -88,10 +88,12 @@ def main():
 
     if sum((args.judge_only, args.diagnostics_only, args.generate_only)) > 1:
         parser.error("Choose at most one phase override")
-    if not args.generate_only and not os.environ.get("OPENAI_API_KEY"):
-        parser.error("Set OPENAI_API_KEY in .env or your shell for judging, or use --generate-only")
-    
     config = yaml.safe_load(args.config.read_text())
+    backend = judge_backend(config["judge"])
+    api_key = "OPENAI_API_KEY" if backend == "openai" else "TYPESAFE_API_KEY"
+    if not args.generate_only and not os.environ.get(api_key):
+        parser.error(f"Set {api_key} in .env or your shell for judging, or use --generate-only")
+
     output = args.output_dir
     manifest_path = output / "manifest.json"
     previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else None

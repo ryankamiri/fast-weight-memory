@@ -21,12 +21,23 @@ from architectures.qwen.attention import sdpa_attention_forward
 from evaluation.data import PREFIX, format_history_and_question, prepare_example
 from evaluation.diagnostic_judge import (
     DiagnosticVerdict,
+    diagnostic_paths,
     diagnose_all,
     marked_evidence,
     request_diagnostic,
+    request_jev_diagnostic,
     summarize_diagnostics,
 )
-from evaluation.judge import BackgroundJudge, Verdict, judge_all, request_verdict, rubric, summarize
+from evaluation.judge import (
+    BackgroundJudge,
+    Verdict,
+    judge_all,
+    judge_paths,
+    request_jev_verdict,
+    request_verdict,
+    rubric,
+    summarize,
+)
 from evaluation.run import configure_model, generate_example, load_model
 from evaluation.storage import append_result, ensure_manifest, read_results
 
@@ -576,6 +587,64 @@ class DiagnosticJudgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("irrelevant", json.dumps(payload["marked_evidence"]))
         self.assertEqual(marked_evidence(row), payload["marked_evidence"])
 
+    async def test_jev_diagnostics_return_labels_without_an_explanation(self):
+        client = SimpleNamespace(system_one=AsyncMock(return_value=SimpleNamespace(
+            choices={
+                "evidence_recall": SimpleNamespace(
+                    choice="partial", probabilities={"all": 0.1, "partial": 0.8, "none": 0.1},
+                ),
+                "reasoning_given_evidence": SimpleNamespace(
+                    choice="not_observable", probabilities={"not_observable": 0.9},
+                ),
+            },
+            model="jev-latest",
+            usage=SimpleNamespace(input_tokens=100, output_tokens=2),
+        )))
+        result = await request_jev_diagnostic(
+            client, self.diagnostic_example(), "short answer", "jev-latest",
+        )
+
+        self.assertNotIn("explanation", result)
+        self.assertEqual(result["evidence_recall"], "partial")
+        self.assertEqual(result["reasoning_given_evidence"], "not_observable")
+        self.assertEqual(
+            set(client.system_one.call_args.kwargs["questions"]),
+            {"evidence_recall", "reasoning_given_evidence"},
+        )
+
+    async def test_jev_diagnostics_use_backend_specific_resume_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            row = self.diagnostic_example()
+            config = {"backend": "jev", "model": "jev-latest", "concurrency": 2}
+            append_result(output / "predictions.jsonl", {
+                "question_id": row["question_id"], "hypothesis": "answer",
+            })
+            append_result(output / "judgments_jev.jsonl", {
+                "question_id": row["question_id"], "correct": False,
+            })
+            verdict = {
+                "evidence_recall": "none",
+                "reasoning_given_evidence": "not_observable",
+                "model": "jev-latest",
+                "usage": None,
+            }
+            with patch(
+                "evaluation.diagnostic_judge.AsyncTypeSafeClient", return_value=AsyncMock(),
+            ), patch(
+                "evaluation.diagnostic_judge.request_jev_diagnostic",
+                new_callable=AsyncMock,
+                return_value=verdict,
+            ):
+                await diagnose_all([row], output, config, "revision")
+
+            paths = diagnostic_paths(output, config)
+            result = read_results(paths["judgments"])[row["question_id"]]
+            self.assertNotIn("explanation", result)
+            self.assertFalse(result["final_correct"])
+            self.assertFalse((output / "diagnostic_judgments.jsonl").exists())
+            self.assertEqual(json.loads(paths["summary"].read_text())["backend"], "jev")
+
     async def test_diagnostics_resume_separately_and_keep_official_correctness(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
@@ -647,6 +716,54 @@ class DiagnosticJudgeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class JudgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_jev_returns_probability_and_sends_structured_state(self):
+        client = SimpleNamespace(system_one=AsyncMock(return_value=SimpleNamespace(
+            nouls={"correct": SimpleNamespace(noul=0.73)},
+            request_id="typesafe-request",
+            model="jev-latest",
+            usage=SimpleNamespace(input_tokens=91, output_tokens=1),
+        )))
+        row = {**example(), "abstention": False}
+        result = await request_jev_verdict(client, row, "The updated answer", "jev-latest", 0.7)
+
+        self.assertTrue(result["correct"])
+        self.assertEqual(result["correct_probability"], 0.73)
+        call = client.system_one.call_args.kwargs
+        self.assertEqual(
+            set(call["state"]),
+            {"question", "reference_answer", "candidate_response"},
+        )
+        self.assertNotIn("haystack_sessions", call["state"])
+        self.assertEqual(call["model"], "jev-latest")
+
+    async def test_jev_uses_independent_resume_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            row = {**example(), "abstention": False}
+            append_result(output / "predictions.jsonl", {
+                "question_id": row["question_id"], "hypothesis": "answer",
+            })
+            client = AsyncMock()
+            client.system_one.return_value = SimpleNamespace(
+                nouls={"correct": SimpleNamespace(noul=0.25)},
+                request_id="typesafe-request",
+                model="jev-latest",
+                usage=None,
+            )
+            config = {
+                "backend": "jev", "model": "jev-latest", "concurrency": 2,
+                "correctness_threshold": 0.5,
+            }
+            with patch("evaluation.judge.AsyncTypeSafeClient", return_value=client):
+                await judge_all([row], output, config)
+
+            paths = judge_paths(output, config)
+            result = read_results(paths["judgments"])[row["question_id"]]
+            self.assertFalse(result["correct"])
+            self.assertEqual(result["backend"], "jev")
+            self.assertFalse((output / "judgments.jsonl").exists())
+            self.assertEqual(json.loads(paths["summary"].read_text())["backend"], "jev")
+
     async def test_transient_errors_retry_but_refusals_are_not_wrong_answers(self):
         response = SimpleNamespace(output_parsed=None)
         client = SimpleNamespace(responses=SimpleNamespace(parse=AsyncMock(side_effect=[

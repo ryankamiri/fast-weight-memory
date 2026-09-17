@@ -14,3 +14,4 @@ __pycache__/
 /output/
 /experiment_results/
 /checkpoints/
+/tmp/

@@ -12,9 +12,9 @@ class ModelCheckpoints:
     def __init__(self, config, run_id):
         self.config = config
         self.directory = Path(config.checkpoints.output_dir) / run_id
-        self.best_loss = math.inf
+        self.best_metric_value: float | None = None
 
-    def save(self, model, progress, name, *, val_loss=None, reason=None):
+    def save(self, model, progress, name, *, val_loss=None, selection_value=None, reason=None):
         self.directory.mkdir(parents=True, exist_ok=True)
         target = self.directory / name
         temporary = Path(tempfile.mkdtemp(prefix=f".{name}-", dir=self.directory))
@@ -24,6 +24,8 @@ class ModelCheckpoints:
             model.save_pretrained(temporary, safe_serialization=True)
             metadata = {
                 "progress": asdict(progress), "val_loss": val_loss, "reason": reason,
+                "selection_metric": self.config.checkpoints.selection_metric,
+                "selection_value": selection_value,
                 "training_config": self.config.to_dict(),
                 "contents": "Model/config only. No optimizer, scheduler, RNG, KV cache, or session fast weights.",
             }
@@ -47,10 +49,23 @@ class ModelCheckpoints:
         print(f"Saved {name} model at optimizer step {progress.step}: {target}", flush=True)
 
     def on_validation(self, model, progress, metrics):
-        loss = metrics["val/loss"]
-        if self.config.checkpoints.save_best and math.isfinite(loss) and loss < self.best_loss:
-            self.save(model, progress, "best", val_loss=loss, reason="lowest validation loss")
-            self.best_loss = loss
+        metric = self.config.checkpoints.selection_metric
+        if metric not in metrics:
+            raise ValueError(f"Checkpoint selection metric was not logged: {metric}")
+        value = metrics[metric]
+        mode = self.config.checkpoints.selection_mode
+        improved = (
+            self.best_metric_value is None
+            or (mode == "min" and value < self.best_metric_value)
+            or (mode == "max" and value > self.best_metric_value)
+        )
+        if self.config.checkpoints.save_best and math.isfinite(value) and improved:
+            self.save(
+                model, progress, "best", val_loss=metrics.get("val/loss"),
+                selection_value=value,
+                reason=f"best {metric} ({mode})",
+            )
+            self.best_metric_value = value
 
     def save_final(self, model, progress, reason):
         if self.config.checkpoints.save_final:

@@ -10,9 +10,18 @@ from torch import nn
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
-from training.config import RecordRange, TrainingConfig, load_config
+from training.config import (
+    BridgeMemoryDataConfig,
+    BridgeMemoryLossConfig,
+    BridgeMemoryRecordRange,
+    CausalLMDataConfig,
+    CausalLMLossConfig,
+    RecordRange,
+    TrainingConfig,
+    load_config,
+)
 from training.engine import build_scheduler, perplexity, train, validate
-from training.train import load_model, verify_loading
+from training.train import configure_trainable_parameters, load_model, verify_loading
 from architectures.qwen.mlp import FWQwen3MLP
 
 
@@ -28,6 +37,27 @@ class TinyModel(nn.Module):
         self.calls.append((state, use_cache, self.training, torch.is_grad_enabled()))
         loss = (self.weight - input_ids.float().mean()).square()
         return SimpleNamespace(loss=loss)
+
+
+class TinyBridgeModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.tensor(0.5))
+
+    def forward_bridge_memory(
+        self, input_ids, delayed_labels, all_token_loss_weight,
+        delayed_answer_loss_weight, logits_to_keep, state=None, use_cache=False,
+    ):
+        loss = self.weight.square()
+        logits = torch.zeros(input_ids.shape[0], logits_to_keep, 32)
+        targets = delayed_labels[:, -1]
+        logits[torch.arange(input_ids.shape[0]), -2, targets] = 4
+        return SimpleNamespace(
+            loss=loss,
+            all_token_loss=None,
+            delayed_answer_loss=loss,
+            logits=logits,
+        )
 
 
 class TinyLoader:
@@ -157,6 +187,57 @@ class TrainingConfigTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     config.validate()
 
+    def test_bridge_loss_and_overlap_configuration(self):
+        config = TrainingConfig()
+        config.data = BridgeMemoryDataConfig(
+            dataset_config="t4096-s2048-c1024",
+            batch_size=1,
+            seq_len=7695,
+            train=BridgeMemoryRecordRange(0, 64, split="test", conditions=["bridge"]),
+            val=BridgeMemoryRecordRange(0, 64, split="test", conditions=["bridge"]),
+            allow_train_val_overlap=True,
+        )
+        config.loss = BridgeMemoryLossConfig(all_tokens_weight=0.0, delayed_answer_weight=1.0)
+        config.training.trainable_parameters = "fast_weight_only"
+        config.validate()
+
+        config.data.allow_train_val_overlap = False
+        with self.assertRaisesRegex(ValueError, "overlap"):
+            config.validate()
+        config.data.allow_train_val_overlap = True
+        config.data.batch_size = 2
+        with self.assertRaisesRegex(ValueError, "batch_size=1"):
+            config.validate()
+
+    def test_confirmation_experiment_configs(self):
+        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        bounded = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml")
+        full_teacher = load_config(folder / "qwen3_0_6b_cpt_fw_full_65k_2k_1k.yaml")
+
+        expected = bounded.to_dict()
+        expected["model"]["teacher_window_size"] = 65536
+        expected["wandb"]["name"] = "qwen3-0.6b-cpt-fw-full-65k-2k-1k"
+        self.assertEqual(full_teacher.to_dict(), expected)
+
+        overfit = load_config(folder / "qwen3_0_6b_bridge_overfit.yaml")
+        self.assertEqual(overfit.data.record_format, "bridge_memory")
+        self.assertIsInstance(overfit.data, BridgeMemoryDataConfig)
+        self.assertIsInstance(overfit.loss, BridgeMemoryLossConfig)
+        self.assertTrue(overfit.data.allow_train_val_overlap)
+        self.assertEqual(overfit.loss, BridgeMemoryLossConfig(0.0, 1.0))
+        self.assertEqual(overfit.training.trainable_parameters, "fast_weight_only")
+        self.assertEqual(overfit.checkpoints.selection_mode, "max")
+
+        curriculum = load_config(folder / "qwen3_0_6b_bridge_curriculum.yaml")
+        self.assertEqual(curriculum.loss, BridgeMemoryLossConfig(1.0, 1.0))
+        self.assertEqual((curriculum.data.train.start, curriculum.data.train.end), (0, 96))
+        self.assertEqual((curriculum.data.val.start, curriculum.data.val.end), (96, 128))
+        self.assertFalse(curriculum.data.allow_train_val_overlap)
+        self.assertEqual(curriculum.training.trainable_parameters, "all")
+
+        self.assertIsInstance(full_teacher.data, CausalLMDataConfig)
+        self.assertIsInstance(full_teacher.loss, CausalLMLossConfig)
+
     def test_unknown_yaml_setting_is_rejected(self):
         with TemporaryDirectory() as folder:
             path = Path(folder) / "config.yaml"
@@ -214,6 +295,25 @@ class TrainingLoopTests(unittest.TestCase):
             self.assertIsNone(validate(model, loader, torch.device("cpu"),
                                        fast_weight_read_scales=[1.0, 0.5, 0.0]))
         self.assertEqual(model.mlp.fast_weight_read_scale, 0.25)
+
+    def test_bridge_validation_reports_delayed_loss_and_candidate_accuracy(self):
+        batch = {
+            "input_ids": torch.tensor([[1, 2, 3, 7]]),
+            "delayed_labels": torch.tensor([[-100, -100, -100, 7]]),
+            "target_token_ids": torch.tensor([7]),
+            "candidate_token_ids": torch.tensor([[7, 8, 9]]),
+            "conditions": ["bridge"],
+            "query_variants": ["exact"],
+        }
+        metrics = validate(
+            TinyBridgeModel(), TinyLoader([batch]), torch.device("cpu"),
+            fast_weight_read_scales=[1.0, 0.5, 0.0],
+            loss_config=BridgeMemoryLossConfig(all_tokens_weight=0.0, delayed_answer_weight=1.0),
+        )
+        self.assertEqual(metrics["val/loss"], 0.25)
+        self.assertEqual(metrics["val/delayed_answer_loss"], 0.25)
+        self.assertEqual(metrics["val/bridge_exact_candidate_accuracy"], 1.0)
+        self.assertEqual(metrics["val/all_vocabulary_top_1_accuracy"], 1.0)
 
     def test_baseline_validation_does_not_repeat(self):
         model = TinyModel()
@@ -390,6 +490,23 @@ class TrainingLoopTests(unittest.TestCase):
                      {"error_msgs": ["bad checkpoint"]}):
             with self.assertRaisesRegex(ValueError, "verification"):
                 verify_loading(model, info)
+
+    def test_fast_weight_only_parameter_scope(self):
+        config = self.config()
+        config.model.fast_weight_layers = [0]
+        model = FWQwen3MLP(Qwen3Config(hidden_size=8, intermediate_size=12),
+                           is_fast_weight_layer=True)
+        wrapper = SimpleNamespace(
+            config=SimpleNamespace(fast_weight_layers=[0]),
+            model=SimpleNamespace(layers=[SimpleNamespace(mlp=model)]),
+            parameters=model.parameters,
+        )
+        parameters = configure_trainable_parameters(wrapper, "fast_weight_only")
+        trainable_names = {name for name, value in model.named_parameters() if value.requires_grad}
+        self.assertEqual(trainable_names, {
+            "W_proj", "beta_proj", "teacher_conv.weight", "student_conv.weight",
+        })
+        self.assertEqual(sum(parameter.numel() for parameter in parameters), 64 + 8 + 120)
 
 
 if __name__ == "__main__":

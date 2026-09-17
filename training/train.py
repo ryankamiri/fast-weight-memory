@@ -57,6 +57,34 @@ def load_model(config: TrainingConfig):
     return model
 
 
+def configure_trainable_parameters(model, scope: str):
+    """Select optimizer parameters without changing the serialized architecture."""
+    if scope == "all":
+        for parameter in model.parameters():
+            parameter.requires_grad_(True)
+    elif scope == "fast_weight_only":
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        for index in model.config.fast_weight_layers:
+            mlp = model.model.layers[index].mlp
+            for name in ("W_proj", "beta_proj", "teacher_conv", "student_conv"):
+                value = getattr(mlp, name, None)
+                if isinstance(value, torch.nn.Parameter):
+                    value.requires_grad_(True)
+                elif isinstance(value, torch.nn.Module):
+                    for parameter in value.parameters():
+                        parameter.requires_grad_(True)
+    else:
+        raise ValueError(f"Unsupported trainable parameter scope: {scope}")
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not parameters:
+        raise ValueError("No trainable parameters remain after applying the parameter scope")
+    trainable = sum(parameter.numel() for parameter in parameters)
+    total = sum(parameter.numel() for parameter in model.parameters())
+    print(f"Trainable parameters: {trainable:,} / {total:,} ({100 * trainable / total:.4f}%).", flush=True)
+    return parameters
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="training/configs/qwen3_0_6b.yaml")
@@ -79,20 +107,23 @@ def main():
     config.model.revision = api.model_info(config.model.model_id, revision=config.model.revision).sha
     config.data.revision = api.dataset_info(config.data.dataset_id, revision=config.data.revision).sha
     model = load_model(config).to(device)
+    trainable_parameters = configure_trainable_parameters(
+        model, config.training.trainable_parameters,
+    )
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config.optimizer.lr,
+        trainable_parameters, lr=config.optimizer.lr,
         betas=(config.optimizer.beta1, config.optimizer.beta2),
         eps=config.optimizer.eps, weight_decay=config.optimizer.weight_decay,
     )
     scheduler = build_scheduler(optimizer, config)
-    common = {
-        "dataset_id": config.data.dataset_id, "revision": config.data.revision,
-        "batch_size": config.data.batch_size, "seq_len": config.data.seq_len,
-        "num_workers": config.data.num_workers, "seed": config.training.seed,
-        "shuffle_buffer_size": config.data.shuffle_buffer_size,
-    }
-    train_loader = create_dataloader(**common, **asdict(config.data.train), shuffle=True)
-    val_loader = create_dataloader(**common, **asdict(config.data.val), shuffle=False)
+    train_loader = create_dataloader(
+        config.data, config.data.train, config.loss,
+        shuffle=True, seed=config.training.seed,
+    )
+    val_loader = create_dataloader(
+        config.data, config.data.val, config.loss,
+        shuffle=False, seed=config.training.seed,
+    )
 
     stop = Event()
 
