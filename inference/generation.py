@@ -6,7 +6,7 @@ from typing import Literal
 import torch
 from jaxtyping import Float, Int
 
-from architectures.states.model_state import FWModelState
+from architectures.ttcd.states.model_state import FWModelState
 
 
 @dataclass

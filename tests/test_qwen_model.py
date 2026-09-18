@@ -7,10 +7,10 @@ from jaxtyping import TypeCheckError
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM, Qwen3Model
 
-from architectures.qwen.configuration import FWQwen3Config
-from architectures.qwen.model import FWQwen3Model, FWQwen3ModelOutput
-from architectures.states.model_state import FWModelState
-from architectures.cache.sliding_window import SlidingWindowKVCache
+from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.model import FWQwen3Model, FWQwen3ModelOutput
+from architectures.ttcd.states.model_state import FWModelState
+from architectures.ttcd.cache.sliding_window import SlidingWindowKVCache
 
 
 class ModelTests(unittest.TestCase):

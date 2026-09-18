@@ -15,9 +15,9 @@ import yaml
 from datasets import Dataset
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from architectures.qwen.causal_lm import FWQwen3ForCausalLM
-from architectures.qwen.configuration import FWQwen3Config
-from architectures.qwen.attention import sdpa_attention_forward
+from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.attention import sdpa_attention_forward
 from evaluation.data import PREFIX, format_history_and_question, prepare_example
 from evaluation.diagnostic_judge import (
     DiagnosticVerdict,
@@ -386,7 +386,7 @@ class LongMemEvalTests(unittest.TestCase):
         for name, weight in trained.state_dict().items():
             torch.testing.assert_close(loaded.state_dict()[name], weight)
         with patch.object(mlp.student_conv, "forward", side_effect=AssertionError("Student conv ran")), \
-             patch("architectures.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention:
+             patch("architectures.ttcd.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention:
             output = loaded(torch.arange(6)[None], use_cache=True)
         self.assertEqual(attention.call_count, 1)
         self.assertEqual(output.state.mlp_states[0].pending_count, 0)

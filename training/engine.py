@@ -14,7 +14,7 @@ from .config import (
     LossConfig,
     TrainingConfig,
 )
-from architectures.qwen.mlp import FWQwen3MLP
+from architectures.ttcd.qwen.mlp import FWQwen3MLP
 
 
 @dataclass

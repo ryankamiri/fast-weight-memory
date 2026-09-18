@@ -11,7 +11,7 @@ import torch
 from transformers import AutoTokenizer, Qwen3Config
 import yaml
 
-from architectures.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.configuration import FWQwen3Config
 from evaluation.run import configure_model, load_model
 from evaluation.storage import append_result, ensure_manifest, read_results
 from utils.seed import seed_everything

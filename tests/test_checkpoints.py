@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import torch
 
-from architectures.qwen.configuration import FWQwen3Config
-from architectures.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
 from training.checkpoints import ModelCheckpoints
 from training.config import TrainingConfig
 from training.engine import Progress, train, validate

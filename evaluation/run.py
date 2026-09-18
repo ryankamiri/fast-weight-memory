@@ -16,8 +16,8 @@ import torch
 from transformers import AutoTokenizer, Qwen3Config
 import yaml
 
-from architectures.qwen.causal_lm import FWQwen3ForCausalLM
-from architectures.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import FWQwen3Config
 from evaluation.data import PROMPT_VERSION, prepare_example
 from evaluation.diagnostic_judge import diagnose_all
 from evaluation.judge import BackgroundJudge, judge_all, judge_backend

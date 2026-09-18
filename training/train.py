@@ -9,8 +9,8 @@ import torch
 from transformers import Qwen3Config
 import wandb
 
-from architectures.qwen.causal_lm import FWQwen3ForCausalLM
-from architectures.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import FWQwen3Config
 from data.dataloader import create_dataloader
 from utils.seed import seed_everything
 from .config import TrainingConfig, load_config

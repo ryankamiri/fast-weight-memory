@@ -7,8 +7,8 @@ import torch.nn.functional as F
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
-from architectures.qwen.configuration import FWQwen3Config
-from architectures.qwen.causal_lm import (
+from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import (
     FWQwen3BridgeMemoryOutput,
     FWQwen3CausalLMOutput,
     FWQwen3ForCausalLM,

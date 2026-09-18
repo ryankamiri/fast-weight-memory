@@ -22,7 +22,7 @@ from training.config import (
 )
 from training.engine import build_scheduler, perplexity, train, validate
 from training.train import configure_trainable_parameters, load_model, verify_loading
-from architectures.qwen.mlp import FWQwen3MLP
+from architectures.ttcd.qwen.mlp import FWQwen3MLP
 
 
 class TinyModel(nn.Module):
