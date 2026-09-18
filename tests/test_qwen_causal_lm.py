@@ -7,8 +7,13 @@ import torch.nn.functional as F
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
-from architectures.qwen.configuration import FWQwen3Config
-from architectures.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import (
+    FWQwen3BridgeMemoryOutput,
+    FWQwen3CausalLMOutput,
+    FWQwen3ForCausalLM,
+)
+from training.train import configure_trainable_parameters
 
 
 class CausalLMTests(unittest.TestCase):
@@ -29,6 +34,8 @@ class CausalLMTests(unittest.TestCase):
         labels = self.ids.clone()
         labels[:, 3] = -100
         result = model(self.ids, labels=labels, output_hidden_states=True)
+        self.assertIsInstance(result, FWQwen3CausalLMOutput)
+        self.assertNotIsInstance(result, FWQwen3BridgeMemoryOutput)
         reference_logits = model.lm_head(result.hidden_states[-1])
         expected = F.cross_entropy(
             reference_logits[:, :-1].float().reshape(-1, 40), labels[:, 1:].reshape(-1),
@@ -49,8 +56,68 @@ class CausalLMTests(unittest.TestCase):
         for keep in (-1, True):
             with self.assertRaises(ValueError):
                 model(self.ids, logits_to_keep=keep)
-        with self.assertRaisesRegex(ValueError, "labels require"):
-            model(self.ids, labels=labels, logits_to_keep=1)
+        with torch.no_grad():
+            labeled = model(self.ids, labels=labels, logits_to_keep=1)
+        self.assertEqual(labeled.logits.shape, (2, 1, 40))
+        torch.testing.assert_close(labeled.loss, expected)
+
+    def test_delayed_and_combined_losses_are_separately_averaged(self):
+        model = FWQwen3ForCausalLM(self.config()).train()
+        labels = self.ids.clone()
+        delayed = torch.full_like(labels, -100)
+        delayed[:, -1] = labels[:, -1]
+        result = model.forward_bridge_memory(
+            self.ids,
+            labels=labels,
+            delayed_labels=delayed,
+            all_token_loss_weight=1.0,
+            delayed_answer_loss_weight=2.0,
+            logits_to_keep=2,
+            output_hidden_states=True,
+        )
+        self.assertIsInstance(result, FWQwen3BridgeMemoryOutput)
+        logits = model.lm_head(result.hidden_states[-1]).float()
+        all_expected = F.cross_entropy(
+            logits[:, :-1].reshape(-1, 40), labels[:, 1:].reshape(-1),
+        )
+        delayed_expected = F.cross_entropy(
+            logits[:, :-1].reshape(-1, 40), delayed[:, 1:].reshape(-1),
+        )
+        torch.testing.assert_close(result.all_token_loss, all_expected)
+        torch.testing.assert_close(result.delayed_answer_loss, delayed_expected)
+        torch.testing.assert_close(result.loss, all_expected + 2 * delayed_expected)
+        self.assertEqual(result.logits.shape, (2, 2, 40))
+
+    def test_delayed_loss_reaches_the_frozen_memory_path(self):
+        model = FWQwen3ForCausalLM(self.config(fast_weight_layers=[0])).train()
+        configure_trainable_parameters(model, "fast_weight_only")
+        delayed = torch.full_like(self.ids, -100)
+        delayed[:, -1] = self.ids[:, -1]
+
+        result = model.forward_bridge_memory(
+            self.ids,
+            delayed_labels=delayed,
+            all_token_loss_weight=0.0,
+            delayed_answer_loss_weight=1.0,
+        )
+        result.loss.backward()
+
+        trainable = {
+            name: parameter for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        }
+        self.assertEqual(set(trainable), {
+            "model.layers.0.mlp.W_proj",
+            "model.layers.0.mlp.beta_proj",
+            "model.layers.0.mlp.teacher_conv.weight",
+            "model.layers.0.mlp.student_conv.weight",
+        })
+        self.assertTrue(all(parameter.grad is not None for parameter in trainable.values()))
+        self.assertGreater(trainable["model.layers.0.mlp.student_conv.weight"].grad.abs().sum(), 0)
+        self.assertTrue(all(
+            parameter.grad is None for parameter in model.parameters()
+            if not parameter.requires_grad
+        ))
 
     def test_base_checkpoint_loading_and_native_parity(self):
         for tied in (False, True):

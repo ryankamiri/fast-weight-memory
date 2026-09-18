@@ -3,8 +3,8 @@ import unittest
 import torch
 from jaxtyping import TypeCheckError
 
-from architectures.qwen.configuration import FWQwen3Config
-from architectures.qwen.model import FWQwen3Model
+from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.model import FWQwen3Model
 from inference.prefill import prefill
 
 

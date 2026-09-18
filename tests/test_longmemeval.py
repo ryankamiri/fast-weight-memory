@@ -15,11 +15,29 @@ import yaml
 from datasets import Dataset
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from architectures.qwen.causal_lm import FWQwen3ForCausalLM
-from architectures.qwen.configuration import FWQwen3Config
-from architectures.qwen.attention import sdpa_attention_forward
+from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.attention import sdpa_attention_forward
 from evaluation.data import PREFIX, format_history_and_question, prepare_example
-from evaluation.judge import BackgroundJudge, Verdict, judge_all, request_verdict, rubric, summarize
+from evaluation.diagnostic_judge import (
+    DiagnosticVerdict,
+    diagnostic_paths,
+    diagnose_all,
+    marked_evidence,
+    request_diagnostic,
+    request_jev_diagnostic,
+    summarize_diagnostics,
+)
+from evaluation.judge import (
+    BackgroundJudge,
+    Verdict,
+    judge_all,
+    judge_paths,
+    request_jev_verdict,
+    request_verdict,
+    rubric,
+    summarize,
+)
 from evaluation.run import configure_model, generate_example, load_model
 from evaluation.storage import append_result, ensure_manifest, read_results
 
@@ -86,7 +104,7 @@ class LongMemEvalTests(unittest.TestCase):
             self.assertNotIn("execution_block_size", config)
             self.assertEqual(config["generation"]["execution_block_size"], 4096)
             self.assertNotIn("#", (root / config_path).read_text())
-            launcher = (root / f"evaluation/fs_qwen_eval_{mode}.sbatch").read_text()
+            launcher = (root / f"evaluation/sbatch/fs_qwen_eval_{mode}.sbatch").read_text()
             self.assertIn(f"--config {config_path}", launcher)
             self.assertIn("conda activate fast-weight-memory", launcher)
             self.assertIn("--gres=gpu:h200:1", launcher)
@@ -100,7 +118,7 @@ class LongMemEvalTests(unittest.TestCase):
             path = root / f"evaluation/configs/longmemeval_{name}.yaml"
             configs[name] = yaml.safe_load(path.read_text())
             self.assertNotIn("#", path.read_text())
-            launcher = (root / f"evaluation/fs_qwen_eval_{name}.sbatch").read_text()
+            launcher = (root / f"evaluation/sbatch/fs_qwen_eval_{name}.sbatch").read_text()
             self.assertIn(f"--config evaluation/configs/longmemeval_{name}.yaml", launcher)
             self.assertIn("conda activate fast-weight-memory", launcher)
             position = 1 if name.startswith(("instruct", "base")) else 2
@@ -144,9 +162,112 @@ class LongMemEvalTests(unittest.TestCase):
         half["model"]["fast_weight_read_scale"] = 1.0
         half["dataset"]["revision"] = full["dataset"]["revision"]
         self.assertEqual(half, full)
-        launcher = (root / "evaluation/fs_qwen_eval_fw_swa_half_reads.sbatch").read_text()
+        launcher = (root / "evaluation/sbatch/fs_qwen_eval_fw_swa_half_reads.sbatch").read_text()
         self.assertIn(f"--config {config_path}", launcher)
         self.assertIn("fw_swa_half_reads-${SLURM_JOB_ID}", launcher)
+
+    def test_native_4k_alpha_configs_share_one_evaluation_recipe(self):
+        root = Path(__file__).resolve().parents[1]
+        names = (
+            "longmemeval_fw_swa_native_4k_no_reads.yaml",
+            "longmemeval_fw_swa_native_4k_half_reads.yaml",
+            "longmemeval_fw_swa_native_4k.yaml",
+        )
+        configs = [yaml.safe_load((root / "evaluation/configs" / name).read_text()) for name in names]
+        self.assertEqual([config["model"]["fast_weight_read_scale"] for config in configs], [0.0, 0.5, 1.0])
+        for config in configs:
+            self.assertEqual(
+                [config["model"][key] for key in ("teacher_window_size", "student_window_size", "chunk_size")],
+                [4096, 2048, 1024],
+            )
+            config["model"]["fast_weight_read_scale"] = 1.0
+        self.assertEqual(configs[0], configs[2])
+        self.assertEqual(configs[1], configs[2])
+
+        launcher = (root / "evaluation/sbatch/fs_qwen_eval_fw_swa_native_4k.sbatch").read_text()
+        self.assertIn("--gres=gpu:a100:1", launcher)
+        self.assertIn("--config evaluation/configs/longmemeval_fw_swa_native_4k.yaml", launcher)
+
+    def test_small_window_alpha_configs_share_one_evaluation_recipe(self):
+        root = Path(__file__).resolve().parents[1]
+        suffixes = ("_no_reads", "_half_reads", "")
+        configs = [
+            yaml.safe_load(
+                (root / f"evaluation/configs/longmemeval_fw_swa_2k_1k_512{suffix}.yaml").read_text()
+            )
+            for suffix in suffixes
+        ]
+        self.assertEqual([config["model"]["fast_weight_read_scale"] for config in configs], [0.0, 0.5, 1.0])
+        for config in configs:
+            self.assertEqual(
+                [config["model"][key] for key in ("teacher_window_size", "student_window_size", "chunk_size")],
+                [2048, 1024, 512],
+            )
+            config["model"]["fast_weight_read_scale"] = 1.0
+        self.assertEqual(configs[0], configs[2])
+        self.assertEqual(configs[1], configs[2])
+
+        for suffix in suffixes:
+            launcher = (
+                root / f"evaluation/sbatch/fs_qwen_eval_fw_swa_2k_1k_512{suffix}.sbatch"
+            ).read_text()
+            self.assertIn("--partition=gpu-short", launcher)
+            self.assertIn("--gres=gpu:a100:1", launcher)
+            self.assertIn("--time=02:00:00", launcher)
+
+    def test_4k_1k_1k_alpha_configs_share_one_evaluation_recipe(self):
+        root = Path(__file__).resolve().parents[1]
+        suffixes = ("_no_reads", "_half_reads", "")
+        configs = [
+            yaml.safe_load(
+                (root / f"evaluation/configs/longmemeval_fw_swa_4k_1k_1k{suffix}.yaml").read_text()
+            )
+            for suffix in suffixes
+        ]
+        self.assertEqual([config["model"]["fast_weight_read_scale"] for config in configs], [0.0, 0.5, 1.0])
+        for config in configs:
+            self.assertEqual(
+                [config["model"][key] for key in ("teacher_window_size", "student_window_size", "chunk_size")],
+                [4096, 1024, 1024],
+            )
+            config["model"]["fast_weight_read_scale"] = 1.0
+        self.assertEqual(configs[0], configs[2])
+        self.assertEqual(configs[1], configs[2])
+
+        for suffix in suffixes:
+            launcher = (
+                root / f"evaluation/sbatch/fs_qwen_eval_fw_swa_4k_1k_1k{suffix}.sbatch"
+            ).read_text()
+            self.assertIn("--partition=gpu-short", launcher)
+            self.assertIn("--gres=gpu:a100:1", launcher)
+            self.assertIn("--time=02:00:00", launcher)
+
+    def test_8k_2k_2k_alpha_configs_share_one_evaluation_recipe(self):
+        root = Path(__file__).resolve().parents[1]
+        suffixes = ("_no_reads", "_half_reads", "")
+        configs = [
+            yaml.safe_load(
+                (root / f"evaluation/configs/longmemeval_fw_swa_8k_2k_2k{suffix}.yaml").read_text()
+            )
+            for suffix in suffixes
+        ]
+        self.assertEqual([config["model"]["fast_weight_read_scale"] for config in configs], [0.0, 0.5, 1.0])
+        for config in configs:
+            self.assertEqual(
+                [config["model"][key] for key in ("teacher_window_size", "student_window_size", "chunk_size")],
+                [8192, 2048, 2048],
+            )
+            config["model"]["fast_weight_read_scale"] = 1.0
+        self.assertEqual(configs[0], configs[2])
+        self.assertEqual(configs[1], configs[2])
+
+        for suffix in suffixes:
+            launcher = (
+                root / f"evaluation/sbatch/fs_qwen_eval_fw_swa_8k_2k_2k{suffix}.sbatch"
+            ).read_text()
+            self.assertIn("--partition=gpu-short", launcher)
+            self.assertIn("--gres=gpu:a100:1", launcher)
+            self.assertIn("--time=02:00:00", launcher)
 
     def test_instruct_prompt_uses_raw_fields_and_persists_only_system_message(self):
         row = prepare_example(example(), CharacterTokenizer())
@@ -265,7 +386,7 @@ class LongMemEvalTests(unittest.TestCase):
         for name, weight in trained.state_dict().items():
             torch.testing.assert_close(loaded.state_dict()[name], weight)
         with patch.object(mlp.student_conv, "forward", side_effect=AssertionError("Student conv ran")), \
-             patch("architectures.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention:
+             patch("architectures.ttcd.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention:
             output = loaded(torch.arange(6)[None], use_cache=True)
         self.assertEqual(attention.call_count, 1)
         self.assertEqual(output.state.mlp_states[0].pending_count, 0)
@@ -427,7 +548,222 @@ class BackgroundJudgeTests(unittest.TestCase):
             self.assertIn(row["question_id"], read_results(output / "judgments.jsonl"))
 
 
+class DiagnosticJudgeTests(unittest.IsolatedAsyncioTestCase):
+    def diagnostic_example(self, question_id="example"):
+        return {
+            **example(),
+            "question_id": question_id,
+            "abstention": False,
+            "haystack_session_ids": ["later-id", "earlier-id"],
+            "haystack_sessions": [
+                [
+                    {"role": "user", "content": "irrelevant", "has_answer": False},
+                    {"role": "assistant", "content": "later evidence", "has_answer": True},
+                ],
+                [{"role": "user", "content": "earlier evidence", "has_answer": True}],
+            ],
+        }
+
+    async def test_explanation_first_and_only_marked_evidence_is_sent(self):
+        self.assertEqual(list(DiagnosticVerdict.model_fields)[0], "explanation")
+        verdict = DiagnosticVerdict(
+            explanation="Both source facts are present, but the comparison is reversed.",
+            evidence_recall="all",
+            reasoning_given_evidence="incorrect",
+        )
+        client = SimpleNamespace(responses=SimpleNamespace(parse=AsyncMock(return_value=SimpleNamespace(
+            output_parsed=verdict, id="diagnostic", model="gpt-5.6-terra", usage=None,
+        ))))
+        row = self.diagnostic_example()
+        with patch("evaluation.diagnostic_judge.asyncio.sleep", new_callable=AsyncMock):
+            result = await request_diagnostic(client, row, "wrong comparison", "gpt-5.6-terra")
+
+        self.assertEqual(result["evidence_recall"], "all")
+        payload = json.loads(client.responses.parse.call_args.kwargs["input"])
+        self.assertEqual(
+            [evidence["content"] for evidence in payload["marked_evidence"]],
+            ["earlier evidence", "later evidence"],
+        )
+        self.assertNotIn("irrelevant", json.dumps(payload["marked_evidence"]))
+        self.assertEqual(marked_evidence(row), payload["marked_evidence"])
+
+    async def test_jev_diagnostics_return_labels_without_an_explanation(self):
+        client = SimpleNamespace(system_one=AsyncMock(return_value=SimpleNamespace(
+            choices={
+                "evidence_recall": SimpleNamespace(
+                    choice="partial", probabilities={"all": 0.1, "partial": 0.8, "none": 0.1},
+                ),
+                "reasoning_given_evidence": SimpleNamespace(
+                    choice="not_observable", probabilities={"not_observable": 0.9},
+                ),
+            },
+            model="jev-latest",
+            usage=SimpleNamespace(input_tokens=100, output_tokens=2),
+        )))
+        result = await request_jev_diagnostic(
+            client, self.diagnostic_example(), "short answer", "jev-latest",
+        )
+
+        self.assertNotIn("explanation", result)
+        self.assertEqual(result["evidence_recall"], "partial")
+        self.assertEqual(result["reasoning_given_evidence"], "not_observable")
+        self.assertEqual(
+            set(client.system_one.call_args.kwargs["questions"]),
+            {"evidence_recall", "reasoning_given_evidence"},
+        )
+
+    async def test_jev_diagnostics_use_backend_specific_resume_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            row = self.diagnostic_example()
+            config = {"backend": "jev", "model": "jev-latest", "concurrency": 2}
+            append_result(output / "predictions.jsonl", {
+                "question_id": row["question_id"], "hypothesis": "answer",
+            })
+            append_result(output / "judgments_jev.jsonl", {
+                "question_id": row["question_id"], "correct": False,
+            })
+            verdict = {
+                "evidence_recall": "none",
+                "reasoning_given_evidence": "not_observable",
+                "model": "jev-latest",
+                "usage": None,
+            }
+            with patch(
+                "evaluation.diagnostic_judge.AsyncTypeSafeClient", return_value=AsyncMock(),
+            ), patch(
+                "evaluation.diagnostic_judge.request_jev_diagnostic",
+                new_callable=AsyncMock,
+                return_value=verdict,
+            ):
+                await diagnose_all([row], output, config, "revision")
+
+            paths = diagnostic_paths(output, config)
+            result = read_results(paths["judgments"])[row["question_id"]]
+            self.assertNotIn("explanation", result)
+            self.assertFalse(result["final_correct"])
+            self.assertFalse((output / "diagnostic_judgments.jsonl").exists())
+            self.assertEqual(json.loads(paths["summary"].read_text())["backend"], "jev")
+
+    async def test_diagnostics_resume_separately_and_keep_official_correctness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            rows = [self.diagnostic_example(str(i)) for i in range(2)]
+            for index, row in enumerate(rows):
+                append_result(output / "predictions.jsonl", {
+                    "question_id": row["question_id"], "hypothesis": f"answer {index}",
+                })
+                append_result(output / "judgments.jsonl", {
+                    "question_id": row["question_id"], "correct": index == 0,
+                })
+            append_result(output / "diagnostic_judgments.jsonl", {
+                "question_id": "0",
+                "explanation": "Already complete.",
+                "evidence_recall": "all",
+                "reasoning_given_evidence": "correct",
+                "final_correct": True,
+            })
+            official_before = (output / "judgments.jsonl").read_text()
+            verdict = {
+                "explanation": "No source facts are demonstrated.",
+                "evidence_recall": "none",
+                "reasoning_given_evidence": "not_observable",
+                "response_id": "diagnostic",
+                "model": "gpt-5.6-terra",
+                "usage": None,
+            }
+            with patch("evaluation.diagnostic_judge.AsyncOpenAI", return_value=AsyncMock()), patch(
+                "evaluation.diagnostic_judge.request_diagnostic",
+                new_callable=AsyncMock,
+                return_value=verdict,
+            ) as request:
+                await diagnose_all(
+                    rows, output, {"model": "gpt-5.6-terra", "concurrency": 2}, "revision",
+                )
+                request.assert_awaited_once()
+                self.assertEqual(request.call_args.args[1]["question_id"], "1")
+
+            diagnostics = read_results(output / "diagnostic_judgments.jsonl")
+            self.assertEqual(diagnostics["1"]["final_correct"], False)
+            self.assertEqual((output / "judgments.jsonl").read_text(), official_before)
+            summary = json.loads((output / "diagnostic_summary.json").read_text())
+            self.assertEqual(summary["diagnosed"], 2)
+            self.assertEqual(summary["scores"]["overall"]["evidence_recall"]["none"], 1)
+            self.assertEqual(summary["scores"]["overall"]["final_accuracy"], 0.5)
+
+    def test_summary_reports_missing_diagnostics(self):
+        rows = [self.diagnostic_example(str(i)) for i in range(2)]
+        diagnostics = {
+            "0": {
+                "evidence_recall": "partial",
+                "reasoning_given_evidence": "not_observable",
+                "final_correct": False,
+            },
+        }
+        summary = summarize_diagnostics(rows, diagnostics)
+        self.assertEqual(summary["diagnosed"], 1)
+        self.assertEqual(summary["missing"], 1)
+        self.assertEqual(summary["scores"]["overall"]["evidence_recall"]["partial"], 1)
+
+    def test_cpu_launcher_uses_diagnostics_only_without_gpu(self):
+        root = Path(__file__).resolve().parents[1]
+        launcher = (root / "evaluation/sbatch/fs_qwen_diagnostics.sbatch").read_text()
+        self.assertIn("#SBATCH --partition=short", launcher)
+        self.assertIn("#SBATCH --time=48:00:00", launcher)
+        self.assertIn("--diagnostics-only", launcher)
+        self.assertNotIn("--gres=", launcher)
+        self.assertNotIn("torchrun", launcher)
+
+
 class JudgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_jev_returns_probability_and_sends_structured_state(self):
+        client = SimpleNamespace(system_one=AsyncMock(return_value=SimpleNamespace(
+            nouls={"correct": SimpleNamespace(noul=0.73)},
+            request_id="typesafe-request",
+            model="jev-latest",
+            usage=SimpleNamespace(input_tokens=91, output_tokens=1),
+        )))
+        row = {**example(), "abstention": False}
+        result = await request_jev_verdict(client, row, "The updated answer", "jev-latest", 0.7)
+
+        self.assertTrue(result["correct"])
+        self.assertEqual(result["correct_probability"], 0.73)
+        call = client.system_one.call_args.kwargs
+        self.assertEqual(
+            set(call["state"]),
+            {"question", "reference_answer", "candidate_response"},
+        )
+        self.assertNotIn("haystack_sessions", call["state"])
+        self.assertEqual(call["model"], "jev-latest")
+
+    async def test_jev_uses_independent_resume_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            row = {**example(), "abstention": False}
+            append_result(output / "predictions.jsonl", {
+                "question_id": row["question_id"], "hypothesis": "answer",
+            })
+            client = AsyncMock()
+            client.system_one.return_value = SimpleNamespace(
+                nouls={"correct": SimpleNamespace(noul=0.25)},
+                request_id="typesafe-request",
+                model="jev-latest",
+                usage=None,
+            )
+            config = {
+                "backend": "jev", "model": "jev-latest", "concurrency": 2,
+                "correctness_threshold": 0.5,
+            }
+            with patch("evaluation.judge.AsyncTypeSafeClient", return_value=client):
+                await judge_all([row], output, config)
+
+            paths = judge_paths(output, config)
+            result = read_results(paths["judgments"])[row["question_id"]]
+            self.assertFalse(result["correct"])
+            self.assertEqual(result["backend"], "jev")
+            self.assertFalse((output / "judgments.jsonl").exists())
+            self.assertEqual(json.loads(paths["summary"].read_text())["backend"], "jev")
+
     async def test_transient_errors_retry_but_refusals_are_not_wrong_answers(self):
         response = SimpleNamespace(output_parsed=None)
         client = SimpleNamespace(responses=SimpleNamespace(parse=AsyncMock(side_effect=[

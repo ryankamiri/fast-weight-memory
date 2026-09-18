@@ -6,8 +6,8 @@ from transformers import Qwen3Config
 from transformers.cache_utils import DynamicCache
 from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer, Qwen3RotaryEmbedding
 
-from architectures.qwen.decoder import FWQwen3DecoderLayer
-from architectures.qwen.attention import sdpa_attention_forward
+from architectures.ttcd.qwen.decoder import FWQwen3DecoderLayer
+from architectures.ttcd.qwen.attention import sdpa_attention_forward
 
 
 class DecoderTests(unittest.TestCase):
@@ -61,7 +61,7 @@ class DecoderTests(unittest.TestCase):
         weights = {name: value.clone() for name, value in layer.state_dict().items()}
         layer.mlp.fast_weight_read_scale = 0.0
         kwargs.pop("student_attention_mask")
-        with patch("architectures.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention, \
+        with patch("architectures.ttcd.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention, \
              patch.object(layer.mlp, "_convolve", side_effect=AssertionError("FW convolution ran")):
             actual, state = layer(self.x, **kwargs)
         self.assertEqual(attention.call_count, 1)
@@ -71,7 +71,7 @@ class DecoderTests(unittest.TestCase):
         for name, value in layer.state_dict().items():
             torch.testing.assert_close(value, weights[name])
         layer.mlp.fast_weight_read_scale = 0.5
-        with patch("architectures.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention:
+        with patch("architectures.ttcd.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention:
             layer(self.x, **self.inputs())
         self.assertEqual(attention.call_count, 2)
 

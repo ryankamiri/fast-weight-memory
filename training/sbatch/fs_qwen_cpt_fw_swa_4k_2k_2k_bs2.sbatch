@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=fs-qwen
+#SBATCH --job-name=fs-qwen-cpt-fw-swa-4k-2k-2k-bs2
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=32G
 #SBATCH --time=08:00:00
-#SBATCH --output=logs/fs-qwen-%j.log
-#SBATCH --error=logs/fs-qwen-%j.log
+#SBATCH --output=logs/fs-qwen-cpt-fw-swa-4k-2k-2k-bs2-%j.log
+#SBATCH --error=logs/fs-qwen-cpt-fw-swa-4k-2k-2k-bs2-%j.log
 
 set -eo pipefail
 
@@ -25,4 +25,4 @@ export OMP_NUM_THREADS=4
 # Slurm owns CUDA_VISIBLE_DEVICES. Keep one process until DDP is implemented.
 exec torchrun \
     --standalone --nnodes=1 --nproc-per-node=1 \
-    -m training.train --config "${1:-training/configs/qwen3_0_6b.yaml}"
+    -m training.train --config training/configs/qwen3_0_6b_cpt_fw_swa_4k_2k_2k_bs2.yaml

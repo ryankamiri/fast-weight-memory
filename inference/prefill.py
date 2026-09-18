@@ -2,8 +2,8 @@ import torch
 from beartype import beartype
 from jaxtyping import Bool, Int, jaxtyped
 
-from architectures.qwen.model import FWQwen3Model, FWQwen3ModelOutput
-from architectures.states.model_state import FWModelState
+from architectures.ttcd.qwen.model import FWQwen3Model, FWQwen3ModelOutput
+from architectures.ttcd.states.model_state import FWModelState
 
 
 @torch.inference_mode()

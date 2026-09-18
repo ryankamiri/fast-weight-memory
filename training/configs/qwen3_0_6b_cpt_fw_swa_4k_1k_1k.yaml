@@ -1,0 +1,60 @@
+model:
+  model_id: Qwen/Qwen3-0.6B-Base
+  revision: null
+  fast_weight_layers: [0, 7, 14, 21]
+  teacher_window_size: 4096
+  student_window_size: 1024
+  max_persistent_tokens: 512
+  chunk_size: 1024
+  fast_weight_lr: 0.3
+  fast_weight_read_scale: 1.0
+  use_projection: true
+  use_conv: true
+  conv_kernel_size: 5
+  dynamic_beta: true
+  normalize_student_features: false
+
+data:
+  dataset_id: ryankamiri/prolong-qwen
+  revision: null
+  train: {start: 64, end: null}
+  val: {start: 0, end: 64}
+  batch_size: 1
+  seq_len: 65536
+  num_workers: 2
+  shuffle_buffer_size: 128
+
+optimizer:
+  lr: 1.0e-5
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1.0e-8
+  weight_decay: 0.1
+
+scheduler:
+  warmup_steps: 20
+  schedule_steps: 10000
+  final_lr: 1.0e-6
+
+training:
+  max_steps: 10000
+  seed: 42
+  gradient_accumulation_steps: 16
+  gradient_checkpointing: true
+  max_grad_norm: 1.0
+  eval_every_steps: 10
+  eval_at_end: true
+  log_every_steps: 1
+
+validation:
+  fast_weight_read_scales: [1.0, 0.5, 0.0]
+
+checkpoints:
+  output_dir: checkpoints
+  save_best: true
+  save_final: true
+
+wandb:
+  project: fast-weight-memory
+  entity: ryanamiri05-northeastern-university
+  name: qwen3-0.6b-cpt-fw-swa-4k-1k-1k-64k

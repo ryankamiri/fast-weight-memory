@@ -7,8 +7,8 @@ from torch.nn import functional as F
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP
 
-from architectures.qwen.mlp import FWQwen3MLP
-from architectures.states.mlp_state import FWMLPState
+from architectures.ttcd.qwen.mlp import FWQwen3MLP
+from architectures.ttcd.states.mlp_state import FWMLPState
 
 
 class MLPTests(unittest.TestCase):

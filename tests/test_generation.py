@@ -4,8 +4,8 @@ from unittest.mock import patch
 import torch
 from jaxtyping import TypeCheckError
 
-from architectures.qwen.causal_lm import FWQwen3ForCausalLM
-from architectures.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import FWQwen3Config
 from inference.generation import sample_token
 
 
@@ -52,7 +52,7 @@ class GenerationTests(unittest.TestCase):
     def test_existing_history_and_eos_are_carried_into_state(self):
         for eos in (None, 39, [38, 39]):
             history = self.model.prefill(self.ids[:, :6], persistent_mask=torch.arange(6) < 2)
-            with patch("architectures.qwen.causal_lm.sample_token", return_value=torch.tensor([[39]])) as sample:
+            with patch("architectures.ttcd.qwen.causal_lm.sample_token", return_value=torch.tensor([[39]])) as sample:
                 result = self.model.generate(self.ids[:, 6:], state=history.state, eos_token_id=eos)
             self.assertEqual(sample.call_count, 1)
             self.assertEqual(result.stop_reason, "eos")

@@ -3,9 +3,9 @@ import unittest
 
 import torch
 
-from architectures.cache.sliding_window import SlidingWindowKVCache
-from architectures.qwen.configuration import FWQwen3Config
-from architectures.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.cache.sliding_window import SlidingWindowKVCache
+from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
 
 
 class PersistentKVTests(unittest.TestCase):

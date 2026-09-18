@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import torch
 
-from architectures.qwen.configuration import FWQwen3Config
-from architectures.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
 from training.checkpoints import ModelCheckpoints
 from training.config import TrainingConfig
 from training.engine import Progress, train, validate
@@ -60,13 +60,37 @@ class CheckpointTests(unittest.TestCase):
             with patch.object(model, "save_pretrained", side_effect=OSError("disk full")):
                 with self.assertRaises(OSError):
                     saves.on_validation(model, Progress(step=1), {"val/loss": 2.0})
-            self.assertEqual(saves.best_loss, 3.0)
+            self.assertEqual(saves.best_metric_value, 3.0)
             self.assertEqual([p.name for p in saves.directory.iterdir()], ["best"])
             config.checkpoints.save_best = config.checkpoints.save_final = False
             with patch.object(saves, "save") as write:
                 saves.on_validation(model, Progress(), {"val/loss": 1.0})
                 saves.save_final(model, Progress(), "completed")
                 write.assert_not_called()
+
+    def test_maximizing_a_named_validation_metric(self):
+        with TemporaryDirectory() as directory:
+            config = TrainingConfig()
+            config.checkpoints.output_dir = directory
+            config.checkpoints.selection_metric = "val/bridge_exact_candidate_accuracy"
+            config.checkpoints.selection_mode = "max"
+            saves = ModelCheckpoints(config, "run")
+            model = self.model()
+            with patch.object(saves, "save") as write:
+                saves.on_validation(model, Progress(step=1), {
+                    "val/loss": 4.0,
+                    "val/bridge_exact_candidate_accuracy": 0.25,
+                })
+                saves.on_validation(model, Progress(step=2), {
+                    "val/loss": 3.0,
+                    "val/bridge_exact_candidate_accuracy": 0.20,
+                })
+                saves.on_validation(model, Progress(step=3), {
+                    "val/loss": 3.5,
+                    "val/bridge_exact_candidate_accuracy": 0.50,
+                })
+            self.assertEqual(write.call_count, 2)
+            self.assertEqual(saves.best_metric_value, 0.50)
 
     def test_stop_during_validation_returns_no_partial_score(self):
         model = TinyModel()

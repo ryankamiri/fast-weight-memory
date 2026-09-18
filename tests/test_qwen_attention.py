@@ -6,7 +6,7 @@ from transformers import Qwen3Config
 from transformers.cache_utils import DynamicCache
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention, Qwen3RotaryEmbedding
 
-from architectures.qwen.attention import FWQwen3Attention
+from architectures.ttcd.qwen.attention import FWQwen3Attention
 
 
 class AttentionTests(unittest.TestCase):

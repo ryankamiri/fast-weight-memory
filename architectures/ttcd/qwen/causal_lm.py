@@ -29,8 +29,14 @@ class FWQwen3CausalLMOutput(CausalLMOutputWithPast):
     state: FWModelState | None = None
 
 
+@dataclass
+class FWQwen3BridgeMemoryOutput(FWQwen3CausalLMOutput):
+    all_token_loss: Float[torch.Tensor, ""] | None = None
+    delayed_answer_loss: Float[torch.Tensor, ""] | None = None
+
+
 class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
-    """State-aware LM wrapper; labeled forwards return loss without logits."""
+    """State-aware LM wrapper with memory-efficient causal training losses."""
 
     config_class = FWQwen3Config
     _tied_weights_keys = ["lm_head.weight"]
@@ -53,6 +59,23 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+
+    def _causal_loss(
+        self,
+        hidden_states: Float[torch.Tensor, "N d_model"],
+        labels: Int[torch.Tensor, "B S"],
+    ) -> Float[torch.Tensor, ""]:
+        # N = B * (S - 1): every next-token prediction flattened across batch and sequence.
+        targets: Int[torch.Tensor, "N"] = labels[:, 1:].reshape(-1).to(hidden_states.device)
+        if hidden_states.is_cuda:
+            if LigerFusedLinearCrossEntropyLoss is None:
+                raise ImportError("CUDA loss requires Liger.")
+            # Fuse projection + loss so full [B, S, vocab_size] logits never exist.
+            return LigerFusedLinearCrossEntropyLoss(accum_dtype=torch.float32)(
+                self.lm_head.weight, hidden_states, targets,
+            )
+        # Small local CPU/MPS tests; Liger's kernels require a supported accelerator.
+        return F.cross_entropy(self.lm_head(hidden_states).float(), targets)
 
     @torch.inference_mode()
     @jaxtyped(typechecker=beartype)
@@ -145,8 +168,8 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
     ) -> FWQwen3CausalLMOutput:
         if type(logits_to_keep) is not int or logits_to_keep < 0:
             raise ValueError("logits_to_keep must be a nonnegative integer")
-        if labels is not None and logits_to_keep != 0:
-            raise ValueError("labels require logits_to_keep=0")
+        if labels is not None and labels.shape != input_ids.shape:
+            raise ValueError("labels must match input_ids")
 
         output = self.model(
             input_ids=input_ids, state=state, use_cache=use_cache,
@@ -157,22 +180,76 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
         loss = None
         if labels is not None:
             # Hidden state at t predicts label at t+1; N = B * (S - 1).
-            hidden_states: Float[torch.Tensor, "N d_model"] = output.last_hidden_state[:, :-1].reshape(-1, self.config.hidden_size)
-            targets: Int[torch.Tensor, "N"] = labels[:, 1:].reshape(-1).to(hidden_states.device)
-            if hidden_states.is_cuda:
-                if LigerFusedLinearCrossEntropyLoss is None:
-                    raise ImportError("CUDA loss requires Liger.")
-                # Fuse projection + loss so full [B, S, vocab_size] logits never exist.
-                loss = LigerFusedLinearCrossEntropyLoss(accum_dtype=torch.float32)(
-                    self.lm_head.weight, hidden_states, targets,
-                )
-            else:
-                # Small local CPU/MPS tests; Liger's kernels require a supported accelerator.
-                loss = F.cross_entropy(self.lm_head(hidden_states).float(), targets)
-        else:
+            hidden_states: Float[torch.Tensor, "N d_model"] = (
+                output.last_hidden_state[:, :-1].reshape(-1, self.config.hidden_size)
+            )
+            loss = self._causal_loss(hidden_states, labels)
+        if labels is None or logits_to_keep > 0:
             # [B, S_logits, d_model] -> [B, S_logits, vocab_size]; -0 keeps all S.
-            logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(output.last_hidden_state[:, -logits_to_keep:, :])
+            logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(
+                output.last_hidden_state[:, -logits_to_keep:, :]
+            )
         return FWQwen3CausalLMOutput(
             loss=loss, logits=logits, state=output.state,
             past_key_values=output.past_key_values, hidden_states=output.hidden_states,
+        )
+
+    @jaxtyped(typechecker=beartype)
+    def forward_bridge_memory(
+        self,
+        input_ids: Int[torch.Tensor, "B S"],
+        delayed_labels: Int[torch.Tensor, "B S"],
+        all_token_loss_weight: float,
+        delayed_answer_loss_weight: float,
+        labels: Int[torch.Tensor, "B S"] | None = None,
+        state: FWModelState | None = None,
+        use_cache: bool = False,
+        attention_mask: Bool[torch.Tensor, "B S_kv"] | None = None,
+        logits_to_keep: int = 0,
+        output_hidden_states: bool = False,
+        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
+    ) -> FWQwen3BridgeMemoryOutput:
+        """Run the bridge-memory objective without expanding the standard HF forward API."""
+        if type(logits_to_keep) is not int or logits_to_keep < 0:
+            raise ValueError("logits_to_keep must be a nonnegative integer")
+        for name, weight in (
+            ("all_token_loss_weight", all_token_loss_weight),
+            ("delayed_answer_loss_weight", delayed_answer_loss_weight),
+        ):
+            if type(weight) not in (int, float) or not math.isfinite(weight) or weight < 0:
+                raise ValueError(f"{name} must be a finite nonnegative number")
+        if delayed_answer_loss_weight == 0:
+            raise ValueError("delayed_answer_loss_weight must be positive")
+        if labels is not None and labels.shape != input_ids.shape:
+            raise ValueError("labels must match input_ids")
+        if delayed_labels.shape != input_ids.shape:
+            raise ValueError("delayed_labels must match input_ids")
+
+        output = self.model(
+            input_ids=input_ids, state=state, use_cache=use_cache,
+            attention_mask=attention_mask, output_hidden_states=output_hidden_states,
+            persistent_mask=persistent_mask,
+        )
+        hidden_states: Float[torch.Tensor, "N d_model"] = (
+            output.last_hidden_state[:, :-1].reshape(-1, self.config.hidden_size)
+        )
+        all_token_loss = None
+        terms = []
+        if labels is not None and all_token_loss_weight > 0:
+            all_token_loss = self._causal_loss(hidden_states, labels)
+            terms.append(all_token_loss_weight * all_token_loss)
+        delayed_answer_loss = self._causal_loss(hidden_states, delayed_labels)
+        terms.append(delayed_answer_loss_weight * delayed_answer_loss)
+        loss = torch.stack(terms).sum()
+
+        logits = None
+        if logits_to_keep > 0:
+            logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(
+                output.last_hidden_state[:, -logits_to_keep:, :]
+            )
+        return FWQwen3BridgeMemoryOutput(
+            loss=loss, logits=logits, state=output.state,
+            past_key_values=output.past_key_values, hidden_states=output.hidden_states,
+            all_token_loss=all_token_loss,
+            delayed_answer_loss=delayed_answer_loss,
         )
