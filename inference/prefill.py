@@ -2,19 +2,19 @@ import torch
 from beartype import beartype
 from jaxtyping import Bool, Int, jaxtyped
 
-from architectures.ttcd.qwen.model import FWQwen3Model, FWQwen3ModelOutput
-from architectures.ttcd.states.model_state import FWModelState
+from architectures.ttcd.qwen.model import TTCDQwen3Model, TTCDQwen3ModelOutput
+from architectures.ttcd.states.model_state import TTCDModelState
 
 
 @torch.inference_mode()
 @jaxtyped(typechecker=beartype)
 def prefill(
-    model: FWQwen3Model,
+    model: TTCDQwen3Model,
     input_ids: Int[torch.Tensor, "B S_prompt"],
     execution_block_size: int | None = None,
-    state: FWModelState | None = None,
+    state: TTCDModelState | None = None,
     persistent_mask: Bool[torch.Tensor, "S_prompt"] | None = None,
-) -> FWQwen3ModelOutput:
+) -> TTCDQwen3ModelOutput:
     """Process an unpadded prompt in blocks."""
     if model.training:
         raise ValueError("prefill requires evaluation mode; call model.eval() first")

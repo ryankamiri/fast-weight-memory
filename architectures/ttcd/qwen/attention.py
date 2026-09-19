@@ -13,7 +13,7 @@ from transformers.models.qwen3.modeling_qwen3 import (
 )
 
 
-class FWQwen3Attention(Qwen3Attention):
+class TTCDQwen3Attention(Qwen3Attention):
     """Qwen attention with optional teacher/student outputs."""
 
     def __init__(

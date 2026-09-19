@@ -11,7 +11,7 @@ import torch
 from transformers import AutoTokenizer, Qwen3Config
 import yaml
 
-from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from evaluation.run import configure_model, load_model
 from evaluation.storage import append_result, ensure_manifest, read_results
 from utils.seed import seed_everything
@@ -112,7 +112,7 @@ def main():
         full_window = settings["model"]["full_attention_window_size"]
         if full_window < metadata["maximum_prompt_length"]:
             raise ValueError("full_attention_window_size must cover every prepared prompt")
-        model_config = FWQwen3Config(
+        model_config = TTCDQwen3Config(
             **base.to_dict(), fast_weight_layers=[],
             teacher_window_size=full_window,
             student_window_size=geometry["student_window_size"],
@@ -121,7 +121,7 @@ def main():
         model_config = configure_model(model_config, "full")
     else:
         source = str(args.checkpoint.resolve())
-        model_config = FWQwen3Config.from_pretrained(source)
+        model_config = TTCDQwen3Config.from_pretrained(source)
         model_config = configure_model(model_config, system["mode"], geometry)
 
     ensure_manifest(args.output_dir / "manifest.json", {

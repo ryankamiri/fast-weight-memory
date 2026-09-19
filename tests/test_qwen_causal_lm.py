@@ -7,11 +7,11 @@ import torch.nn.functional as F
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
-from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from architectures.ttcd.qwen.causal_lm import (
-    FWQwen3BridgeMemoryOutput,
-    FWQwen3CausalLMOutput,
-    FWQwen3ForCausalLM,
+    TTCDQwen3BridgeMemoryOutput,
+    TTCDQwen3CausalLMOutput,
+    TTCDQwen3ForCausalLM,
 )
 from training.train import configure_trainable_parameters
 
@@ -22,7 +22,7 @@ class CausalLMTests(unittest.TestCase):
         self.ids = torch.randint(0, 40, (2, 13))
 
     def config(self, **kwargs):
-        return FWQwen3Config(
+        return TTCDQwen3Config(
             vocab_size=40, hidden_size=16, intermediate_size=24,
             num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
             head_dim=4, teacher_window_size=32, student_window_size=2,
@@ -30,12 +30,12 @@ class CausalLMTests(unittest.TestCase):
         )
 
     def test_logits_shifted_loss_and_gradients(self):
-        model = FWQwen3ForCausalLM(self.config()).train()
+        model = TTCDQwen3ForCausalLM(self.config()).train()
         labels = self.ids.clone()
         labels[:, 3] = -100
         result = model(self.ids, labels=labels, output_hidden_states=True)
-        self.assertIsInstance(result, FWQwen3CausalLMOutput)
-        self.assertNotIsInstance(result, FWQwen3BridgeMemoryOutput)
+        self.assertIsInstance(result, TTCDQwen3CausalLMOutput)
+        self.assertNotIsInstance(result, TTCDQwen3BridgeMemoryOutput)
         reference_logits = model.lm_head(result.hidden_states[-1])
         expected = F.cross_entropy(
             reference_logits[:, :-1].float().reshape(-1, 40), labels[:, 1:].reshape(-1),
@@ -62,7 +62,7 @@ class CausalLMTests(unittest.TestCase):
         torch.testing.assert_close(labeled.loss, expected)
 
     def test_delayed_and_combined_losses_are_separately_averaged(self):
-        model = FWQwen3ForCausalLM(self.config()).train()
+        model = TTCDQwen3ForCausalLM(self.config()).train()
         labels = self.ids.clone()
         delayed = torch.full_like(labels, -100)
         delayed[:, -1] = labels[:, -1]
@@ -75,7 +75,7 @@ class CausalLMTests(unittest.TestCase):
             logits_to_keep=2,
             output_hidden_states=True,
         )
-        self.assertIsInstance(result, FWQwen3BridgeMemoryOutput)
+        self.assertIsInstance(result, TTCDQwen3BridgeMemoryOutput)
         logits = model.lm_head(result.hidden_states[-1]).float()
         all_expected = F.cross_entropy(
             logits[:, :-1].reshape(-1, 40), labels[:, 1:].reshape(-1),
@@ -89,7 +89,7 @@ class CausalLMTests(unittest.TestCase):
         self.assertEqual(result.logits.shape, (2, 2, 40))
 
     def test_delayed_loss_reaches_the_frozen_memory_path(self):
-        model = FWQwen3ForCausalLM(self.config(fast_weight_layers=[0])).train()
+        model = TTCDQwen3ForCausalLM(self.config(fast_weight_layers=[0])).train()
         configure_trainable_parameters(model, "fast_weight_only")
         delayed = torch.full_like(self.ids, -100)
         delayed[:, -1] = self.ids[:, -1]
@@ -125,7 +125,7 @@ class CausalLMTests(unittest.TestCase):
             native = Qwen3ForCausalLM(Qwen3Config.from_dict(config.to_dict())).eval()
             with tempfile.TemporaryDirectory() as folder:
                 native.save_pretrained(folder)
-                loaded, info = FWQwen3ForCausalLM.from_pretrained(
+                loaded, info = TTCDQwen3ForCausalLM.from_pretrained(
                     folder, config=config, output_loading_info=True,
                 )
             self.assertEqual(info["missing_keys"], [])
@@ -145,7 +145,7 @@ class CausalLMTests(unittest.TestCase):
             native = Qwen3ForCausalLM(Qwen3Config.from_dict(config.to_dict()))
             with tempfile.TemporaryDirectory() as folder:
                 native.save_pretrained(folder)
-                loaded, info = FWQwen3ForCausalLM.from_pretrained(folder, config=config, output_loading_info=True)
+                loaded, info = TTCDQwen3ForCausalLM.from_pretrained(folder, config=config, output_loading_info=True)
                 self.assertEqual(info["unexpected_keys"], [])
                 self.assertTrue(info["missing_keys"])
                 for key, value in native.state_dict().items():
@@ -162,7 +162,7 @@ class CausalLMTests(unittest.TestCase):
                     mlp.W_proj.normal_()
                     mlp.student_conv.weight.normal_()
                 loaded.save_pretrained(folder)
-                restored = FWQwen3ForCausalLM.from_pretrained(folder)
+                restored = TTCDQwen3ForCausalLM.from_pretrained(folder)
             self.assertEqual(restored.lm_head.weight is restored.model.embed_tokens.weight, tied)
             for key, value in loaded.state_dict().items():
                 torch.testing.assert_close(restored.state_dict()[key], value)
@@ -172,7 +172,7 @@ class CausalLMTests(unittest.TestCase):
     def test_prefill_projects_only_final_token_and_decodes(self):
         config = self.config()
         config.teacher_window_size = 5
-        model = FWQwen3ForCausalLM(config).eval()
+        model = TTCDQwen3ForCausalLM(config).eval()
         expected = model(self.ids, use_cache=True, logits_to_keep=1)
         calls = []
         handle = model.lm_head.register_forward_pre_hook(lambda module, args: calls.append(args[0].shape))
@@ -196,7 +196,7 @@ class CausalLMTests(unittest.TestCase):
             torch.testing.assert_close(actual.logits, expected.logits)
 
     def test_checkpointing_contract(self):
-        model = FWQwen3ForCausalLM(self.config()).train()
+        model = TTCDQwen3ForCausalLM(self.config()).train()
         with self.assertRaisesRegex(ValueError, "use_reentrant=False"):
             model.gradient_checkpointing_enable({"use_reentrant": True})
         model.gradient_checkpointing_enable()
@@ -211,8 +211,8 @@ class CausalLMTests(unittest.TestCase):
     def test_fused_loss_and_gradients_match_cross_entropy(self):
         for mixed_precision in (False, True):
             with self.subTest(mixed_precision=mixed_precision):
-                fused = FWQwen3ForCausalLM(self.config(tie_word_embeddings=True)).cuda().train()
-                reference = FWQwen3ForCausalLM(self.config(tie_word_embeddings=True)).cuda().train()
+                fused = TTCDQwen3ForCausalLM(self.config(tie_word_embeddings=True)).cuda().train()
+                reference = TTCDQwen3ForCausalLM(self.config(tie_word_embeddings=True)).cuda().train()
                 reference.load_state_dict(fused.state_dict())
                 fused.gradient_checkpointing_enable()
                 ids = self.ids.cuda()

@@ -16,8 +16,8 @@ import torch
 from transformers import AutoTokenizer, Qwen3Config
 import yaml
 
-from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
-from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from evaluation.data import PROMPT_VERSION, prepare_example
 from evaluation.diagnostic_judge import diagnose_all
 from evaluation.judge import BackgroundJudge, judge_all, judge_backend
@@ -36,7 +36,7 @@ def configure_model(config, mode, settings=None):
             for name in ("teacher_window_size", "student_window_size", "chunk_size")
             if name in settings
         }
-        config = FWQwen3Config(**{**config.to_dict(), **overrides})
+        config = TTCDQwen3Config(**{**config.to_dict(), **overrides})
     return config
 
 
@@ -44,7 +44,7 @@ def load_model(source, config, fast_weight_read_scale=1.0):
     if type(fast_weight_read_scale) not in (int, float) or not math.isfinite(fast_weight_read_scale) or fast_weight_read_scale < 0:
         raise ValueError("fast_weight_read_scale must be a finite nonnegative number")
     config.fast_weight_read_scale = float(fast_weight_read_scale)
-    model, loading = FWQwen3ForCausalLM.from_pretrained(
+    model, loading = TTCDQwen3ForCausalLM.from_pretrained(
         source, config=config, dtype=torch.bfloat16,
         attn_implementation="sdpa", output_loading_info=True,
     )
@@ -128,11 +128,11 @@ def main():
     args.mode = args.mode or config["mode"]
     config["mode"] = args.mode
     if args.checkpoint is not None:
-        model_config = FWQwen3Config.from_pretrained(model_source)
+        model_config = TTCDQwen3Config.from_pretrained(model_source)
     else:
-        # Untouched Qwen weights: wrap the architecture with no added FW layers.
+        # Untouched Qwen weights: wrap the architecture with no added TTCD layers.
         base_config = Qwen3Config.from_pretrained(model_source)
-        model_config = FWQwen3Config(**base_config.to_dict(), fast_weight_layers=[])
+        model_config = TTCDQwen3Config(**base_config.to_dict(), fast_weight_layers=[])
     model_config = configure_model(model_config, args.mode, model_settings)
     ensure_manifest(manifest_path, {
         "config": {key: value for key, value in config.items() if key != "judge"},
@@ -172,7 +172,7 @@ def main():
         print(
             f"Mode={args.mode}, prompt={prompt_format}, maximum prompt={maximum}, "
             f"teacher={model_config.teacher_window_size}, student={model_config.student_window_size}, "
-            f"chunk={model_config.chunk_size}, FW read scale={model_settings.get('fast_weight_read_scale', 1.0)}",
+            f"chunk={model_config.chunk_size}, TTCD read scale={model_settings.get('fast_weight_read_scale', 1.0)}",
             flush=True,
         )
 

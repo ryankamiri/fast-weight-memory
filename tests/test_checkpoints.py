@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import torch
 
-from architectures.ttcd.qwen.configuration import FWQwen3Config
-from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
+from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
 from training.checkpoints import ModelCheckpoints
 from training.config import TrainingConfig
 from training.engine import Progress, train, validate
@@ -16,7 +16,7 @@ from test_training import TinyLoader, TinyModel, batch
 
 class CheckpointTests(unittest.TestCase):
     def model(self):
-        return FWQwen3ForCausalLM(FWQwen3Config(
+        return TTCDQwen3ForCausalLM(TTCDQwen3Config(
             vocab_size=16, hidden_size=8, intermediate_size=16,
             num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
             head_dim=4, fast_weight_layers=[0], teacher_window_size=4,
@@ -43,7 +43,7 @@ class CheckpointTests(unittest.TestCase):
             saves.save_final(model, progress, "signal")
             self.assertEqual(sorted(p.name for p in best.parent.iterdir()), ["best", "final"])
             for name in ("best", "final"):
-                restored = FWQwen3ForCausalLM.from_pretrained(best.parent / name)
+                restored = TTCDQwen3ForCausalLM.from_pretrained(best.parent / name)
                 for key, value in model.state_dict().items():
                     torch.testing.assert_close(restored.state_dict()[key], value)
             metadata = json.loads((best / "training_metadata.json").read_text())

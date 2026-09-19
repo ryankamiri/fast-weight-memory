@@ -4,22 +4,22 @@ from unittest.mock import patch
 import torch
 from jaxtyping import TypeCheckError
 
-from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
-from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from inference.generation import sample_token
 
 
 class GenerationTests(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(21)
-        config = FWQwen3Config(
+        config = TTCDQwen3Config(
             vocab_size=40, hidden_size=24, intermediate_size=32,
             num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
             head_dim=6, teacher_window_size=4, student_window_size=2,
             fast_weight_layers=[0], chunk_size=3, conv_kernel_size=2,
             attention_dropout=0.0, eos_token_id=39,
         )
-        self.model = FWQwen3ForCausalLM(config).eval()
+        self.model = TTCDQwen3ForCausalLM(config).eval()
         self.ids = torch.randint(0, 30, (1, 9))
 
     @torch.inference_mode()

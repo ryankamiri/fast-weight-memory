@@ -4,8 +4,8 @@ import unittest
 import torch
 
 from architectures.ttcd.cache.sliding_window import SlidingWindowKVCache
-from architectures.ttcd.qwen.configuration import FWQwen3Config
-from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
+from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
 
 
 class PersistentKVTests(unittest.TestCase):
@@ -32,10 +32,10 @@ class PersistentKVTests(unittest.TestCase):
             cache.update(x, x, 0, {"persistent_mask": torch.tensor([True])})
         for invalid in (-1, True, 1.5):
             with self.assertRaises(ValueError):
-                FWQwen3Config(max_persistent_tokens=invalid)
+                TTCDQwen3Config(max_persistent_tokens=invalid)
             with self.assertRaises(ValueError):
                 SlidingWindowKVCache(1, 2, max_persistent_tokens=invalid)
-        restored = FWQwen3Config.from_dict(FWQwen3Config(max_persistent_tokens=17).to_dict())
+        restored = TTCDQwen3Config.from_dict(TTCDQwen3Config(max_persistent_tokens=17).to_dict())
         self.assertEqual(restored.max_persistent_tokens, 17)
 
     @torch.inference_mode()
@@ -52,7 +52,7 @@ class PersistentKVTests(unittest.TestCase):
 
     def model(self, fast_layers, backend="sdpa"):
         torch.manual_seed(12)
-        config = FWQwen3Config(
+        config = TTCDQwen3Config(
             vocab_size=40, hidden_size=24, intermediate_size=32,
             num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
             head_dim=6, teacher_window_size=4, student_window_size=2,
@@ -60,7 +60,7 @@ class PersistentKVTests(unittest.TestCase):
             attention_dropout=0.0,
         )
         config._attn_implementation = backend
-        return FWQwen3ForCausalLM(config).eval()
+        return TTCDQwen3ForCausalLM(config).eval()
 
     def test_cache_owns_flags_and_positions_after_eviction(self):
         for window in (1, 4):

@@ -16,37 +16,37 @@ except ModuleNotFoundError as error:
         raise
     LigerFusedLinearCrossEntropyLoss = None
 
-from .configuration import FWQwen3Config
-from .mlp import FWQwen3MLP
-from .model import FWQwen3Model
-from ..states.model_state import FWModelState
+from .configuration import TTCDQwen3Config
+from .mlp import TTCDQwen3MLP
+from .model import TTCDQwen3Model
+from ..states.model_state import TTCDModelState
 from inference.generation import GenerationOutput, sample_token
 from inference.prefill import prefill
 
 
 @dataclass
-class FWQwen3CausalLMOutput(CausalLMOutputWithPast):
-    state: FWModelState | None = None
+class TTCDQwen3CausalLMOutput(CausalLMOutputWithPast):
+    state: TTCDModelState | None = None
 
 
 @dataclass
-class FWQwen3BridgeMemoryOutput(FWQwen3CausalLMOutput):
+class TTCDQwen3BridgeMemoryOutput(TTCDQwen3CausalLMOutput):
     all_token_loss: Float[torch.Tensor, ""] | None = None
     delayed_answer_loss: Float[torch.Tensor, ""] | None = None
 
 
-class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
+class TTCDQwen3ForCausalLM(Qwen3PreTrainedModel):
     """State-aware LM wrapper with memory-efficient causal training losses."""
 
-    config_class = FWQwen3Config
+    config_class = TTCDQwen3Config
     _tied_weights_keys = ["lm_head.weight"]
-    _no_split_modules = ["FWQwen3DecoderLayer"]
+    _no_split_modules = ["TTCDQwen3DecoderLayer"]
     _supports_flash_attn = False
     _supports_flex_attn = False
 
-    def __init__(self, config: FWQwen3Config):
+    def __init__(self, config: TTCDQwen3Config):
         super().__init__(config)
-        self.model = FWQwen3Model(config)
+        self.model = TTCDQwen3Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()
@@ -54,7 +54,7 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
     @torch.no_grad()
     def _init_weights(self, module):
         super()._init_weights(module)
-        if isinstance(module, FWQwen3MLP) and module.is_fast_weight_layer:
+        if isinstance(module, TTCDQwen3MLP) and module.is_fast_weight_layer:
             module.reset_fast_weight_parameters()
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
@@ -83,15 +83,15 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
         self,
         input_ids: Int[torch.Tensor, "B S"],
         execution_block_size: int | None = None,
-        state: FWModelState | None = None,
+        state: TTCDModelState | None = None,
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
-    ) -> FWQwen3CausalLMOutput:
+    ) -> TTCDQwen3CausalLMOutput:
         """Prefill the backbone, then project only the final token to logits."""
         output = prefill(
             self.model, input_ids, execution_block_size=execution_block_size,
             state=state, persistent_mask=persistent_mask,
         )
-        return FWQwen3CausalLMOutput(
+        return TTCDQwen3CausalLMOutput(
             logits=self.lm_head(output.last_hidden_state[:, -1:, :]),
             state=output.state, past_key_values=output.past_key_values,
         )
@@ -101,7 +101,7 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
     def generate(
         self,
         input_ids: Int[torch.Tensor, "1 S"],
-        state: FWModelState | None = None,
+        state: TTCDModelState | None = None,
         max_new_tokens: int = 256,
         do_sample: bool = True,
         temperature: float = 0.7,
@@ -158,14 +158,14 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
     def forward(
         self,
         input_ids: Int[torch.Tensor, "B S"],
-        state: FWModelState | None = None,
+        state: TTCDModelState | None = None,
         use_cache: bool = False,
         attention_mask: Bool[torch.Tensor, "B S_kv"] | None = None,
         labels: Int[torch.Tensor, "B S"] | None = None,
         logits_to_keep: int = 0,
         output_hidden_states: bool = False,
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
-    ) -> FWQwen3CausalLMOutput:
+    ) -> TTCDQwen3CausalLMOutput:
         if type(logits_to_keep) is not int or logits_to_keep < 0:
             raise ValueError("logits_to_keep must be a nonnegative integer")
         if labels is not None and labels.shape != input_ids.shape:
@@ -189,7 +189,7 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
             logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(
                 output.last_hidden_state[:, -logits_to_keep:, :]
             )
-        return FWQwen3CausalLMOutput(
+        return TTCDQwen3CausalLMOutput(
             loss=loss, logits=logits, state=output.state,
             past_key_values=output.past_key_values, hidden_states=output.hidden_states,
         )
@@ -202,13 +202,13 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
         all_token_loss_weight: float,
         delayed_answer_loss_weight: float,
         labels: Int[torch.Tensor, "B S"] | None = None,
-        state: FWModelState | None = None,
+        state: TTCDModelState | None = None,
         use_cache: bool = False,
         attention_mask: Bool[torch.Tensor, "B S_kv"] | None = None,
         logits_to_keep: int = 0,
         output_hidden_states: bool = False,
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
-    ) -> FWQwen3BridgeMemoryOutput:
+    ) -> TTCDQwen3BridgeMemoryOutput:
         """Run the bridge-memory objective without expanding the standard HF forward API."""
         if type(logits_to_keep) is not int or logits_to_keep < 0:
             raise ValueError("logits_to_keep must be a nonnegative integer")
@@ -247,7 +247,7 @@ class FWQwen3ForCausalLM(Qwen3PreTrainedModel):
             logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(
                 output.last_hidden_state[:, -logits_to_keep:, :]
             )
-        return FWQwen3BridgeMemoryOutput(
+        return TTCDQwen3BridgeMemoryOutput(
             loss=loss, logits=logits, state=output.state,
             past_key_values=output.past_key_values, hidden_states=output.hidden_states,
             all_token_loss=all_token_loss,

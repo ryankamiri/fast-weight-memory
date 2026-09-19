@@ -3,15 +3,15 @@ import unittest
 import torch
 from jaxtyping import TypeCheckError
 
-from architectures.ttcd.qwen.configuration import FWQwen3Config
-from architectures.ttcd.qwen.model import FWQwen3Model
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
+from architectures.ttcd.qwen.model import TTCDQwen3Model
 from inference.prefill import prefill
 
 
 class PrefillTests(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(31)
-        self.model = FWQwen3Model(FWQwen3Config(
+        self.model = TTCDQwen3Model(TTCDQwen3Config(
             vocab_size=40, hidden_size=16, intermediate_size=24,
             num_hidden_layers=2, num_attention_heads=4,
             num_key_value_heads=2, head_dim=4,

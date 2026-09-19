@@ -3,10 +3,10 @@ import math
 from transformers import Qwen3Config
 
 
-class FWQwen3Config(Qwen3Config):
+class TTCDQwen3Config(Qwen3Config):
     """Qwen config plus serializable fast-weight settings."""
 
-    model_type = "fw_qwen3"
+    model_type = "ttcd_qwen3"
 
     def __init__(
         self,

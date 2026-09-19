@@ -14,7 +14,7 @@ from .config import (
     LossConfig,
     TrainingConfig,
 )
-from architectures.ttcd.qwen.mlp import FWQwen3MLP
+from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
 
 
 @dataclass
@@ -244,7 +244,7 @@ def validate(model, dataloader, device: torch.device, should_stop=lambda: False,
              fast_weight_read_scales=(1.0, 0.5, 0.0),
              loss_config: LossConfig | None = None) -> dict[str, float] | None:
     layers = [module for module in model.modules()
-              if isinstance(module, FWQwen3MLP) and module.is_fast_weight_layer]
+              if isinstance(module, TTCDQwen3MLP) and module.is_fast_weight_layer]
     previous = [module.fast_weight_read_scale for module in layers]
     try:
         # Standard validation/checkpoint selection always uses full-strength reads.

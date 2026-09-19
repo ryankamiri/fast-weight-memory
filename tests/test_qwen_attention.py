@@ -6,7 +6,7 @@ from transformers import Qwen3Config
 from transformers.cache_utils import DynamicCache
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention, Qwen3RotaryEmbedding
 
-from architectures.ttcd.qwen.attention import FWQwen3Attention
+from architectures.ttcd.qwen.attention import TTCDQwen3Attention
 
 
 class AttentionTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class AttentionTests(unittest.TestCase):
         self.x = torch.randn(2, 9, 32)
 
     def wrapped(self):
-        wrapped = FWQwen3Attention(
+        wrapped = TTCDQwen3Attention(
             self.config, 0, is_fast_weight_layer=True,
         )
         wrapped.load_state_dict(self.base.state_dict())
@@ -51,7 +51,7 @@ class AttentionTests(unittest.TestCase):
         return self.base(x, self.embeddings(x), mask)[0]
 
     def test_normal_fallback_and_checkpoint_loading(self):
-        wrapped = FWQwen3Attention(self.config, 0).eval()
+        wrapped = TTCDQwen3Attention(self.config, 0).eval()
         wrapped.load_state_dict(self.base.state_dict())
         self.assertEqual(set(wrapped.state_dict()), set(self.base.state_dict()))
         mask = torch.ones(9, 9).tril().log()[None, None]

@@ -23,7 +23,7 @@ export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=4
 
 if (( $# < 2 )); then
-    echo "Usage: sbatch $0 FW_CHECKPOINT SWA_CHECKPOINT [OUTPUT_ROOT]" >&2
+    echo "Usage: sbatch $0 TTCD_CHECKPOINT SWA_CHECKPOINT [OUTPUT_ROOT]" >&2
     exit 2
 fi
 

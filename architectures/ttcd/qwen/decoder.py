@@ -5,12 +5,12 @@ from transformers.cache_utils import Cache
 from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
-from .attention import FWQwen3Attention
-from .mlp import FWQwen3MLP
-from ..states.mlp_state import FWMLPState
+from .attention import TTCDQwen3Attention
+from .mlp import TTCDQwen3MLP
+from ..states.mlp_state import TTCDMLPState
 
 
-class FWQwen3DecoderLayer(GradientCheckpointingLayer):
+class TTCDQwen3DecoderLayer(GradientCheckpointingLayer):
     """Qwen decoder with an optional teacher/student fast-weight MLP path."""
 
     def __init__(
@@ -31,11 +31,11 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
         self.hidden_size = config.hidden_size
         self.is_fast_weight_layer = is_fast_weight_layer
         self.attention_type = config.layer_types[layer_idx]
-        self.self_attn = FWQwen3Attention(
+        self.self_attn = TTCDQwen3Attention(
             config, layer_idx,
             is_fast_weight_layer=is_fast_weight_layer,
         )
-        self.mlp = FWQwen3MLP(
+        self.mlp = TTCDQwen3MLP(
             config,
             is_fast_weight_layer=is_fast_weight_layer,
             chunk_size=chunk_size,
@@ -64,10 +64,10 @@ class FWQwen3DecoderLayer(GradientCheckpointingLayer):
         past_key_values: Cache | None = None,
         cache_position: Int[torch.Tensor, "S"] | None = None,
         use_cache: bool = False,
-        state: FWMLPState | None = None,
+        state: TTCDMLPState | None = None,
         output_attentions: bool = False,
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
-    ) -> Float[torch.Tensor, "B S d_model"] | tuple[Float[torch.Tensor, "B S d_model"], FWMLPState]:
+    ) -> Float[torch.Tensor, "B S d_model"] | tuple[Float[torch.Tensor, "B S d_model"], TTCDMLPState]:
         if position_embeddings is None:
             raise ValueError("position_embeddings must be supplied by the model's RoPE module")
         if not self.is_fast_weight_layer and state is not None:

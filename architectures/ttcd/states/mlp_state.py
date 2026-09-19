@@ -7,7 +7,7 @@ from jaxtyping import Float, Float32, jaxtyped
 
 @jaxtyped(typechecker=beartype)
 @dataclass
-class FWMLPState:
+class TTCDMLPState:
     """Architecture-independent memory for one batch at one fast-weight MLP layer."""
 
     W_fast: Float32[torch.Tensor, "B d_model d_mlp"]
@@ -23,7 +23,7 @@ class FWMLPState:
 
     def detach(self):
         """Return the same memory values without their training graph."""
-        return FWMLPState(
+        return TTCDMLPState(
             W_fast=self.W_fast.detach(),
             pending_r=None if self.pending_r is None else self.pending_r.detach(),
             pending_k=None if self.pending_k is None else self.pending_k.detach(),

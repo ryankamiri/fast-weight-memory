@@ -15,8 +15,8 @@ import yaml
 from datasets import Dataset
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
-from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from architectures.ttcd.qwen.attention import sdpa_attention_forward
 from evaluation.data import PREFIX, format_history_and_question, prepare_example
 from evaluation.diagnostic_judge import (
@@ -319,15 +319,15 @@ class LongMemEvalTests(unittest.TestCase):
             prepare_example(source, tokenizer, "unknown")
 
     def test_modes_do_not_change_trained_fast_weight_architecture(self):
-        config = FWQwen3Config(fast_weight_layers=[])
+        config = TTCDQwen3Config(fast_weight_layers=[])
         self.assertEqual(configure_model(config, "full").teacher_window_size, 8192)
         with self.assertRaises(ValueError):
             configure_model(config, "fw_swa")
-        config = FWQwen3Config(fast_weight_layers=[0])
+        config = TTCDQwen3Config(fast_weight_layers=[0])
         self.assertEqual(configure_model(config, "fw_swa").teacher_window_size, 8192)
 
     def test_window_overrides_preserve_checkpoint_architecture(self):
-        original = FWQwen3Config(fast_weight_layers=[0, 7])
+        original = TTCDQwen3Config(fast_weight_layers=[0, 7])
         settings = {"teacher_window_size": 4096, "student_window_size": 2048, "chunk_size": 1024}
         updated = configure_model(original, "fw_swa", settings)
         self.assertEqual(updated.fast_weight_layers, [0, 7])
@@ -346,7 +346,7 @@ class LongMemEvalTests(unittest.TestCase):
         )
         native_config._attn_implementation = "sdpa"
         native = Qwen3ForCausalLM(native_config).eval()
-        config = FWQwen3Config(**native_config.to_dict(), fast_weight_layers=[])
+        config = TTCDQwen3Config(**native_config.to_dict(), fast_weight_layers=[])
         with tempfile.TemporaryDirectory() as directory:
             native.save_pretrained(directory)
             wrapped = load_model(directory, config).eval()
@@ -361,12 +361,12 @@ class LongMemEvalTests(unittest.TestCase):
 
     @torch.inference_mode()
     def test_loading_fw_reads_off_keeps_trained_weights_and_skips_student_attention(self):
-        config = FWQwen3Config(
+        config = TTCDQwen3Config(
             vocab_size=32, hidden_size=16, intermediate_size=24, num_hidden_layers=1,
             num_attention_heads=2, num_key_value_heads=1, head_dim=8,
             fast_weight_layers=[0], teacher_window_size=8, student_window_size=4, chunk_size=4,
         )
-        trained = FWQwen3ForCausalLM(config).to(torch.bfloat16).eval()
+        trained = TTCDQwen3ForCausalLM(config).to(torch.bfloat16).eval()
         with tempfile.TemporaryDirectory() as directory:
             trained.save_pretrained(directory)
             settings = {"teacher_window_size": 4, "student_window_size": 2, "chunk_size": 2}
@@ -377,7 +377,7 @@ class LongMemEvalTests(unittest.TestCase):
             self.assertEqual(half.config.fast_weight_read_scale, 0.5)
             self.assertEqual(half.model.layers[0].mlp.fast_weight_read_scale, 0.5)
             half.save_pretrained(directory)
-            restored = FWQwen3ForCausalLM.from_pretrained(directory)
+            restored = TTCDQwen3ForCausalLM.from_pretrained(directory)
             self.assertEqual(restored.model.layers[0].mlp.fast_weight_read_scale, 0.5)
         mlp = loaded.model.layers[0].mlp
         self.assertTrue(mlp.is_fast_weight_layer)
@@ -395,13 +395,13 @@ class LongMemEvalTests(unittest.TestCase):
 
     @torch.inference_mode()
     def test_full_mode_blocked_prefill_matches_full_causal_forward(self):
-        config = FWQwen3Config(
+        config = TTCDQwen3Config(
             vocab_size=32, hidden_size=16, intermediate_size=24, num_hidden_layers=1,
             num_attention_heads=2, num_key_value_heads=1, head_dim=8,
             fast_weight_layers=[], teacher_window_size=15, student_window_size=2,
         )
         configure_model(config, "full")
-        model = FWQwen3ForCausalLM(config).eval()
+        model = TTCDQwen3ForCausalLM(config).eval()
         ids = torch.arange(13)[None]
         whole = model(ids, logits_to_keep=1)
         blocked = model.prefill(ids, execution_block_size=3)
@@ -409,13 +409,13 @@ class LongMemEvalTests(unittest.TestCase):
         self.assertEqual(blocked.state.past_key_values.layers[0].keys.shape[-2], 13)
 
     def test_each_example_starts_fresh_and_retains_prefix(self):
-        config = FWQwen3Config(
+        config = TTCDQwen3Config(
             vocab_size=256, hidden_size=16, intermediate_size=24, num_hidden_layers=1,
             num_attention_heads=2, num_key_value_heads=1, head_dim=8,
             fast_weight_layers=[0], teacher_window_size=8, student_window_size=4,
             chunk_size=4, conv_kernel_size=2,
         )
-        model = FWQwen3ForCausalLM(config).eval()
+        model = TTCDQwen3ForCausalLM(config).eval()
         row = {"question_id": "x", "input_ids": list(range(1, 12)),
                "persistent_prefix_length": 2, "prompt_length": 11}
         settings = {"seed": 42, "generation": {

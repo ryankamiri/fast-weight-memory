@@ -6,7 +6,7 @@ from transformers import Qwen3Config
 from transformers.cache_utils import DynamicCache
 from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer, Qwen3RotaryEmbedding
 
-from architectures.ttcd.qwen.decoder import FWQwen3DecoderLayer
+from architectures.ttcd.qwen.decoder import TTCDQwen3DecoderLayer
 from architectures.ttcd.qwen.attention import sdpa_attention_forward
 
 
@@ -23,7 +23,7 @@ class DecoderTests(unittest.TestCase):
         self.x = torch.randn(2, 9, 32)
 
     def fast_layer(self):
-        return FWQwen3DecoderLayer(
+        return TTCDQwen3DecoderLayer(
             self.config, 0, is_fast_weight_layer=True,
             chunk_size=4, conv_kernel_size=3,
         ).eval()
@@ -40,7 +40,7 @@ class DecoderTests(unittest.TestCase):
 
     def test_normal_matches_qwen_and_checkpoint_names(self):
         base = Qwen3DecoderLayer(self.config, 0).eval()
-        layer = FWQwen3DecoderLayer(self.config, 0).eval()
+        layer = TTCDQwen3DecoderLayer(self.config, 0).eval()
         layer.load_state_dict(base.state_dict(), strict=True)
         self.assertEqual(set(layer.state_dict()), set(base.state_dict()))
         kwargs = self.inputs()

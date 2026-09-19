@@ -9,8 +9,8 @@ import torch
 from transformers import Qwen3Config
 import wandb
 
-from architectures.ttcd.qwen.causal_lm import FWQwen3ForCausalLM
-from architectures.ttcd.qwen.configuration import FWQwen3Config
+from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from data.dataloader import create_dataloader
 from utils.seed import seed_everything
 from .config import TrainingConfig, load_config
@@ -46,8 +46,8 @@ def load_model(config: TrainingConfig):
     for name in ("model_id", "revision"):
         overrides.pop(name)
     overrides["lr"] = overrides.pop("fast_weight_lr")
-    model_config = FWQwen3Config.from_dict(base.to_dict() | overrides)
-    model, loading_info = FWQwen3ForCausalLM.from_pretrained(
+    model_config = TTCDQwen3Config.from_dict(base.to_dict() | overrides)
+    model, loading_info = TTCDQwen3ForCausalLM.from_pretrained(
         settings.model_id, revision=settings.revision, config=model_config,
         dtype=torch.float32, attn_implementation="sdpa", output_loading_info=True,
     )

@@ -10,10 +10,10 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP
 
 from architectures.shared.causal_conv import CausalDepthwiseConv1d
 
-from ..states.mlp_state import FWMLPState
+from ..states.mlp_state import TTCDMLPState
 
 
-class FWQwen3MLP(Qwen3MLP):
+class TTCDQwen3MLP(Qwen3MLP):
     """Qwen SwiGLU with optional stateful teacher/student fast-weight updates."""
 
     def __init__(
@@ -90,8 +90,8 @@ class FWQwen3MLP(Qwen3MLP):
         self,
         hidden_states: Float[torch.Tensor, "B S d_model"],
         student_hidden_states: Float[torch.Tensor, "B S d_model"] | None = None,
-        state: FWMLPState | None = None,
-    ) -> Float[torch.Tensor, "B S d_model"] | tuple[Float[torch.Tensor, "B S d_model"], FWMLPState]:
+        state: TTCDMLPState | None = None,
+    ) -> Float[torch.Tensor, "B S d_model"] | tuple[Float[torch.Tensor, "B S d_model"], TTCDMLPState]:
         if not self.is_fast_weight_layer:
             if state is not None:
                 raise ValueError("state requires is_fast_weight_layer=True")
@@ -102,7 +102,7 @@ class FWQwen3MLP(Qwen3MLP):
 
         B, S, d_model = hidden_states.shape
         if state is None:
-            state = FWMLPState(
+            state = TTCDMLPState(
                 W_fast=hidden_states.new_zeros(B, d_model, self.intermediate_size, dtype=torch.float32)
             )
         else:
@@ -110,7 +110,7 @@ class FWQwen3MLP(Qwen3MLP):
             state = replace(state)
 
         if self.fast_weight_read_scale == 0:
-            # Whole-pass ablation: keep the state unchanged and skip all FW work.
+            # Whole-pass ablation: keep the state unchanged and skip all TTCD work.
             return super().forward(hidden_states), state
 
         z_teacher: Float[torch.Tensor, "B S d_mlp"] = self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states)

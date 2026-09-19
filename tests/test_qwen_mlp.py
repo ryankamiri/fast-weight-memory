@@ -7,8 +7,8 @@ from torch.nn import functional as F
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP
 
-from architectures.ttcd.qwen.mlp import FWQwen3MLP
-from architectures.ttcd.states.mlp_state import FWMLPState
+from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
+from architectures.ttcd.states.mlp_state import TTCDMLPState
 
 
 class MLPTests(unittest.TestCase):
@@ -19,11 +19,11 @@ class MLPTests(unittest.TestCase):
         self.student = torch.randn(2, 7, 8)
 
     def model(self, **kwargs):
-        return FWQwen3MLP(self.config, is_fast_weight_layer=True, chunk_size=3, **kwargs)
+        return TTCDQwen3MLP(self.config, is_fast_weight_layer=True, chunk_size=3, **kwargs)
 
     def test_normal_qwen_parity(self):
         base = Qwen3MLP(self.config)
-        model = FWQwen3MLP(self.config)
+        model = TTCDQwen3MLP(self.config)
         model.load_state_dict(base.state_dict(), strict=True)
         self.assertIs(model.W_base, model.down_proj.weight)
         torch.testing.assert_close(model(self.teacher), base(self.teacher), rtol=0, atol=0)
@@ -31,7 +31,7 @@ class MLPTests(unittest.TestCase):
 
     def test_disable_reads_preserves_state_and_base_output(self):
         model = self.model()
-        state = FWMLPState(W_fast=torch.randn(2, 8, 12))
+        state = TTCDMLPState(W_fast=torch.randn(2, 8, 12))
         before = {name: value.clone() for name, value in model.state_dict().items()}
         enabled, _ = model(self.teacher, self.student, state)
         model.fast_weight_read_scale = 0.0
@@ -72,7 +72,7 @@ class MLPTests(unittest.TestCase):
 
     def test_read_scale_changes_output_not_local_write_rule(self):
         model = self.model(use_conv=False, use_projection=False)
-        initial = FWMLPState(W_fast=torch.randn(2, 8, 12))
+        initial = TTCDMLPState(W_fast=torch.randn(2, 8, 12))
         full, full_state = model(self.teacher, self.student, initial)
         base = model.down_proj(model.act_fn(model.gate_proj(self.teacher)) * model.up_proj(self.teacher))
         for scale in (0.5, 2.0):
@@ -95,7 +95,7 @@ class MLPTests(unittest.TestCase):
             {"is_fast_weight_layer": True, "use_conv": False},
             {"is_fast_weight_layer": True, "dynamic_beta": False},
         ):
-            model = FWQwen3MLP(self.config, **options)
+            model = TTCDQwen3MLP(self.config, **options)
             torch.manual_seed(123)
             model.reset_fast_weight_parameters()
             original = {name: value.clone() for name, value in model.state_dict().items()}
@@ -142,7 +142,7 @@ class MLPTests(unittest.TestCase):
                     correction = (teacher[:, t] - student[:, t]) @ model.W_base.T @ model.W_proj
                     key = F.normalize(student[:, t], dim=-1, eps=1e-6)
                     expected_state = expected_state + model.lr * beta[:, t, None, None] * correction[:, :, None] * key[:, None, :]
-        actual, state = model(self.teacher, self.student, state=FWMLPState(initial))
+        actual, state = model(self.teacher, self.student, state=TTCDMLPState(initial))
         torch.testing.assert_close(actual, torch.cat(expected_outputs, dim=1))
         torch.testing.assert_close(state.W_fast, expected_state)
         torch.testing.assert_close(initial, initial_copy)
@@ -174,10 +174,10 @@ class MLPTests(unittest.TestCase):
         initial = torch.randn(2, 8, 12) * 0.01
         z_teacher = model.act_fn(model.gate_proj(teacher)) * model.up_proj(teacher)
         expected = model.down_proj(z_teacher) + torch.bmm(z_teacher, initial.transpose(1, 2))
-        baseline, baseline_state = model(teacher, student, state=FWMLPState(initial))
+        baseline, baseline_state = model(teacher, student, state=TTCDMLPState(initial))
         with torch.no_grad():
             model.teacher_conv.weight.mul_(2)
-        actual, changed_state = model(teacher, student, state=FWMLPState(initial))
+        actual, changed_state = model(teacher, student, state=TTCDMLPState(initial))
         torch.testing.assert_close(actual, expected)
         torch.testing.assert_close(actual, baseline)
         self.assertFalse(torch.allclose(changed_state.W_fast, baseline_state.W_fast))
@@ -228,10 +228,10 @@ class MLPTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             model(self.teacher)
         with self.assertRaises(RuntimeError):
-            model(self.teacher, self.student, state=FWMLPState(torch.zeros(2, 8, 13)))
+            model(self.teacher, self.student, state=TTCDMLPState(torch.zeros(2, 8, 13)))
 
     def test_pending_count_is_computed(self):
-        state = FWMLPState(torch.zeros(2, 8, 12))
+        state = TTCDMLPState(torch.zeros(2, 8, 12))
         self.assertEqual(state.pending_count, 0)
         state.pending_r = torch.zeros(2, 2, 8)
         state.pending_k = torch.zeros(2, 2, 12)
@@ -244,11 +244,11 @@ class MLPTests(unittest.TestCase):
 
     def test_state_shape_annotations(self):
         with self.assertRaises(TypeCheckError):
-            FWMLPState(torch.zeros(2, 8, 12), pending_r=torch.zeros(3, 1, 8))
+            TTCDMLPState(torch.zeros(2, 8, 12), pending_r=torch.zeros(3, 1, 8))
         with self.assertRaises(TypeCheckError):
-            FWMLPState(torch.zeros(2, 8, 12), student_conv_state=torch.zeros(2, 13, 4))
+            TTCDMLPState(torch.zeros(2, 8, 12), student_conv_state=torch.zeros(2, 13, 4))
         with self.assertRaises(TypeCheckError):
-            FWMLPState(torch.zeros(2, 8, 12, dtype=torch.int64))
+            TTCDMLPState(torch.zeros(2, 8, 12, dtype=torch.int64))
 
     def test_interleaved_sessions(self):
         model = self.model()
@@ -275,7 +275,7 @@ class MLPTests(unittest.TestCase):
                 self.assertEqual(state.W_fast.dtype, torch.float32)
                 self.assertTrue(torch.isfinite(state.W_fast).all())
                 # Overrides already satisfy the FP32 state contract.
-                initial = FWMLPState(torch.zeros(2, 8, 12, dtype=torch.float32))
+                initial = TTCDMLPState(torch.zeros(2, 8, 12, dtype=torch.float32))
                 _, state = model(teacher[:, :3], student[:, :3], state=initial)
                 self.assertEqual(state.W_fast.dtype, torch.float32)
                 self.assertEqual(initial.W_fast.dtype, torch.float32)
@@ -284,15 +284,15 @@ class MLPTests(unittest.TestCase):
         for dtype in (torch.float16, torch.bfloat16, torch.float64):
             with self.subTest(dtype=dtype):
                 with self.assertRaises(TypeCheckError):
-                    FWMLPState(torch.zeros(2, 8, 12, dtype=dtype))
+                    TTCDMLPState(torch.zeros(2, 8, 12, dtype=dtype))
                 with self.assertRaises(TypeCheckError):
-                    FWMLPState(torch.zeros(2, 8, 12), pending_r=torch.zeros(2, 1, 8, dtype=dtype))
+                    TTCDMLPState(torch.zeros(2, 8, 12), pending_r=torch.zeros(2, 1, 8, dtype=dtype))
                 with self.assertRaises(TypeCheckError):
-                    FWMLPState(torch.zeros(2, 8, 12), pending_k=torch.zeros(2, 1, 12, dtype=dtype))
+                    TTCDMLPState(torch.zeros(2, 8, 12), pending_k=torch.zeros(2, 1, 12, dtype=dtype))
 
     def test_update_respects_caller_autocast(self):
         model = self.model(use_conv=False)
-        initial = FWMLPState(torch.ones(2, 8, 12))
+        initial = TTCDMLPState(torch.ones(2, 8, 12))
         with torch.autocast("cpu", dtype=torch.bfloat16):
             _, pending = model(self.teacher[:, :2], self.student[:, :2], state=initial)
             expected = pending.W_fast + model.lr * (pending.pending_r.transpose(1, 2) @ pending.pending_k)

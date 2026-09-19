@@ -7,9 +7,9 @@ from jaxtyping import TypeCheckError
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM, Qwen3Model
 
-from architectures.ttcd.qwen.configuration import FWQwen3Config
-from architectures.ttcd.qwen.model import FWQwen3Model, FWQwen3ModelOutput
-from architectures.ttcd.states.model_state import FWModelState
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
+from architectures.ttcd.qwen.model import TTCDQwen3Model, TTCDQwen3ModelOutput
+from architectures.ttcd.states.model_state import TTCDModelState
 from architectures.ttcd.cache.sliding_window import SlidingWindowKVCache
 
 
@@ -17,14 +17,14 @@ class ModelTests(unittest.TestCase):
     def test_invalid_windows_are_validated_by_config(self):
         for teacher, student in ((None, 2), (2, 3), (0, 1), (3, -1)):
             with self.assertRaises(ValueError):
-                FWQwen3Config(teacher_window_size=teacher, student_window_size=student)
+                TTCDQwen3Config(teacher_window_size=teacher, student_window_size=student)
 
     def setUp(self):
         torch.manual_seed(11)
         self.ids = torch.randint(0, 40, (2, 11))
 
     def config(self, fast_weight_layers=(0, 2), **kwargs):
-        return FWQwen3Config(
+        return TTCDQwen3Config(
             vocab_size=40, hidden_size=24, intermediate_size=32,
             num_hidden_layers=3, num_attention_heads=4,
             num_key_value_heads=2, head_dim=6,
@@ -35,7 +35,7 @@ class ModelTests(unittest.TestCase):
 
     def test_checkpointing_outputs_and_gradients(self):
         for fast_layers in ([], [0, 2]):
-            base = FWQwen3Model(self.config(fast_weight_layers=fast_layers)).train()
+            base = TTCDQwen3Model(self.config(fast_weight_layers=fast_layers)).train()
             base.config.attention_dropout = 0.2
             for layer in base.layers:
                 layer.self_attn.attention_dropout = 0.2
@@ -60,7 +60,7 @@ class ModelTests(unittest.TestCase):
                 torch.testing.assert_close(a.grad, b.grad, atol=2e-6, rtol=2e-5, msg=name)
 
     def test_checkpointing_gradients_through_carried_state(self):
-        base = FWQwen3Model(self.config()).train()
+        base = TTCDQwen3Model(self.config()).train()
         checked = copy.deepcopy(base)
         checked.gradient_checkpointing_enable()
         results = []
@@ -86,7 +86,7 @@ class ModelTests(unittest.TestCase):
             torch.testing.assert_close(a.grad, b.grad, atol=2e-6, rtol=2e-5, msg=name)
 
     def test_checkpointing_cache_handling_and_toggle(self):
-        model = FWQwen3Model(self.config()).eval()
+        model = TTCDQwen3Model(self.config()).eval()
         prefill = model(self.ids[:, :3], use_cache=True)
         model.gradient_checkpointing_enable()
         # Enabled checkpointing does not change inference caching.
@@ -105,7 +105,7 @@ class ModelTests(unittest.TestCase):
         self.assertIsNotNone(model(self.ids, use_cache=True).past_key_values)
 
     def test_checkpointing_options_and_frozen_inputs(self):
-        model = FWQwen3Model(self.config()).train()
+        model = TTCDQwen3Model(self.config()).train()
         with self.assertRaisesRegex(ValueError, "use_reentrant=False"):
             model.gradient_checkpointing_enable({"use_reentrant": True})
         self.assertFalse(model.is_gradient_checkpointing)
@@ -134,9 +134,9 @@ class ModelTests(unittest.TestCase):
                 )
 
     def test_ttcd_defaults_and_layer_selection(self):
-        config = FWQwen3Config(num_hidden_layers=28)
+        config = TTCDQwen3Config(num_hidden_layers=28)
         self.assertEqual(config.fast_weight_layers, [0, 7, 14, 21])
-        layer_flags = [layer.is_fast_weight_layer for layer in FWQwen3Model(self.config()).layers]
+        layer_flags = [layer.is_fast_weight_layer for layer in TTCDQwen3Model(self.config()).layers]
         self.assertEqual(layer_flags, [True, False, True])
         for invalid in ([3], [-1], [0, 0], [True]):
             with self.assertRaises(ValueError):
@@ -149,7 +149,7 @@ class ModelTests(unittest.TestCase):
                 layer_types=["full_attention", "sliding_attention", "full_attention"],
             )
             config._attn_implementation = backend
-            model = FWQwen3Model(config).eval()
+            model = TTCDQwen3Model(config).eval()
             base_config = Qwen3Config.from_dict(config.to_dict())
             base_config.layer_types = ["sliding_attention"] * config.num_hidden_layers
             base_config.sliding_window = config.teacher_window_size
@@ -170,7 +170,7 @@ class ModelTests(unittest.TestCase):
                 torch.testing.assert_close(a[valid], b[valid])
 
     def test_mask_oracle_query_length_independent_of_windows(self):
-        model = FWQwen3Model(self.config())
+        model = TTCDQwen3Model(self.config())
         for start, S in ((0, 11), (7, 3), (10, 1)):
             x = torch.zeros(2, S, 24)
             q = torch.arange(start, start + S)
@@ -186,7 +186,7 @@ class ModelTests(unittest.TestCase):
 
     def test_all_layers_receive_the_teacher_window(self):
         for fast_layers in ([], [0, 2]):
-            model = FWQwen3Model(self.config(fast_weight_layers=fast_layers)).eval()
+            model = TTCDQwen3Model(self.config(fast_weight_layers=fast_layers)).eval()
             captured = []
 
             def capture(module, args, kwargs):
@@ -212,7 +212,7 @@ class ModelTests(unittest.TestCase):
                     self.assertIsNone(student)
 
     def test_only_boolean_padding_masks_are_supported(self):
-        model = FWQwen3Model(self.config())
+        model = TTCDQwen3Model(self.config())
         x = torch.zeros(2, 11, 24)
         positions = torch.arange(11)
         valid = torch.ones(2, 11, dtype=torch.bool)
@@ -227,7 +227,7 @@ class ModelTests(unittest.TestCase):
                 model._prepare_masks(invalid, x, positions, positions)
 
     def test_full_training_vs_chunked_prefill_and_decode(self):
-        model = FWQwen3Model(self.config()).eval()
+        model = TTCDQwen3Model(self.config()).eval()
         with torch.no_grad():
             for i in model.config.fast_weight_layers:
                 model.layers[i].mlp.teacher_conv.weight.normal_(std=0.2)
@@ -250,7 +250,7 @@ class ModelTests(unittest.TestCase):
             config = self.config()
             config.teacher_window_size = window
             config.student_window_size = min(window, 2)
-            model = FWQwen3Model(config).eval()
+            model = TTCDQwen3Model(config).eval()
             ids = torch.randint(0, 40, (2, 23))
             with torch.no_grad():
                 for i in config.fast_weight_layers:
@@ -298,7 +298,7 @@ class ModelTests(unittest.TestCase):
                         torch.testing.assert_close(actual_layer.values, expected_layer.values, atol=2e-6, rtol=2e-5)
 
     def test_ordinary_padding_mask_tracks_retained_keys(self):
-        model = FWQwen3Model(self.config(fast_weight_layers=[])).eval()
+        model = TTCDQwen3Model(self.config(fast_weight_layers=[])).eval()
         padding = torch.ones_like(self.ids, dtype=torch.bool)
         padding[0, :2] = False
         with torch.no_grad():
@@ -309,7 +309,7 @@ class ModelTests(unittest.TestCase):
             torch.testing.assert_close(tail.last_hidden_state, expected.last_hidden_state[:, 7:])
 
     def test_eviction_training_gradients_without_checkpointing(self):
-        full_model = FWQwen3Model(self.config()).train()
+        full_model = TTCDQwen3Model(self.config()).train()
         # Test nonzero memory writes across the split, not only the initial baseline.
         with torch.no_grad():
             for layer in full_model.layers:
@@ -327,7 +327,7 @@ class ModelTests(unittest.TestCase):
             torch.testing.assert_close(a.grad, b.grad, atol=1e-5, rtol=2e-5, msg=name)
 
     def test_initial_fast_weights_preserve_baseline_across_chunks(self):
-        model = FWQwen3Model(self.config()).train()
+        model = TTCDQwen3Model(self.config()).train()
         baseline = copy.deepcopy(model)
         for layer in baseline.layers:
             if layer.is_fast_weight_layer:
@@ -347,16 +347,16 @@ class ModelTests(unittest.TestCase):
         self.assertFalse(self.config().normalize_student_features)
         for enabled in (False, True):
             config = self.config(normalize_student_features=enabled)
-            restored = FWQwen3Config.from_dict(config.to_dict())
-            model = FWQwen3Model(restored)
+            restored = TTCDQwen3Config.from_dict(config.to_dict())
+            model = TTCDQwen3Model(restored)
             for layer in model.layers:
                 self.assertEqual(layer.mlp.normalize_student_features, enabled)
 
     def test_reject_wrong_cache_geometry_and_old_full_history_mask(self):
-        model = FWQwen3Model(self.config()).eval()
+        model = TTCDQwen3Model(self.config()).eval()
         for cache in (SlidingWindowKVCache(3, 2), SlidingWindowKVCache(1, 5)):
             with self.assertRaisesRegex(ValueError, "window, persistent-token limit, and layer count"):
-                model(self.ids, state=FWModelState(past_key_values=cache), use_cache=True)
+                model(self.ids, state=TTCDModelState(past_key_values=cache), use_cache=True)
         with torch.no_grad():
             first = model(self.ids[:, :7], use_cache=True)
             with self.assertRaisesRegex(ValueError, "retained keys"):
@@ -365,7 +365,7 @@ class ModelTests(unittest.TestCase):
             self.assertEqual(first.past_key_values.get_seq_length(), 7)
 
     def test_training_gradients_causality_and_state_lifetime(self):
-        model = FWQwen3Model(self.config()).train()
+        model = TTCDQwen3Model(self.config()).train()
         output = model(self.ids, use_cache=False)
         self.assertIsNone(output.state.past_key_values)
         self.assertEqual(output.state.tokens_seen, 11)
@@ -382,7 +382,7 @@ class ModelTests(unittest.TestCase):
         self.assertFalse(any("W_fast" in key or "pending_" in key for key in model.state_dict()))
 
     def test_two_sessions_are_independent(self):
-        model = FWQwen3Model(self.config()).eval()
+        model = TTCDQwen3Model(self.config()).eval()
         other_ids = (self.ids + 3) % 40
         with torch.no_grad():
             expected_a = model(self.ids, use_cache=False)
@@ -397,14 +397,14 @@ class ModelTests(unittest.TestCase):
 
     def test_save_reload_and_base_checkpoint_initialization(self):
         config = self.config()
-        model = FWQwen3Model(config).eval()
-        # Ensure loading preserves trained FW parameters, not just their defaults.
+        model = TTCDQwen3Model(config).eval()
+        # Ensure loading preserves trained TTCD parameters, not just their defaults.
         with torch.no_grad():
             model.layers[0].mlp.W_proj.normal_()
             model.layers[0].mlp.student_conv.weight.normal_()
         with tempfile.TemporaryDirectory() as folder:
             model.save_pretrained(folder)
-            restored = FWQwen3Model.from_pretrained(folder)
+            restored = TTCDQwen3Model.from_pretrained(folder)
             self.assertEqual(restored.config.fast_weight_layers, [0, 2])
             torch.testing.assert_close(
                 model(self.ids, use_cache=False).last_hidden_state,
@@ -414,7 +414,7 @@ class ModelTests(unittest.TestCase):
         base = Qwen3Model(base_config)
         with tempfile.TemporaryDirectory() as folder:
             base.save_pretrained(folder)
-            loaded, info = FWQwen3Model.from_pretrained(folder, config=config, output_loading_info=True)
+            loaded, info = TTCDQwen3Model.from_pretrained(folder, config=config, output_loading_info=True)
             self.assertEqual(info["unexpected_keys"], [])
             self.assertTrue(info["missing_keys"])
             for key, value in base.state_dict().items():
@@ -429,14 +429,14 @@ class ModelTests(unittest.TestCase):
                 torch.testing.assert_close(conv.weight[..., :-1], torch.zeros(32, 1, 2))
 
     def test_simple_forward_api_and_rejected_states(self):
-        model = FWQwen3Model(self.config()).eval()
+        model = TTCDQwen3Model(self.config()).eval()
         model.config._attn_implementation = "eager"
         model.config.output_hidden_states = True
         model.config.output_attentions = True
         model.config.return_dict = False
         actual = model(self.ids)
-        self.assertIsInstance(actual, FWQwen3ModelOutput)
-        self.assertIsInstance(actual.state, FWModelState)
+        self.assertIsInstance(actual, TTCDQwen3ModelOutput)
+        self.assertIsInstance(actual.state, TTCDModelState)
         self.assertIsNone(actual.past_key_values)
         self.assertIsNone(actual.hidden_states)
         self.assertEqual(len(model(self.ids, output_hidden_states=True).hidden_states), 4)
@@ -449,7 +449,7 @@ class ModelTests(unittest.TestCase):
             model(self.ids, attention_mask=padding)
         prefill = model(self.ids[:, :3], use_cache=True)
         with self.assertRaisesRegex(ValueError, "all its layer MLP states"):
-            model(self.ids[:, 3:4], state=FWModelState(
+            model(self.ids[:, 3:4], state=TTCDModelState(
                 past_key_values=prefill.past_key_values, tokens_seen=3,
             ), use_cache=True)
         with self.assertRaisesRegex(ValueError, "use_cache=True"):
@@ -465,12 +465,12 @@ class ModelTests(unittest.TestCase):
         base = Qwen3ForCausalLM(Qwen3Config.from_dict(config.to_dict()))
         with tempfile.TemporaryDirectory() as folder:
             base.save_pretrained(folder)
-            loaded = FWQwen3Model.from_pretrained(folder, config=config)
+            loaded = TTCDQwen3Model.from_pretrained(folder, config=config)
             for key, value in base.model.state_dict().items():
                 torch.testing.assert_close(loaded.state_dict()[key], value)
 
     def test_low_precision_activations_keep_fp32_memory(self):
-        model = FWQwen3Model(self.config()).to(dtype=torch.bfloat16).eval()
+        model = TTCDQwen3Model(self.config()).to(dtype=torch.bfloat16).eval()
         with torch.no_grad():
             output = model(self.ids[:, :3], use_cache=True)
             output = model(self.ids[:, 3:], state=output.state, use_cache=True)
@@ -482,7 +482,7 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(state.teacher_conv_state.dtype, torch.bfloat16)
 
     def test_teacher_window_can_exceed_native_sliding_window(self):
-        model = FWQwen3Model(self.config(
+        model = TTCDQwen3Model(self.config(
             use_sliding_window=True, sliding_window=3,
             layer_types=["sliding_attention"] * 3,
         )).eval()
@@ -495,7 +495,7 @@ class ModelTests(unittest.TestCase):
             self.assertTrue(all(tail.past_key_values.is_sliding))
 
     def test_mlp_only_continuation_without_kv_cache(self):
-        model = FWQwen3Model(self.config())
+        model = TTCDQwen3Model(self.config())
         first = model(self.ids[:, :3], use_cache=False)
         before = first.state.mlp_states[0].W_fast.clone()
         second = model(self.ids[:, 3:7], state=first.state, use_cache=False)

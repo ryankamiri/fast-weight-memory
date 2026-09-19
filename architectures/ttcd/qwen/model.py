@@ -12,35 +12,35 @@ from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3RotaryEmbedding,
 )
 
-from .configuration import FWQwen3Config
-from .decoder import FWQwen3DecoderLayer
-from .mlp import FWQwen3MLP
+from .configuration import TTCDQwen3Config
+from .decoder import TTCDQwen3DecoderLayer
+from .mlp import TTCDQwen3MLP
 from ..cache.sliding_window import SlidingWindowKVCache
-from ..states.model_state import FWModelState
+from ..states.model_state import TTCDModelState
 
 logger = logging.get_logger(__name__)
 
 
 @dataclass
-class FWQwen3ModelOutput(BaseModelOutputWithPast):
-    state: FWModelState | None = None
+class TTCDQwen3ModelOutput(BaseModelOutputWithPast):
+    state: TTCDModelState | None = None
 
 
-class FWQwen3Model(Qwen3PreTrainedModel):
+class TTCDQwen3Model(Qwen3PreTrainedModel):
 
-    config_class = FWQwen3Config
-    _no_split_modules = ["FWQwen3DecoderLayer"]
+    config_class = TTCDQwen3Config
+    _no_split_modules = ["TTCDQwen3DecoderLayer"]
     supports_gradient_checkpointing = True
     _supports_flash_attn = False
     _supports_flex_attn = False
 
-    def __init__(self, config: FWQwen3Config):
+    def __init__(self, config: TTCDQwen3Config):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList([
-            FWQwen3DecoderLayer(
+            TTCDQwen3DecoderLayer(
                 config, layer_idx,
                 is_fast_weight_layer=layer_idx in config.fast_weight_layers,
                 chunk_size=config.chunk_size,
@@ -59,17 +59,17 @@ class FWQwen3Model(Qwen3PreTrainedModel):
         self.post_init()
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        """Use non-reentrant checkpointing to preserve gradients through FWMLPState."""
+        """Use non-reentrant checkpointing to preserve gradients through TTCDMLPState."""
         checkpoint_kwargs = dict(gradient_checkpointing_kwargs or {})
         if checkpoint_kwargs.get("use_reentrant", False) is not False:
-            raise ValueError("FWQwen3Model requires use_reentrant=False for MLP state gradients")
+            raise ValueError("TTCDQwen3Model requires use_reentrant=False for MLP state gradients")
         checkpoint_kwargs["use_reentrant"] = False
         super().gradient_checkpointing_enable(checkpoint_kwargs)
 
     @torch.no_grad()
     def _init_weights(self, module):
         super()._init_weights(module)
-        if isinstance(module, FWQwen3MLP) and module.is_fast_weight_layer:
+        if isinstance(module, TTCDQwen3MLP) and module.is_fast_weight_layer:
             module.reset_fast_weight_parameters()
 
     def _prepare_masks(
@@ -116,12 +116,12 @@ class FWQwen3Model(Qwen3PreTrainedModel):
     def forward(
         self,
         input_ids: Int[torch.Tensor, "B S"],
-        state: FWModelState | None = None,
+        state: TTCDModelState | None = None,
         use_cache: bool = False,
         attention_mask: Bool[torch.Tensor, "B S_kv"] | None = None,
         output_hidden_states: bool = False,
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
-    ) -> FWQwen3ModelOutput:
+    ) -> TTCDQwen3ModelOutput:
         # KV cache and MLP memory always enter together through session state.
         past_key_values = state.past_key_values if state is not None else None
         if self.training and self.is_gradient_checkpointing:
@@ -132,7 +132,7 @@ class FWQwen3Model(Qwen3PreTrainedModel):
             use_cache = False
         
         if self.config._attn_implementation not in ("eager", "sdpa"):
-            raise ValueError("FWQwen3Model currently supports only eager or sdpa attention")
+            raise ValueError("TTCDQwen3Model currently supports only eager or sdpa attention")
         
         # Embed
         hidden_states: Float[torch.Tensor, "B S d_model"] = self.embed_tokens(input_ids)
@@ -220,12 +220,12 @@ class FWQwen3Model(Qwen3PreTrainedModel):
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
-        next_state = FWModelState(
+        next_state = TTCDModelState(
             past_key_values=past_key_values,
             mlp_states=next_mlp_states,
             tokens_seen=tokens_seen + S,
         )
-        return FWQwen3ModelOutput(
+        return TTCDQwen3ModelOutput(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
             hidden_states=all_hidden_states,

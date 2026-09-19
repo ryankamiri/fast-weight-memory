@@ -22,7 +22,7 @@ from training.config import (
 )
 from training.engine import build_scheduler, perplexity, train, validate
 from training.train import configure_trainable_parameters, load_model, verify_loading
-from architectures.ttcd.qwen.mlp import FWQwen3MLP
+from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
 
 
 class TinyModel(nn.Module):
@@ -266,7 +266,7 @@ class TrainingConfigTests(unittest.TestCase):
 class TrainingLoopTests(unittest.TestCase):
     def test_paired_validation_and_restore(self):
         model = TinyModel()
-        model.mlp = FWQwen3MLP(Qwen3Config(hidden_size=8, intermediate_size=12),
+        model.mlp = TTCDQwen3MLP(Qwen3Config(hidden_size=8, intermediate_size=12),
                               is_fast_weight_layer=True)
         def forward(input_ids, labels, state=None, use_cache=False):
             self.assertIsNone(state)
@@ -494,7 +494,7 @@ class TrainingLoopTests(unittest.TestCase):
     def test_fast_weight_only_parameter_scope(self):
         config = self.config()
         config.model.fast_weight_layers = [0]
-        model = FWQwen3MLP(Qwen3Config(hidden_size=8, intermediate_size=12),
+        model = TTCDQwen3MLP(Qwen3Config(hidden_size=8, intermediate_size=12),
                            is_fast_weight_layer=True)
         wrapper = SimpleNamespace(
             config=SimpleNamespace(fast_weight_layers=[0]),

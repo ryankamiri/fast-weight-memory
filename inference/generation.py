@@ -6,14 +6,14 @@ from typing import Literal
 import torch
 from jaxtyping import Float, Int
 
-from architectures.ttcd.states.model_state import FWModelState
+from architectures.ttcd.states.model_state import TTCDModelState
 
 
 @dataclass
 class GenerationOutput:
     # New tokens only, including EOS when emitted. The prompt is not repeated.
     token_ids: Int[torch.Tensor, "1 S_generated"]
-    state: FWModelState
+    state: TTCDModelState
     stop_reason: Literal["eos", "max_new_tokens"]
 
 
