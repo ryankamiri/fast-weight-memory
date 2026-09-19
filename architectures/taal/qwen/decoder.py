@@ -28,6 +28,50 @@ class TaalQwen3DecoderLayer(Qwen3DecoderLayer):
         super().__init__(config, layer_idx)
         self.taal = TaalLayer(taal_config)
 
+    def forward_memory(
+        self,
+        hidden_states: Float[torch.Tensor, "B S D_model"],
+        memory_state: NeuralMemoryState | None = None,
+        write_mask: Bool[torch.Tensor, "B S"] | None = None,
+    ) -> tuple[Float[torch.Tensor, "B S D_model"], NeuralMemoryState]:
+        """Keep torch.func.grad memory updates outside checkpoint saved-tensor hooks."""
+        return self.taal(
+            hidden_states,
+            state=memory_state,
+            write_mask=write_mask,
+        )
+
+    def forward_decoder(
+        self,
+        hidden_states: Float[torch.Tensor, "B S D_model"],
+        attention_mask: (
+            Float[torch.Tensor, "#B #H S S_kv"]
+            | Bool[torch.Tensor, "#B #H S S_kv"]
+            | None
+        ) = None,
+        position_ids: Int[torch.Tensor, "#B S"] | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool = False,
+        cache_position: Int[torch.Tensor, "S"] | None = None,
+        position_embeddings: tuple[
+            Float[torch.Tensor, "#B S D_head"],
+            Float[torch.Tensor, "#B S D_head"],
+        ]
+        | None = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> Float[torch.Tensor, "B S D_model"]:
+        """Run the ordinary Qwen body, which is safe to checkpoint alone."""
+        return super().forward(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+
     @jaxtyped(typechecker=beartype)
     def forward(
         self,
@@ -52,12 +96,12 @@ class TaalQwen3DecoderLayer(Qwen3DecoderLayer):
     ) -> tuple[Float[torch.Tensor, "B S D_model"], NeuralMemoryState]:
         # Memory changes the representation entering both the ordinary Qwen
         # residual path and attention. Its persistent tokens stay inside TaaL.
-        hidden_states, next_memory_state = self.taal(
+        hidden_states, next_memory_state = self.forward_memory(
             hidden_states,
-            state=memory_state,
+            memory_state=memory_state,
             write_mask=write_mask,
         )
-        hidden_states = super().forward(
+        hidden_states = self.forward_decoder(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,

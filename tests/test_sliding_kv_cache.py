@@ -2,7 +2,7 @@ import unittest
 
 import torch
 
-from architectures.ttcd.cache.sliding_window import SlidingWindowKVCache, SlidingWindowKVLayer
+from architectures.shared.qwen.cache import SlidingWindowKVCache, SlidingWindowKVLayer
 
 
 class SlidingKVCacheTests(unittest.TestCase):

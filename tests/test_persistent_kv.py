@@ -3,7 +3,7 @@ import unittest
 
 import torch
 
-from architectures.ttcd.cache.sliding_window import SlidingWindowKVCache
+from architectures.shared.qwen.cache import SlidingWindowKVCache
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
 
