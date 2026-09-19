@@ -10,7 +10,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM, Qwen3Mode
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from architectures.ttcd.qwen.model import TTCDQwen3Model, TTCDQwen3ModelOutput
 from architectures.ttcd.states.model_state import TTCDModelState
-from architectures.ttcd.cache.sliding_window import SlidingWindowKVCache
+from architectures.shared.qwen.cache import SlidingWindowKVCache
 
 
 class ModelTests(unittest.TestCase):

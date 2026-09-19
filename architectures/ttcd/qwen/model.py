@@ -1,21 +1,18 @@
 from dataclasses import dataclass
 
 import torch
-from torch import nn
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.utils import logging
-from transformers.models.qwen3.modeling_qwen3 import (
-    Qwen3PreTrainedModel,
-    Qwen3RMSNorm,
-    Qwen3RotaryEmbedding,
-)
+
+from architectures.shared.qwen.cache import SlidingWindowKVCache
+from architectures.shared.qwen.masking import prepare_sliding_attention_mask
+from architectures.shared.qwen.model import StatefulQwen3Model
 
 from .configuration import TTCDQwen3Config
 from .decoder import TTCDQwen3DecoderLayer
 from .mlp import TTCDQwen3MLP
-from ..cache.sliding_window import SlidingWindowKVCache
 from ..states.model_state import TTCDModelState
 
 logger = logging.get_logger(__name__)
@@ -26,45 +23,31 @@ class TTCDQwen3ModelOutput(BaseModelOutputWithPast):
     state: TTCDModelState | None = None
 
 
-class TTCDQwen3Model(Qwen3PreTrainedModel):
+class TTCDQwen3Model(StatefulQwen3Model):
 
     config_class = TTCDQwen3Config
     _no_split_modules = ["TTCDQwen3DecoderLayer"]
-    supports_gradient_checkpointing = True
     _supports_flash_attn = False
     _supports_flex_attn = False
 
-    def __init__(self, config: TTCDQwen3Config):
-        super().__init__(config)
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([
-            TTCDQwen3DecoderLayer(
-                config, layer_idx,
-                is_fast_weight_layer=layer_idx in config.fast_weight_layers,
-                chunk_size=config.chunk_size,
-                lr=config.lr,
-                use_projection=config.use_projection,
-                use_conv=config.use_conv,
-                conv_kernel_size=config.conv_kernel_size,
-                dynamic_beta=config.dynamic_beta,
-                normalize_student_features=config.normalize_student_features,
-                fast_weight_read_scale=config.fast_weight_read_scale,
-            )
-            for layer_idx in range(config.num_hidden_layers)
-        ])
-        self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = Qwen3RotaryEmbedding(config=config)
-        self.post_init()
-
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        """Use non-reentrant checkpointing to preserve gradients through TTCDMLPState."""
-        checkpoint_kwargs = dict(gradient_checkpointing_kwargs or {})
-        if checkpoint_kwargs.get("use_reentrant", False) is not False:
-            raise ValueError("TTCDQwen3Model requires use_reentrant=False for MLP state gradients")
-        checkpoint_kwargs["use_reentrant"] = False
-        super().gradient_checkpointing_enable(checkpoint_kwargs)
+    def _build_decoder_layer(
+        self,
+        config: TTCDQwen3Config,
+        layer_idx: int,
+    ) -> TTCDQwen3DecoderLayer:
+        return TTCDQwen3DecoderLayer(
+            config,
+            layer_idx,
+            is_fast_weight_layer=layer_idx in config.fast_weight_layers,
+            chunk_size=config.chunk_size,
+            lr=config.lr,
+            use_projection=config.use_projection,
+            use_conv=config.use_conv,
+            conv_kernel_size=config.conv_kernel_size,
+            dynamic_beta=config.dynamic_beta,
+            normalize_student_features=config.normalize_student_features,
+            fast_weight_read_scale=config.fast_weight_read_scale,
+        )
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -80,36 +63,31 @@ class TTCDQwen3Model(Qwen3PreTrainedModel):
         key_positions: Int[torch.Tensor, "S_kv"],
         key_persistent: Bool[torch.Tensor, "S_kv"] | None = None,
     ) -> dict[str, Float[torch.Tensor, "#B 1 S S_kv"]]:
-        B, S, d_model = hidden_states.shape
-        S_kv = key_positions.shape[0]
-        # Each query gets its own diagonal window, not one global suffix slice.
-        # 1, 1 are B, H_q
-        causal: Bool[torch.Tensor, "1 1 S S_kv"] = (query_positions[:, None] >= key_positions[None, :])[None, None]
         if attention_mask is not None:
-            if attention_mask.device != hidden_states.device:
-                raise ValueError("attention_mask must be on the input device")
-            if attention_mask.dtype != torch.bool or attention_mask.shape != (B, S_kv):
-                raise ValueError("attention_mask must be boolean [B, S_kv], covering retained keys plus new tokens")
             if self.config.fast_weight_layers and not attention_mask.all():
                 raise ValueError("Padded fast-weight batches need per-example chunk state; not supported yet")
 
-        def make_mask(window_size: int) -> Float[torch.Tensor, "#B 1 S S_kv"]:
-            left_edge = query_positions - window_size
-            # Batch dimension is 1 initially, or B after applying the caller mask.
-            visible = key_positions[None, :] > left_edge[:, None]
-            if key_persistent is not None:
-                visible = visible | key_persistent[None, :]
-            allowed: Bool[torch.Tensor, "#B 1 S S_kv"] = causal & visible[None, None]
-            if attention_mask is not None:
-                allowed = allowed & attention_mask[:, None, None, :]
-            mask: Float[torch.Tensor, "#B 1 S S_kv"] = torch.zeros(allowed.shape, device=hidden_states.device, dtype=hidden_states.dtype)
-            return mask.masked_fill_(~allowed, torch.finfo(hidden_states.dtype).min)
-
         # every layer's main attention uses the teacher window,
         # regardless of native layer_types or the input sequence length.
-        masks = {"teacher": make_mask(self.config.teacher_window_size)}
+        masks = {
+            "teacher": prepare_sliding_attention_mask(
+                attention_mask,
+                hidden_states,
+                query_positions,
+                key_positions,
+                self.config.teacher_window_size,
+                key_persistent,
+            )
+        }
         if self.config.fast_weight_layers:
-            masks["student"] = make_mask(self.config.student_window_size)
+            masks["student"] = prepare_sliding_attention_mask(
+                attention_mask,
+                hidden_states,
+                query_positions,
+                key_positions,
+                self.config.student_window_size,
+                key_persistent,
+            )
         return masks
 
     @jaxtyped(typechecker=beartype)

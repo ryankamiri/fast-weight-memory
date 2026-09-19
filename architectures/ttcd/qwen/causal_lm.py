@@ -3,19 +3,12 @@ import math
 
 import torch
 from torch import nn
-import torch.nn.functional as F
 from beartype import beartype
 from jaxtyping import Bool, Float, Int, jaxtyped
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.qwen3.modeling_qwen3 import Qwen3PreTrainedModel
 
-try:
-    from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
-except ModuleNotFoundError as error:
-    if error.name != "liger_kernel":
-        raise
-    LigerFusedLinearCrossEntropyLoss = None
-
+from architectures.shared.qwen.causal_lm import causal_lm_loss
 from .configuration import TTCDQwen3Config
 from .mlp import TTCDQwen3MLP
 from .model import TTCDQwen3Model
@@ -59,23 +52,6 @@ class TTCDQwen3ForCausalLM(Qwen3PreTrainedModel):
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
-
-    def _causal_loss(
-        self,
-        hidden_states: Float[torch.Tensor, "N d_model"],
-        labels: Int[torch.Tensor, "B S"],
-    ) -> Float[torch.Tensor, ""]:
-        # N = B * (S - 1): every next-token prediction flattened across batch and sequence.
-        targets: Int[torch.Tensor, "N"] = labels[:, 1:].reshape(-1).to(hidden_states.device)
-        if hidden_states.is_cuda:
-            if LigerFusedLinearCrossEntropyLoss is None:
-                raise ImportError("CUDA loss requires Liger.")
-            # Fuse projection + loss so full [B, S, vocab_size] logits never exist.
-            return LigerFusedLinearCrossEntropyLoss(accum_dtype=torch.float32)(
-                self.lm_head.weight, hidden_states, targets,
-            )
-        # Small local CPU/MPS tests; Liger's kernels require a supported accelerator.
-        return F.cross_entropy(self.lm_head(hidden_states).float(), targets)
 
     @torch.inference_mode()
     @jaxtyped(typechecker=beartype)
@@ -183,7 +159,7 @@ class TTCDQwen3ForCausalLM(Qwen3PreTrainedModel):
             hidden_states: Float[torch.Tensor, "N d_model"] = (
                 output.last_hidden_state[:, :-1].reshape(-1, self.config.hidden_size)
             )
-            loss = self._causal_loss(hidden_states, labels)
+            loss = causal_lm_loss(self.lm_head, hidden_states, labels)
         if labels is None or logits_to_keep > 0:
             # [B, S_logits, d_model] -> [B, S_logits, vocab_size]; -0 keeps all S.
             logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(
@@ -236,9 +212,17 @@ class TTCDQwen3ForCausalLM(Qwen3PreTrainedModel):
         all_token_loss = None
         terms = []
         if labels is not None and all_token_loss_weight > 0:
-            all_token_loss = self._causal_loss(hidden_states, labels)
+            all_token_loss = causal_lm_loss(
+                self.lm_head,
+                hidden_states,
+                labels,
+            )
             terms.append(all_token_loss_weight * all_token_loss)
-        delayed_answer_loss = self._causal_loss(hidden_states, delayed_labels)
+        delayed_answer_loss = causal_lm_loss(
+            self.lm_head,
+            hidden_states,
+            delayed_labels,
+        )
         terms.append(delayed_answer_loss_weight * delayed_answer_loss)
         loss = torch.stack(terms).sum()
 

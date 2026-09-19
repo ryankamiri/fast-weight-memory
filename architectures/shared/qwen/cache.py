@@ -104,7 +104,7 @@ class SlidingWindowKVLayer(DynamicSlidingWindowLayer):
 
 
 class SlidingWindowKVCache(Cache):
-    """One teacher-window cache per layer, plus explicitly persistent K/V."""
+    """One bounded working-memory cache per layer, plus persistent K/V."""
 
     def __init__(self, num_layers: int, window_size: int, max_persistent_tokens: int = 512):
         if type(num_layers) is not int or num_layers < 1:
