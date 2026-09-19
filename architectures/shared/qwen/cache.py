@@ -6,13 +6,18 @@ from transformers.cache_utils import Cache, DynamicSlidingWindowLayer
 class SlidingWindowKVLayer(DynamicSlidingWindowLayer):
     """Recent K/V plus persistent entries, with aligned absolute positions."""
 
-    def __init__(self, window_size: int, max_persistent_tokens: int = 512):
+    def __init__(self, window_size: int, max_persistent_kv_tokens: int = 512):
         if type(window_size) is not int or window_size < 1:
             raise ValueError("window_size must be a positive integer")
         super().__init__(sliding_window=window_size)
-        if type(max_persistent_tokens) is not int or max_persistent_tokens < 0:
-            raise ValueError("max_persistent_tokens must be a nonnegative integer")
-        self.max_persistent_tokens = max_persistent_tokens
+        if (
+            type(max_persistent_kv_tokens) is not int
+            or max_persistent_kv_tokens < 0
+        ):
+            raise ValueError(
+                "max_persistent_kv_tokens must be a nonnegative integer"
+            )
+        self.max_persistent_kv_tokens = max_persistent_kv_tokens
         self.positions = None
         self.is_persistent = None
 
@@ -29,8 +34,14 @@ class SlidingWindowKVLayer(DynamicSlidingWindowLayer):
             raise ValueError("persistent_mask must be boolean [S] on the input device")
         
         retained_count = 0 if self.is_persistent is None else int(self.is_persistent.sum())
-        if retained_count + int(persistent_mask.sum()) > self.max_persistent_tokens:
-            raise ValueError(f"Persistent tokens exceed max_persistent_tokens={self.max_persistent_tokens}")
+        if (
+            retained_count + int(persistent_mask.sum())
+            > self.max_persistent_kv_tokens
+        ):
+            raise ValueError(
+                "Persistent KV tokens exceed "
+                f"max_persistent_kv_tokens={self.max_persistent_kv_tokens}"
+            )
         if self.positions is None:
             return positions, persistent_mask
         return (torch.cat((self.positions, positions)),
@@ -106,9 +117,139 @@ class SlidingWindowKVLayer(DynamicSlidingWindowLayer):
 class SlidingWindowKVCache(Cache):
     """One bounded working-memory cache per layer, plus persistent K/V."""
 
-    def __init__(self, num_layers: int, window_size: int, max_persistent_tokens: int = 512):
+    def __init__(
+        self,
+        num_layers: int,
+        window_size: int,
+        max_persistent_kv_tokens: int = 512,
+    ):
         if type(num_layers) is not int or num_layers < 1:
             raise ValueError("num_layers must be a positive integer")
-        super().__init__(layers=[SlidingWindowKVLayer(window_size, max_persistent_tokens) for _ in range(num_layers)])
+        super().__init__(
+            layers=[
+                SlidingWindowKVLayer(window_size, max_persistent_kv_tokens)
+                for _ in range(num_layers)
+            ]
+        )
         self.window_size = window_size
-        self.max_persistent_tokens = max_persistent_tokens
+        self.max_persistent_kv_tokens = max_persistent_kv_tokens
+        # Persistence is a cache policy keyed by absolute sequence position.
+        # Attention modules only need to supply their ordinary cache_position.
+        self.persistent_positions: Int[torch.Tensor, "P"] | None = None
+
+    def register_persistent(
+        self,
+        positions: Int[torch.Tensor, "S"],
+        persistent_mask: Bool[torch.Tensor, "S"] | None,
+    ) -> None:
+        """Idempotently mark absolute positions that must survive eviction."""
+        if persistent_mask is None:
+            return
+        if (
+            persistent_mask.dtype != torch.bool
+            or persistent_mask.shape != positions.shape
+            or persistent_mask.device != positions.device
+        ):
+            raise ValueError(
+                "persistent_mask must be boolean [S] on the input device"
+            )
+        additions = positions[persistent_mask]
+        (num_additions,) = additions.shape
+        if num_additions == 0:
+            return
+        if self.persistent_positions is None:
+            already_registered = torch.zeros_like(additions, dtype=torch.bool)
+        else:
+            if self.persistent_positions.device != positions.device:
+                raise ValueError("Persistent positions must remain on one device")
+            already_registered = (
+                additions[:, None] == self.persistent_positions[None, :]
+            ).any(dim=1)
+        tokens_seen = self.layers[0].cumulative_length
+        if ((additions < tokens_seen) & ~already_registered).any():
+            raise ValueError(
+                "Cannot retroactively persist positions whose K/V were already "
+                "processed"
+            )
+        if self.persistent_positions is None:
+            combined = torch.unique(additions, sorted=True)
+        else:
+            combined = torch.unique(
+                torch.cat((self.persistent_positions, additions)),
+                sorted=True,
+            )
+        (num_persistent_positions,) = combined.shape
+        if num_persistent_positions > self.max_persistent_kv_tokens:
+            raise ValueError(
+                "Persistent KV tokens exceed "
+                f"max_persistent_kv_tokens={self.max_persistent_kv_tokens}"
+            )
+        self.persistent_positions = combined
+
+    def persistent_mask(
+        self,
+        positions: Int[torch.Tensor, "S"],
+    ) -> Bool[torch.Tensor, "S"]:
+        """Return which absolute positions are registered as persistent."""
+        if self.persistent_positions is None:
+            return torch.zeros_like(positions, dtype=torch.bool)
+        if self.persistent_positions.device != positions.device:
+            raise ValueError("Persistent positions must remain on one device")
+        return (
+            positions[:, None] == self.persistent_positions[None, :]
+        ).any(dim=1)
+
+    def attention_metadata(
+        self,
+        positions: Int[torch.Tensor, "S"],
+    ) -> tuple[Int[torch.Tensor, "S_kv"], Bool[torch.Tensor, "S_kv"]]:
+        """Metadata for retained K/V plus incoming registered positions."""
+        return self.layers[0].attention_metadata(
+            positions,
+            self.persistent_mask(positions),
+        )
+
+    def update(
+        self,
+        key_states: Float[torch.Tensor, "B h_kv S d_head"],
+        value_states: Float[torch.Tensor, "B h_kv S d_head"],
+        layer_idx: int,
+        cache_kwargs: dict | None = None,
+    ) -> tuple[
+        Float[torch.Tensor, "B h_kv S_kv d_head"],
+        Float[torch.Tensor, "B h_kv S_kv d_head"],
+    ]:
+        cache_kwargs = dict(cache_kwargs or {})
+        if "persistent_mask" in cache_kwargs:
+            raise ValueError(
+                "Register persistent positions on SlidingWindowKVCache instead "
+                "of passing persistent_mask through attention"
+            )
+        positions = cache_kwargs.get("cache_position")
+        if positions is None:
+            S = key_states.shape[-2]
+            start = self.layers[layer_idx].cumulative_length
+            positions = torch.arange(
+                start,
+                start + S,
+                device=key_states.device,
+            )
+        cache_kwargs["persistent_mask"] = self.persistent_mask(positions)
+        return super().update(
+            key_states,
+            value_states,
+            layer_idx,
+            cache_kwargs,
+        )
+
+    def reset(self) -> None:
+        super().reset()
+        self.persistent_positions = None
+
+    def crop(self, max_length: int) -> None:
+        super().crop(max_length)
+        if self.persistent_positions is not None:
+            length = self.layers[0].cumulative_length
+            self.persistent_positions = self.persistent_positions[
+                self.persistent_positions < length
+            ]

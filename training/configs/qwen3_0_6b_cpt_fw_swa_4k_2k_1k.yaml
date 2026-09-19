@@ -4,7 +4,7 @@ model:
   fast_weight_layers: [0, 7, 14, 21]
   teacher_window_size: 4096
   student_window_size: 2048
-  max_persistent_tokens: 512  # Budget for evaluation instructions, additional to the window.
+  max_persistent_kv_tokens: 512  # Evaluation instructions retained in KV beyond the window.
   chunk_size: 1024
   fast_weight_lr: 0.3
   fast_weight_read_scale: 1.0

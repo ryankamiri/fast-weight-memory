@@ -10,44 +10,67 @@ from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
 
 class PersistentKVTests(unittest.TestCase):
     def test_persistence_budget_is_cumulative_and_rejection_is_atomic(self):
-        cache = SlidingWindowKVCache(1, 2, max_persistent_tokens=2)
+        cache = SlidingWindowKVCache(1, 2, max_persistent_kv_tokens=2)
         x = torch.ones(1, 1, 3, 1)
-        cache.update(x, x, 0, {"persistent_mask": torch.tensor([True, True, False])})
+        positions = torch.arange(3)
+        cache.register_persistent(
+            positions,
+            torch.tensor([True, True, False]),
+        )
+        # Registering the same absolute positions again is an idempotent no-op.
+        cache.register_persistent(
+            positions,
+            torch.tensor([True, True, False]),
+        )
+        cache.update(x, x, 0, {"cache_position": positions})
         layer = cache.layers[0]
         saved_keys = layer.keys.clone()
         saved_positions = layer.positions.clone()
-        with self.assertRaisesRegex(ValueError, "max_persistent_tokens=2"):
-            cache.update(x, x, 0, {"persistent_mask": torch.tensor([False, True, False])})
+        with self.assertRaisesRegex(ValueError, "max_persistent_kv_tokens=2"):
+            cache.register_persistent(
+                torch.arange(3, 6),
+                torch.tensor([False, True, False]),
+            )
         self.assertEqual(cache.get_seq_length(), 3)
         torch.testing.assert_close(layer.keys, saved_keys)
         torch.testing.assert_close(layer.positions, saved_positions)
+        torch.testing.assert_close(cache.persistent_positions, torch.tensor([0, 1]))
         cache.update(x, x, 0)
         self.assertEqual(layer.is_persistent.sum().item(), 2)
 
     def test_zero_and_invalid_budgets(self):
-        cache = SlidingWindowKVCache(1, 2, max_persistent_tokens=0)
+        cache = SlidingWindowKVCache(1, 2, max_persistent_kv_tokens=0)
         x = torch.ones(1, 1, 1, 1)
         cache.update(x, x, 0)
-        with self.assertRaisesRegex(ValueError, "max_persistent_tokens=0"):
-            cache.update(x, x, 0, {"persistent_mask": torch.tensor([True])})
+        with self.assertRaisesRegex(ValueError, "max_persistent_kv_tokens=0"):
+            cache.register_persistent(
+                torch.tensor([1]),
+                torch.tensor([True]),
+            )
         for invalid in (-1, True, 1.5):
             with self.assertRaises(ValueError):
-                TTCDQwen3Config(max_persistent_tokens=invalid)
+                TTCDQwen3Config(max_persistent_kv_tokens=invalid)
             with self.assertRaises(ValueError):
-                SlidingWindowKVCache(1, 2, max_persistent_tokens=invalid)
-        restored = TTCDQwen3Config.from_dict(TTCDQwen3Config(max_persistent_tokens=17).to_dict())
-        self.assertEqual(restored.max_persistent_tokens, 17)
+                SlidingWindowKVCache(
+                    1,
+                    2,
+                    max_persistent_kv_tokens=invalid,
+                )
+        restored = TTCDQwen3Config.from_dict(
+            TTCDQwen3Config(max_persistent_kv_tokens=17).to_dict()
+        )
+        self.assertEqual(restored.max_persistent_kv_tokens, 17)
 
     @torch.inference_mode()
     def test_prefill_rejects_over_budget_before_updating_state(self):
         model = self.model([])
-        model.config.max_persistent_tokens = 2
+        model.config.max_persistent_kv_tokens = 2
         ids = torch.ones(1, 4, dtype=torch.long)
         result = model.prefill(ids, 2, persistent_mask=torch.tensor([True, False, False, False]))
-        with self.assertRaisesRegex(ValueError, "max_persistent_tokens=2"):
+        with self.assertRaisesRegex(ValueError, "max_persistent_kv_tokens=2"):
             model.prefill(ids, 1, state=result.state, persistent_mask=torch.ones(4, dtype=torch.bool))
         self.assertEqual(result.state.past_key_values.get_seq_length(), 4)
-        with self.assertRaisesRegex(ValueError, "max_persistent_tokens=2"):
+        with self.assertRaisesRegex(ValueError, "max_persistent_kv_tokens=2"):
             model(ids, persistent_mask=torch.ones(4, dtype=torch.bool))
 
     def model(self, fast_layers, backend="sdpa"):
@@ -67,14 +90,21 @@ class PersistentKVTests(unittest.TestCase):
             cache = SlidingWindowKVCache(1, window)
             x = torch.arange(8).float().reshape(1, 1, 8, 1)
             persistent = torch.tensor([True, True, False, False, False, True, False, False])
-            full, _ = cache.update(x, x + 100, 0, {"persistent_mask": persistent})
+            positions = torch.arange(8)
+            cache.register_persistent(positions, persistent)
+            full, _ = cache.update(
+                x,
+                x + 100,
+                0,
+                {"cache_position": positions},
+            )
             torch.testing.assert_close(full, x)
             layer = cache.layers[0]
             expected = torch.arange(8)[persistent | (torch.arange(8) >= 8 - (window - 1))]
             torch.testing.assert_close(layer.positions, expected)
             torch.testing.assert_close(layer.keys.flatten(), expected.float())
             torch.testing.assert_close(layer.values.flatten(), expected.float() + 100)
-            next_positions, flags = layer.attention_metadata(torch.tensor([8]))
+            next_positions, flags = cache.attention_metadata(torch.tensor([8]))
             torch.testing.assert_close(next_positions, torch.cat((expected, torch.tensor([8]))))
             self.assertFalse(flags[-1])
             cache.update(torch.tensor([[[[8.]]]]), torch.tensor([[[[108.]]]]), 0)
@@ -117,9 +147,21 @@ class PersistentKVTests(unittest.TestCase):
         x = torch.ones(1, 1, 2, 1)
         for flags in (torch.ones(2), torch.ones(3, dtype=torch.bool)):
             with self.assertRaisesRegex(ValueError, "persistent_mask"):
-                cache.update(x, x, 0, {"persistent_mask": flags})
+                cache.register_persistent(torch.arange(2), flags)
             self.assertEqual(cache.get_seq_length(), 0)
             self.assertIsNone(cache.layers[0].positions)
+            self.assertIsNone(cache.persistent_positions)
+
+    def test_cannot_retroactively_mark_processed_kv_persistent(self):
+        cache = SlidingWindowKVCache(1, 3)
+        x = torch.ones(1, 1, 4, 1)
+        cache.update(x, x, 0)
+        with self.assertRaisesRegex(ValueError, "retroactively persist"):
+            cache.register_persistent(
+                torch.tensor([0]),
+                torch.tensor([True]),
+            )
+        self.assertIsNone(cache.persistent_positions)
 
     @torch.inference_mode()
     def test_cached_prefill_and_decode_match_uncached_reference(self):

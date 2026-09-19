@@ -65,6 +65,7 @@ class TaalQwen3Model(StatefulQwen3Model):
         attention_mask: Bool[torch.Tensor, "B S_kv"] | None = None,
         output_hidden_states: bool = False,
         write_mask: Bool[torch.Tensor, "B S"] | None = None,
+        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
     ) -> TaalQwen3ModelOutput:
         past_key_values = state.past_key_values if state is not None else None
         if self.training and self.is_gradient_checkpointing:
@@ -93,13 +94,16 @@ class TaalQwen3Model(StatefulQwen3Model):
             raise ValueError("At least one input token is required")
         if write_mask is not None and write_mask.device != hidden_states.device:
             raise ValueError("write_mask must be on the input device")
+        if persistent_mask is not None and persistent_mask.device != hidden_states.device:
+            raise ValueError("persistent_mask must be on the input device")
 
         if past_key_values is not None:
             if not isinstance(past_key_values, SlidingWindowKVCache):
                 raise ValueError("State must use SlidingWindowKVCache")
             if (
                 past_key_values.window_size != self.config.working_memory_size
-                or past_key_values.max_persistent_tokens != 0
+                or past_key_values.max_persistent_kv_tokens
+                != self.config.max_persistent_kv_tokens
                 or len(past_key_values.layers) != len(self.layers)
             ):
                 raise ValueError(
@@ -143,12 +147,27 @@ class TaalQwen3Model(StatefulQwen3Model):
             past_key_values = SlidingWindowKVCache(
                 len(self.layers),
                 self.config.working_memory_size,
-                max_persistent_tokens=0,
+                max_persistent_kv_tokens=self.config.max_persistent_kv_tokens,
             )
         if past_key_values is None:
             key_positions = cache_position
+            key_persistent = persistent_mask
+            if (
+                persistent_mask is not None
+                and int(persistent_mask.sum())
+                > self.config.max_persistent_kv_tokens
+            ):
+                raise ValueError(
+                    "Persistent KV tokens exceed "
+                    "max_persistent_kv_tokens="
+                    f"{self.config.max_persistent_kv_tokens}"
+                )
         else:
-            key_positions, _ = past_key_values.layers[0].attention_metadata(
+            past_key_values.register_persistent(
+                cache_position,
+                persistent_mask,
+            )
+            key_positions, key_persistent = past_key_values.attention_metadata(
                 cache_position
             )
 
@@ -158,6 +177,7 @@ class TaalQwen3Model(StatefulQwen3Model):
             cache_position,
             key_positions,
             self.config.working_memory_size,
+            key_persistent,
         )
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 

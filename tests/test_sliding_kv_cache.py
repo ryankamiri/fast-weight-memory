@@ -58,11 +58,16 @@ class SlidingKVCacheTests(unittest.TestCase):
     def test_reset_clears_history_and_positions(self):
         cache = SlidingWindowKVCache(2, 4)
         x = torch.randn(1, 1, 9, 2)
+        cache.register_persistent(
+            torch.arange(9),
+            torch.arange(9) < 2,
+        )
         for i in range(2):
             cache.update(x, x, i)
         old_keys = cache.layers[0].keys
         saved = old_keys.clone()
         cache.reset()
+        self.assertIsNone(cache.persistent_positions)
         torch.testing.assert_close(old_keys, saved)
         for i in range(2):
             self.assertEqual(cache.get_seq_length(i), 0)
@@ -76,6 +81,21 @@ class SlidingKVCacheTests(unittest.TestCase):
                 SlidingWindowKVLayer(window)
         with self.assertRaises(ValueError):
             SlidingWindowKVCache(0, 4)
+
+    def test_crop_removes_registered_positions_after_new_length(self):
+        cache = SlidingWindowKVCache(1, 8)
+        positions = torch.arange(5)
+        cache.register_persistent(
+            positions,
+            torch.tensor([True, False, False, True, False]),
+        )
+        x = positions.float().reshape(1, 1, 5, 1)
+        cache.update(x, x, 0, {"cache_position": positions})
+        cache.crop(3)
+        torch.testing.assert_close(
+            cache.persistent_positions,
+            torch.tensor([0]),
+        )
 
 
 if __name__ == "__main__":

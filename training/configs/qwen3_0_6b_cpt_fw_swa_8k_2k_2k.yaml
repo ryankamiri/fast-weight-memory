@@ -4,7 +4,7 @@ model:
   fast_weight_layers: [0, 7, 14, 21]
   teacher_window_size: 8192
   student_window_size: 2048
-  max_persistent_tokens: 512
+  max_persistent_kv_tokens: 512
   chunk_size: 2048
   fast_weight_lr: 0.3
   fast_weight_read_scale: 1.0

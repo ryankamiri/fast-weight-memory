@@ -124,7 +124,8 @@ class TTCDQwen3Model(StatefulQwen3Model):
             if not isinstance(past_key_values, SlidingWindowKVCache):
                 raise ValueError("State must use SlidingWindowKVCache")
             if (past_key_values.window_size != self.config.teacher_window_size
-                    or past_key_values.max_persistent_tokens != self.config.max_persistent_tokens
+                    or past_key_values.max_persistent_kv_tokens
+                    != self.config.max_persistent_kv_tokens
                     or len(past_key_values.layers) != len(self.layers)):
                 raise ValueError("KV cache window, persistent-token limit, and layer count must match the model")
             if not use_cache:
@@ -154,19 +155,33 @@ class TTCDQwen3Model(StatefulQwen3Model):
             if tokens_seen:
                 raise ValueError("Cannot reconstruct earlier KV history from MLP state; start a fresh cached session")
             past_key_values = SlidingWindowKVCache(
-                len(self.layers), self.config.teacher_window_size, self.config.max_persistent_tokens,
+                len(self.layers),
+                self.config.teacher_window_size,
+                self.config.max_persistent_kv_tokens,
             )
         if past_key_values is None:
             # MLP-only continuation has no earlier attention keys.
             key_positions = cache_position
             key_persistent = persistent_mask
-            if persistent_mask is not None and int(persistent_mask.sum()) > self.config.max_persistent_tokens:
-                raise ValueError(f"Persistent tokens exceed max_persistent_tokens={self.config.max_persistent_tokens}")
+            if (
+                persistent_mask is not None
+                and int(persistent_mask.sum())
+                > self.config.max_persistent_kv_tokens
+            ):
+                raise ValueError(
+                    "Persistent KV tokens exceed "
+                    "max_persistent_kv_tokens="
+                    f"{self.config.max_persistent_kv_tokens}"
+                )
         else:
             # Retained positions can have gaps. Use cache-owned metadata instead
             # of reconstructing a contiguous range from the stored tensor length.
-            key_positions, key_persistent = past_key_values.layers[0].attention_metadata(
-                cache_position, persistent_mask,
+            past_key_values.register_persistent(
+                cache_position,
+                persistent_mask,
+            )
+            key_positions, key_persistent = past_key_values.attention_metadata(
+                cache_position,
             )
         masks = self._prepare_masks(
             attention_mask, hidden_states, cache_position, key_positions, key_persistent,
@@ -189,7 +204,6 @@ class TTCDQwen3Model(StatefulQwen3Model):
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
                 state=mlp_states.get(layer_idx),
-                persistent_mask=persistent_mask,
             )
             if is_fast:
                 hidden_states, next_mlp_states[layer_idx] = layer_output

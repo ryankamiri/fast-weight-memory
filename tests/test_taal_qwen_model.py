@@ -26,6 +26,7 @@ class TaalQwen3ModelTests(unittest.TestCase):
             head_dim=4,
             attention_dropout=0.0,
             working_memory_size=4,
+            max_persistent_kv_tokens=4,
             memory_dim=8,
             memory_depth=2,
             memory_conv_kernel_size=1,
@@ -130,6 +131,7 @@ class TaalQwen3ModelTests(unittest.TestCase):
         config = self.config(memory_chunk_size=2)
         restored_config = TaalQwen3Config.from_dict(config.to_dict())
         self.assertEqual(restored_config.working_memory_size, 4)
+        self.assertEqual(restored_config.max_persistent_kv_tokens, 4)
         self.assertEqual(restored_config.taal_layer_config().memory.chunk_size, 2)
 
         model = TaalQwen3Model(config).eval()
@@ -171,10 +173,14 @@ class TaalQwen3ModelTests(unittest.TestCase):
         checked = copy.deepcopy(base)
         checked.gradient_checkpointing_enable()
         self.assertTrue(checked.is_gradient_checkpointing)
+        persistent_mask = torch.arange(self.input_ids.shape[1]) < 2
 
         results = []
         for model in (base, checked):
-            output = model(self.input_ids)
+            output = model(
+                self.input_ids,
+                persistent_mask=persistent_mask,
+            )
             loss = output.last_hidden_state[..., 0].sum()
             for memory_state in output.state.memory_states.values():
                 loss = loss + sum(
@@ -206,6 +212,64 @@ class TaalQwen3ModelTests(unittest.TestCase):
                 rtol=2e-5,
                 msg=name,
             )
+
+    @torch.inference_mode()
+    def test_persistent_system_kv_survives_blocked_prefill(self):
+        persistent_mask = torch.zeros(9, dtype=torch.bool)
+        persistent_mask[:2] = True
+        for backend in ("eager", "sdpa"):
+            config = self.config()
+            config._attn_implementation = backend
+            model = TaalQwen3Model(config).eval()
+            reference = model(
+                self.input_ids,
+                persistent_mask=persistent_mask,
+            )
+
+            state = None
+            block_outputs = []
+            for start, end in ((0, 3), (3, 5), (5, 9)):
+                output = model(
+                    self.input_ids[:, start:end],
+                    state=state,
+                    use_cache=True,
+                    persistent_mask=persistent_mask[start:end],
+                )
+                state = output.state
+                block_outputs.append(output.last_hidden_state)
+
+            torch.testing.assert_close(
+                torch.cat(block_outputs, dim=1),
+                reference.last_hidden_state,
+                atol=2e-6,
+                rtol=2e-5,
+            )
+            for layer in state.past_key_values.layers:
+                torch.testing.assert_close(
+                    layer.positions,
+                    torch.tensor([0, 1, 6, 7, 8]),
+                )
+                torch.testing.assert_close(
+                    layer.is_persistent,
+                    torch.tensor([True, True, False, False, False]),
+                )
+                # TaaL's internal learned prefix never enters Qwen KV.
+                self.assertEqual(layer.keys.shape[-2], 5)
+
+    def test_rejects_invalid_or_exceeded_persistent_kv_budget(self):
+        for invalid in (-1, True, 1.5):
+            with self.assertRaisesRegex(ValueError, "nonnegative integer"):
+                self.config(max_persistent_kv_tokens=invalid)
+
+        model = TaalQwen3Model(
+            self.config(max_persistent_kv_tokens=1)
+        ).eval()
+        persistent_mask = torch.tensor([True, True] + [False] * 7)
+        with self.assertRaisesRegex(
+            ValueError,
+            "max_persistent_kv_tokens=1",
+        ):
+            model(self.input_ids, persistent_mask=persistent_mask)
 
 
 if __name__ == "__main__":

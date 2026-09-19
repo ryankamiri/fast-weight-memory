@@ -12,6 +12,7 @@ class TaalQwen3Config(Qwen3Config):
     def __init__(
         self,
         working_memory_size: int = 4096,
+        max_persistent_kv_tokens: int = 512,
         memory_dim: int = 256,
         memory_depth: int = 2,
         memory_conv_kernel_size: int = 4,
@@ -27,6 +28,13 @@ class TaalQwen3Config(Qwen3Config):
         super().__init__(**kwargs)
         if type(working_memory_size) is not int or working_memory_size < 1:
             raise ValueError("working_memory_size must be a positive integer")
+        if (
+            type(max_persistent_kv_tokens) is not int
+            or max_persistent_kv_tokens < 0
+        ):
+            raise ValueError(
+                "max_persistent_kv_tokens must be a nonnegative integer"
+            )
 
         memory = NeuralMemoryConfig(
             dim=memory_dim,
@@ -45,6 +53,9 @@ class TaalQwen3Config(Qwen3Config):
         )
 
         self.working_memory_size = working_memory_size
+        # Qwen attention K/V retained outside the rolling working-memory
+        # window. This is distinct from TaaL's internal learned prefix tokens.
+        self.max_persistent_kv_tokens = max_persistent_kv_tokens
         self.memory_dim = memory.dim
         self.memory_depth = memory.depth
         self.memory_conv_kernel_size = memory.conv_kernel_size

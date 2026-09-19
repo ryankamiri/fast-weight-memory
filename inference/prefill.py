@@ -31,8 +31,15 @@ def prefill(
         cache = None if state is None else state.past_key_values
         retained = None if cache is None else cache.layers[0].is_persistent
         retained_count = 0 if retained is None else int(retained.sum())
-        if retained_count + int(persistent_mask.sum()) > model.config.max_persistent_tokens:
-            raise ValueError(f"Persistent tokens exceed max_persistent_tokens={model.config.max_persistent_tokens}")
+        if (
+            retained_count + int(persistent_mask.sum())
+            > model.config.max_persistent_kv_tokens
+        ):
+            raise ValueError(
+                "Persistent KV tokens exceed "
+                "max_persistent_kv_tokens="
+                f"{model.config.max_persistent_kv_tokens}"
+            )
     for start in range(0, S_prompt, execution_block_size):
         input_block: Int[torch.Tensor, "B S_block"] = input_ids[:, start : start + execution_block_size]
         block_persistent = None if persistent_mask is None else persistent_mask[start : start + execution_block_size]

@@ -66,7 +66,6 @@ class TTCDQwen3DecoderLayer(GradientCheckpointingLayer):
         use_cache: bool = False,
         state: TTCDMLPState | None = None,
         output_attentions: bool = False,
-        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
     ) -> Float[torch.Tensor, "B S d_model"] | tuple[Float[torch.Tensor, "B S d_model"], TTCDMLPState]:
         if position_embeddings is None:
             raise ValueError("position_embeddings must be supplied by the model's RoPE module")
@@ -84,7 +83,6 @@ class TTCDQwen3DecoderLayer(GradientCheckpointingLayer):
             output_attentions=output_attentions,
             position_ids=position_ids,
             student_attention_mask=student_attention_mask,
-            persistent_mask=persistent_mask,
             fast_weight_read_scale=self.mlp.fast_weight_read_scale,
         )
 

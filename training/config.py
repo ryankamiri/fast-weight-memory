@@ -29,7 +29,7 @@ class ModelConfig:
     fast_weight_layers: list[int] = field(default_factory=lambda: [0, 7, 14, 21])
     teacher_window_size: int = 8192
     student_window_size: int = 4096
-    max_persistent_tokens: int = 512
+    max_persistent_kv_tokens: int = 512
     chunk_size: int = 4096
     fast_weight_lr: float = 0.3
     fast_weight_read_scale: float = 1.0
@@ -235,7 +235,10 @@ class TrainingConfig:
         if self.data.seq_len < 2:
             raise ValueError("seq_len must allow at least one next-token prediction")
         for name, value in (("num_workers", self.data.num_workers),
-                            ("max_persistent_tokens", self.model.max_persistent_tokens),
+                            (
+                                "max_persistent_kv_tokens",
+                                self.model.max_persistent_kv_tokens,
+                            ),
                             ("seed", self.training.seed),
                             ("warmup_steps", self.scheduler.warmup_steps)):
             if type(value) is not int or value < 0:

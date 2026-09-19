@@ -39,7 +39,6 @@ class TTCDQwen3Attention(Qwen3Attention):
         past_key_values: Cache | None = None,
         cache_position: Int[torch.Tensor, "S"] | None = None,
         output_attentions: bool = False,
-        persistent_mask: Bool[torch.Tensor, "S"] | None = None,
         fast_weight_read_scale: float = 1.0,
     ) -> tuple[
         Float[torch.Tensor, "B S d_model"] | tuple[
@@ -49,7 +48,7 @@ class TTCDQwen3Attention(Qwen3Attention):
         Float[torch.Tensor, "B h_q S S_kv"] | None,
     ]:
         # normal forward pass
-        if not self.is_fast_weight_layer and persistent_mask is None:
+        if not self.is_fast_weight_layer:
             return super().forward(
                 hidden_states, position_embeddings, teacher_attention_mask,
                 past_key_values=past_key_values, cache_position=cache_position,
@@ -79,7 +78,6 @@ class TTCDQwen3Attention(Qwen3Attention):
                 "sin": sin,
                 "cos": cos,
                 "cache_position": cache_position,
-                "persistent_mask": persistent_mask,
             }
             key, value = past_key_values.update(
                 key, value, self.layer_idx, cache_kwargs,

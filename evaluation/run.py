@@ -165,7 +165,10 @@ def main():
             tokenizer = AutoTokenizer.from_pretrained(metadata["tokenizer"], revision=metadata["tokenizer_revision"])
         examples = [prepare_example(example, tokenizer, prompt_format) for example in dataset]
         maximum = max(example["prompt_length"] for example in examples)
-        if max(example["persistent_prefix_length"] for example in examples) > model_config.max_persistent_tokens:
+        if (
+            max(example["persistent_prefix_length"] for example in examples)
+            > model_config.max_persistent_kv_tokens
+        ):
             raise ValueError("Prepared task prefix exceeds checkpoint persistent-token budget")
         model = load_model(model_source, model_config, model_settings.get("fast_weight_read_scale", 1.0))
         model.to(device).eval()
