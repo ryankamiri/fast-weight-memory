@@ -9,12 +9,13 @@ class NeuralMemoryConfig:
     dim: int
     depth: int = 2
     conv_kernel_size: int = 4
+    chunk_size: int = 1
     initial_forget: float = 0.01
     initial_momentum: float = 0.9
     initial_write_strength: float = 0.1
 
     def __post_init__(self):
-        for name in ("dim", "depth", "conv_kernel_size"):
+        for name in ("dim", "depth", "conv_kernel_size", "chunk_size"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
