@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import torch
 from beartype import beartype
-from jaxtyping import Float, Float32, jaxtyped
+from jaxtyping import Bool, Float, Float32, jaxtyped
 from torch import nn
 from torch.nn import functional as F
 from torch.func import functional_call, grad, vmap
@@ -192,6 +192,7 @@ class NeuralMemory(nn.Module):
         inputs: Float[torch.Tensor, "B C D"],
         keys: Float32[torch.Tensor, "B C D"],
         values: Float32[torch.Tensor, "B C D"],
+        write_mask: Bool[torch.Tensor, "B C"],
     ) -> NeuralMemoryState:
         B, C, _ = keys.shape
         pending_count = state.pending_count + C
@@ -206,6 +207,8 @@ class NeuralMemory(nn.Module):
             .reshape(B, C)
             .float()
         )
+        # A masked token can still read memory, but contributes no write loss.
+        write_strength = torch.where(write_mask, write_strength, 0.0)
         chunk_gradient: dict[str, Float32[torch.Tensor, "B D D"]] = (
             self._chunk_gradient(
                 state.weights,
@@ -298,6 +301,7 @@ class NeuralMemory(nn.Module):
         keys: Float32[torch.Tensor, "B C D"],
         values: Float32[torch.Tensor, "B C D"],
         inputs: Float[torch.Tensor, "B C D"],
+        write_mask: Bool[torch.Tensor, "B C"],
         output_dtype: torch.dtype,
     ) -> tuple[Float[torch.Tensor, "B C D"], NeuralMemoryState]:
         _, C, _ = queries.shape
@@ -306,7 +310,7 @@ class NeuralMemory(nn.Module):
         reaches_chunk_boundary = (
             state.pending_count + C == self.config.chunk_size
         )
-        state = self._update(state, inputs, keys, values)
+        state = self._update(state, inputs, keys, values, write_mask)
 
         outputs: list[Float[torch.Tensor, "B C D"]] = []
         if reaches_chunk_boundary:
@@ -324,6 +328,7 @@ class NeuralMemory(nn.Module):
         self,
         inputs: Float[torch.Tensor, "B S D"],
         state: NeuralMemoryState | None = None,
+        write_mask: Bool[torch.Tensor, "B S"] | None = None,
     ) -> tuple[Float[torch.Tensor, "B S D"], NeuralMemoryState]:
         batch_size, sequence_length, dim = inputs.shape
         if dim != self.config.dim:
@@ -331,6 +336,13 @@ class NeuralMemory(nn.Module):
         if state is None:
             state = self.initial_state(batch_size)
         self._validate_state(state, batch_size)
+        if write_mask is None:
+            write_mask = torch.ones(
+                batch_size,
+                sequence_length,
+                dtype=torch.bool,
+                device=inputs.device,
+            )
         if sequence_length == 0:
             return inputs.new_empty(batch_size, 0, dim), state
 
@@ -365,6 +377,7 @@ class NeuralMemory(nn.Module):
                 keys[:, start:end].float(),
                 values[:, start:end].float(),
                 inputs[:, start:end],
+                write_mask[:, start:end],
                 inputs.dtype,
             )
             outputs.append(output)
@@ -389,6 +402,9 @@ class NeuralMemory(nn.Module):
             input_chunks: Float[torch.Tensor, "B N C D"] = inputs[
                 :, start:end
             ].reshape(batch_size, N, C, dim)
+            write_mask_chunks: Bool[torch.Tensor, "B N C"] = write_mask[
+                :, start:end
+            ].reshape(batch_size, N, C)
 
             for chunk_index in range(N):
                 output, state = self._process_chunk(
@@ -397,6 +413,7 @@ class NeuralMemory(nn.Module):
                     key_chunks[:, chunk_index],
                     value_chunks[:, chunk_index],
                     input_chunks[:, chunk_index],
+                    write_mask_chunks[:, chunk_index],
                     inputs.dtype,
                 )
                 outputs.append(output)
@@ -410,6 +427,7 @@ class NeuralMemory(nn.Module):
                 keys[:, start:].float(),
                 values[:, start:].float(),
                 inputs[:, start:],
+                write_mask[:, start:],
                 inputs.dtype,
             )
             outputs.append(output)

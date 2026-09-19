@@ -41,13 +41,26 @@ class NeuralMemoryTests(unittest.TestCase):
     def test_split_calls_match_concatenated_call(self):
         full_memory = NeuralMemory(self.config).eval()
         split_memory = copy.deepcopy(full_memory).eval()
+        write_mask = torch.tensor(
+            [
+                [True, False, True, True, False],
+                [True, True, False, True, True],
+            ]
+        )
 
         with torch.no_grad():
-            full_output, full_state = full_memory(self.inputs[:, :5])
+            full_output, full_state = full_memory(
+                self.inputs[:, :5],
+                write_mask=write_mask,
+            )
             state = None
             pieces = []
             for start, end in ((0, 1), (1, 3), (3, 4), (4, 5)):
-                output, state = split_memory(self.inputs[:, start:end], state)
+                output, state = split_memory(
+                    self.inputs[:, start:end],
+                    state,
+                    write_mask[:, start:end],
+                )
                 pieces.append(output)
 
         torch.testing.assert_close(torch.cat(pieces, dim=1), full_output)
@@ -147,7 +160,8 @@ class NeuralMemoryTests(unittest.TestCase):
             (1.0 - config.initial_forget) * chunk_start + expected_momentum
         )
 
-        updated = memory._update(state, inputs, keys, values)
+        write_mask = torch.ones(1, 2, dtype=torch.bool)
+        updated = memory._update(state, inputs, keys, values, write_mask)
         torch.testing.assert_close(
             updated.weights["layers.0.weight"][0], expected_weight
         )
@@ -182,6 +196,7 @@ class NeuralMemoryTests(unittest.TestCase):
             keys,
             values,
             inputs,
+            torch.ones(1, 2, dtype=torch.bool),
             torch.float32,
         )
 
@@ -191,6 +206,43 @@ class NeuralMemoryTests(unittest.TestCase):
         token_update_reads = torch.tensor([[[0.5], [1.5]]])
         torch.testing.assert_close(output, expected_reads)
         self.assertFalse(torch.equal(output, token_update_reads))
+
+    def test_write_mask_prevents_masked_token_from_updating_memory(self):
+        config = NeuralMemoryConfig(
+            dim=1,
+            depth=1,
+            conv_kernel_size=1,
+            chunk_size=2,
+            initial_write_strength=0.25,
+        )
+        memory = NeuralMemory(config)
+        with torch.no_grad():
+            memory.memory_mlp.layers[0].weight.zero_()
+
+        initial = memory.initial_state(1)
+        queries = torch.ones(1, 2, 1)
+        keys = torch.ones(1, 2, 1)
+        values = torch.tensor([[[1.0], [2.0]]])
+        inputs = torch.ones(1, 2, 1)
+        write_mask = torch.tensor([[True, False]])
+
+        output, updated = memory._process_chunk(
+            initial,
+            queries,
+            keys,
+            values,
+            inputs,
+            write_mask,
+            torch.float32,
+        )
+
+        # Only the first token contributes: -theta * grad = -0.25 * -2 = 0.5.
+        expected_weight = torch.tensor([[0.5]])
+        torch.testing.assert_close(
+            updated.weights["layers.0.weight"][0], expected_weight
+        )
+        # The mask controls writes only; the boundary token still reads memory.
+        torch.testing.assert_close(output, torch.tensor([[[0.0], [0.5]]]))
 
     def test_outer_loss_backpropagates_through_online_writes(self):
         memory = NeuralMemory(self.config).train()
@@ -216,7 +268,6 @@ class NeuralMemoryTests(unittest.TestCase):
         state.weights.pop(next(iter(state.weights)))
         with self.assertRaises(ValueError):
             memory(self.inputs, state)
-
 
 if __name__ == "__main__":
     unittest.main()
