@@ -34,9 +34,9 @@ class NeuralMemoryTests(unittest.TestCase):
             self.assertEqual(initial.momentum[name].dtype, torch.float32)
             torch.testing.assert_close(initial.weights[name], before[name])
             torch.testing.assert_close(updated.weights[name], initial.weights[name])
-            self.assertIsNot(
-                updated.provisional_weights[name], initial.weights[name]
-            )
+            self.assertIsNot(updated.pending_gradient[name], initial.weights[name])
+        self.assertEqual(updated.pending_count, 2)
+        self.assertIsNotNone(updated.pending_input_sum)
 
     def test_split_calls_match_concatenated_call(self):
         full_memory = NeuralMemory(self.config).eval()
@@ -58,11 +58,15 @@ class NeuralMemoryTests(unittest.TestCase):
         torch.testing.assert_close(state.key_conv_history, full_state.key_conv_history)
         torch.testing.assert_close(state.value_conv_history, full_state.value_conv_history)
         self.assertEqual(state.pending_count, full_state.pending_count)
-        for name in full_state.provisional_weights:
+        for name in full_state.pending_gradient:
             torch.testing.assert_close(
-                state.provisional_weights[name],
-                full_state.provisional_weights[name],
+                state.pending_gradient[name],
+                full_state.pending_gradient[name],
             )
+        torch.testing.assert_close(
+            state.pending_input_sum,
+            full_state.pending_input_sum,
+        )
 
     def test_one_step_matches_explicit_titans_update(self):
         config = NeuralMemoryConfig(
@@ -108,7 +112,7 @@ class NeuralMemoryTests(unittest.TestCase):
         )
         torch.testing.assert_close(output[0, 0], expected_output)
 
-    def test_chunk_gradients_share_the_chunk_start_weights(self):
+    def test_chunk_aggregates_token_gradients_into_one_update(self):
         config = NeuralMemoryConfig(
             dim=1,
             depth=1,
@@ -125,9 +129,7 @@ class NeuralMemoryTests(unittest.TestCase):
         state = memory.initial_state(1)
         keys = torch.tensor([[[1.0], [2.0]]])
         values = torch.tensor([[[0.5], [-0.25]]])
-        alpha = torch.full((1, 2, 1), config.initial_forget)
-        eta = torch.full((1, 2, 1), config.initial_momentum)
-        theta = torch.full((1, 2, 1), config.initial_write_strength)
+        inputs = torch.tensor([[[0.1], [-0.2]]])
 
         chunk_start = state.weights["layers.0.weight"][0].detach().clone()
         gradients = []
@@ -140,32 +142,55 @@ class NeuralMemoryTests(unittest.TestCase):
             gradient, = torch.autograd.grad(loss, weight)
             gradients.append(gradient)
 
-        expected_weight = chunk_start
-        expected_momentum = torch.zeros_like(chunk_start)
-        expected_weights = []
-        for gradient in gradients:
-            expected_momentum = (
-                config.initial_momentum * expected_momentum
-                - config.initial_write_strength * gradient
-            )
-            expected_weight = (
-                (1.0 - config.initial_forget) * expected_weight
-                + expected_momentum
-            )
-            expected_weights.append(expected_weight)
+        expected_momentum = -config.initial_write_strength * sum(gradients)
+        expected_weight = (
+            (1.0 - config.initial_forget) * chunk_start + expected_momentum
+        )
 
-        updated, weights_by_token = memory._update(
-            state, keys, values, alpha, eta, theta
-        )
-        torch.testing.assert_close(
-            weights_by_token["layers.0.weight"][0],
-            torch.stack(expected_weights),
-        )
+        updated = memory._update(state, inputs, keys, values)
         torch.testing.assert_close(
             updated.weights["layers.0.weight"][0], expected_weight
         )
+        torch.testing.assert_close(
+            updated.momentum["layers.0.weight"][0], expected_momentum
+        )
         self.assertEqual(updated.pending_count, 0)
-        self.assertIsNone(updated.provisional_weights)
+        self.assertIsNone(updated.pending_gradient)
+        self.assertIsNone(updated.pending_input_sum)
+
+    def test_chunk_reads_previous_weight_until_boundary(self):
+        config = NeuralMemoryConfig(
+            dim=1,
+            depth=1,
+            conv_kernel_size=1,
+            chunk_size=2,
+            initial_write_strength=0.25,
+        )
+        memory = NeuralMemory(config)
+        with torch.no_grad():
+            memory.memory_mlp.layers[0].weight.zero_()
+
+        initial = memory.initial_state(1)
+        queries = torch.ones(1, 2, 1)
+        keys = torch.ones(1, 2, 1)
+        values = torch.tensor([[[1.0], [2.0]]])
+        inputs = torch.ones(1, 2, 1)
+
+        output, _ = memory._process_chunk(
+            initial,
+            queries,
+            keys,
+            values,
+            inputs,
+            torch.float32,
+        )
+
+        # W0 = 0 and the aggregated chunk update produces W_chunk = 1.5.
+        # The first token reads W0; the boundary token reads W_chunk.
+        expected_reads = torch.tensor([[[0.0], [1.5]]])
+        token_update_reads = torch.tensor([[[0.5], [1.5]]])
+        torch.testing.assert_close(output, expected_reads)
+        self.assertFalse(torch.equal(output, token_update_reads))
 
     def test_outer_loss_backpropagates_through_online_writes(self):
         memory = NeuralMemory(self.config).train()

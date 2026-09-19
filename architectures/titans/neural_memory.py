@@ -94,21 +94,28 @@ class NeuralMemory(nn.Module):
             raise ValueError(
                 "state.pending_count must be between 0 and chunk_size - 1"
             )
-        if (state.provisional_weights is None) != (state.pending_count == 0):
+        has_pending_state = (
+            state.pending_gradient is not None and state.pending_input_sum is not None
+        )
+        if has_pending_state != (state.pending_count > 0):
             raise ValueError(
-                "state.provisional_weights must exist exactly when a chunk is pending"
+                "pending gradient and input sum must exist exactly when a chunk is pending"
+            )
+        if (state.pending_gradient is None) != (state.pending_input_sum is None):
+            raise ValueError(
+                "state.pending_gradient and state.pending_input_sum must coexist"
             )
 
         collections = [
             ("weights", state.weights),
             ("momentum", state.momentum),
         ]
-        if state.provisional_weights is not None:
-            if set(state.provisional_weights) != parameter_names:
+        if state.pending_gradient is not None:
+            if set(state.pending_gradient) != parameter_names:
                 raise ValueError(
-                    "state.provisional_weights do not match the memory MLP parameters"
+                    "state.pending_gradient does not match the memory MLP parameters"
                 )
-            collections.append(("provisional_weights", state.provisional_weights))
+            collections.append(("pending_gradient", state.pending_gradient))
         for collection_name, collection in collections:
             for name, value in collection.items():
                 expected = dict(self.memory_mlp.named_parameters())[name].shape
@@ -119,13 +126,22 @@ class NeuralMemory(nn.Module):
                     )
                 if value.dtype != torch.float32:
                     raise ValueError(f"state.{collection_name}[{name!r}] must be float32")
+        if state.pending_input_sum is not None:
+            if state.pending_input_sum.shape != (batch_size, self.config.dim):
+                raise ValueError(
+                    "state.pending_input_sum must have shape "
+                    f"{(batch_size, self.config.dim)}"
+                )
+            if state.pending_input_sum.dtype != torch.float32:
+                raise ValueError("state.pending_input_sum must be float32")
 
-    def _surprise_gradients(
+    def _chunk_gradient(
         self,
         weights: dict[str, Float32[torch.Tensor, "B D D"]],
         keys: Float32[torch.Tensor, "B C D"],
         values: Float32[torch.Tensor, "B C D"],
-    ) -> dict[str, Float32[torch.Tensor, "B C D D"]]:
+        write_strength: Float32[torch.Tensor, "B C"],
+    ) -> dict[str, Float32[torch.Tensor, "B D D"]]:
         # Online writes still require a local gradient during no-grad/inference
         # generation. Only training retains the higher-order graph used by the
         # outer delayed-answer objective.
@@ -137,130 +153,128 @@ class NeuralMemory(nn.Module):
                 }
                 keys = keys.detach().clone()
                 values = values.detach().clone()
+                write_strength = write_strength.detach().clone()
 
-            def memory_loss(
+            def chunk_loss(
                 sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
-                key: Float32[torch.Tensor, "D"],
-                target: Float32[torch.Tensor, "D"],
+                chunk_keys: Float32[torch.Tensor, "C D"],
+                chunk_values: Float32[torch.Tensor, "C D"],
+                chunk_write_strength: Float32[torch.Tensor, "C"],
             ) -> Float[torch.Tensor, ""]:
-                # Run the normal MLP forward with this sample's current fast
-                # weights instead of the module's shared template parameters.
-                prediction: Float[torch.Tensor, "D"] = functional_call(
-                    self.memory_mlp, sample_weights, (key,)
-                )
-                # L_memory = (1 / D) * ||M_W(key) - value||^2_2
-                return F.mse_loss(prediction, target)
+                def predict(
+                    key: Float32[torch.Tensor, "D"],
+                ) -> Float[torch.Tensor, "D"]:
+                    return functional_call(
+                        self.memory_mlp,
+                        sample_weights,
+                        (key,),
+                    )
 
-            # For one session, share its weights while mapping over the C keys
-            # and values in the chunk.
-            per_token_grad = vmap(grad(memory_loss), in_dims=(None, 0, 0))
-            # Then map that per-session computation over the B independent
-            # memory trajectories in the batch.
-            batched_grad = vmap(per_token_grad, in_dims=(0, 0, 0))
-            return batched_grad(weights, keys, values)
+                predictions: Float[torch.Tensor, "C D"] = vmap(predict)(
+                    chunk_keys
+                )
+                per_token_loss: Float32[torch.Tensor, "C"] = F.mse_loss(
+                    predictions,
+                    chunk_values,
+                    reduction="none",
+                ).mean(dim=-1)
+                # L_chunk = sum_i theta_i * ||M_W(k_i) - v_i||^2 / D
+                return (chunk_write_strength * per_token_loss).sum()
+
+            # One gradient per independent session, taken from the aggregate
+            # weighted loss of all C tokens at the shared chunk-start weights.
+            batched_grad = vmap(grad(chunk_loss), in_dims=(0, 0, 0, 0))
+            return batched_grad(weights, keys, values, write_strength)
 
     def _update(
         self,
         state: NeuralMemoryState,
+        inputs: Float[torch.Tensor, "B C D"],
         keys: Float32[torch.Tensor, "B C D"],
         values: Float32[torch.Tensor, "B C D"],
-        alpha: Float[torch.Tensor, "B C 1"],
-        eta: Float[torch.Tensor, "B C 1"],
-        theta: Float[torch.Tensor, "B C 1"],
-    ) -> tuple[
-        NeuralMemoryState,
-        dict[str, Float32[torch.Tensor, "B C D D"]],
-    ]:
-        # All C gradients are deliberately stale with respect to the provisional
-        # prefix states: they share the same committed chunk-start weights so
-        # they can run in parallel. The next chunk refreshes its gradients from
-        # the newly committed final weights of this chunk.
-        gradients: dict[str, Float32[torch.Tensor, "B C D D"]] = (
-            self._surprise_gradients(state.weights, keys, values)
-        )
-
+    ) -> NeuralMemoryState:
         B, C, _ = keys.shape
-        forget: Float32[torch.Tensor, "B C 1 1"] = alpha.reshape(
-            B, C, 1, 1
-        ).float()
-        momentum_retention: Float32[torch.Tensor, "B C 1 1"] = eta.reshape(
-            B, C, 1, 1
-        ).float()
-        write_strength: Float32[torch.Tensor, "B C 1 1"] = theta.reshape(
-            B, C, 1, 1
-        ).float()
+        pending_count = state.pending_count + C
+        if pending_count > self.config.chunk_size:
+            raise ValueError("_update cannot cross a memory chunk boundary")
 
-        weights = state.current_weights
-        momentum = state.momentum
-        weights_by_token: dict[
-            str, list[Float32[torch.Tensor, "B D D"]]
-        ] = {name: [] for name in weights}
+        # The C tokens contribute one weighted loss and therefore one gradient
+        # at the committed chunk-start weights, matching the reference code.
+        write_strength: Float32[torch.Tensor, "B C"] = (
+            self.write_strength_projection(inputs)
+            .sigmoid()
+            .reshape(B, C)
+            .float()
+        )
+        chunk_gradient: dict[str, Float32[torch.Tensor, "B D D"]] = (
+            self._chunk_gradient(
+                state.weights,
+                keys,
+                values,
+                write_strength,
+            )
+        )
+        input_sum: Float32[torch.Tensor, "B D"] = inputs.float().sum(dim=1)
 
-        # Gradients are parallel across C and share the chunk-start weights.
-        # This inexpensive recurrence produces the state visible at each token.
-        for token_index in range(C):
-            next_weights: dict[str, Float32[torch.Tensor, "B D D"]] = {}
-            next_momentum: dict[str, Float32[torch.Tensor, "B D D"]] = {}
-            for name, weight in weights.items():
-                surprise: Float32[torch.Tensor, "B D D"] = (
-                    momentum_retention[:, token_index] * momentum[name]
-                    - write_strength[:, token_index] * gradients[name][:, token_index]
-                )
-                next_momentum[name] = surprise
-                next_weights[name] = (
-                    1.0 - forget[:, token_index]
-                ) * weight + surprise
-                weights_by_token[name].append(next_weights[name])
-            weights = next_weights
-            momentum = next_momentum
+        if state.pending_gradient is not None:
+            chunk_gradient = {
+                name: state.pending_gradient[name] + gradient
+                for name, gradient in chunk_gradient.items()
+            }
+            input_sum = state.pending_input_sum + input_sum
 
-        stacked_weights: dict[str, Float32[torch.Tensor, "B C D D"]] = {
-            name: torch.stack(token_weights, dim=1)
-            for name, token_weights in weights_by_token.items()
+        if pending_count < self.config.chunk_size:
+            if not self.training:
+                chunk_gradient = {
+                    name: value.detach() for name, value in chunk_gradient.items()
+                }
+                input_sum = input_sum.detach()
+            return replace(
+                state,
+                pending_gradient=chunk_gradient,
+                pending_input_sum=input_sum,
+                pending_count=pending_count,
+            )
+
+        # Summarize the completed chunk only to choose its forget/momentum controls;
+        # the keys, values, and accumulated gradient determine what memory stores.
+        chunk_input: Float[torch.Tensor, "B D"] = (
+            input_sum / self.config.chunk_size
+        ).to(self.forget_projection.weight.dtype)
+        forget: Float32[torch.Tensor, "B 1 1"] = (
+            self.forget_projection(chunk_input).sigmoid().reshape(B, 1, 1).float()
+        )
+        momentum_retention: Float32[torch.Tensor, "B 1 1"] = (
+            self.momentum_projection(chunk_input).sigmoid().reshape(B, 1, 1).float()
+        )
+        next_momentum: dict[str, Float32[torch.Tensor, "B D D"]] = {
+            name: momentum_retention * state.momentum[name] - gradient
+            for name, gradient in chunk_gradient.items()
+        }
+        next_weights: dict[str, Float32[torch.Tensor, "B D D"]] = {
+            name: (1.0 - forget) * weight + next_momentum[name]
+            for name, weight in state.weights.items()
         }
 
-        # forward splits work at chunk boundaries: crossing one here would be
-        # invalid because the next chunk must refresh gradients from the newly
-        # committed weights.
-        pending_count = state.pending_count + C
-        if pending_count == self.config.chunk_size:
-            committed_weights = weights
-            provisional_weights = None
-            pending_count = 0
-        else:
-            committed_weights = state.weights
-            provisional_weights = weights
-
         if not self.training:
-            committed_weights = {
-                name: value.detach() for name, value in committed_weights.items()
+            next_weights = {
+                name: value.detach() for name, value in next_weights.items()
             }
-            momentum = {name: value.detach() for name, value in momentum.items()}
-            stacked_weights = {
-                name: value.detach() for name, value in stacked_weights.items()
+            next_momentum = {
+                name: value.detach() for name, value in next_momentum.items()
             }
-            if provisional_weights is not None:
-                provisional_weights = {
-                    name: value.detach()
-                    for name, value in provisional_weights.items()
-                }
 
-        return (
-            NeuralMemoryState(
-                weights=committed_weights,
-                momentum=momentum,
-                provisional_weights=provisional_weights,
-                pending_count=pending_count,
-                query_conv_history=state.query_conv_history,
-                key_conv_history=state.key_conv_history,
-                value_conv_history=state.value_conv_history,
-            ),
-            stacked_weights,
+        return NeuralMemoryState(
+            weights=next_weights,
+            momentum=next_momentum,
+            query_conv_history=state.query_conv_history,
+            key_conv_history=state.key_conv_history,
+            value_conv_history=state.value_conv_history,
         )
 
     def _read(
         self,
-        weights: dict[str, Float32[torch.Tensor, "B C D D"]],
+        weights: dict[str, Float32[torch.Tensor, "B D D"]],
         queries: Float[torch.Tensor, "B C D"],
     ) -> Float[torch.Tensor, "B C D"]:
         def read_one(
@@ -273,7 +287,7 @@ class NeuralMemory(nn.Module):
                 (query,),
             )
 
-        per_session_read = vmap(read_one, in_dims=(0, 0))
+        per_session_read = vmap(read_one, in_dims=(None, 0))
         batched_read = vmap(per_session_read, in_dims=(0, 0))
         return batched_read(weights, queries.float())
 
@@ -283,23 +297,27 @@ class NeuralMemory(nn.Module):
         queries: Float[torch.Tensor, "B C D"],
         keys: Float32[torch.Tensor, "B C D"],
         values: Float32[torch.Tensor, "B C D"],
-        alpha: Float[torch.Tensor, "B C 1"],
-        eta: Float[torch.Tensor, "B C 1"],
-        theta: Float[torch.Tensor, "B C 1"],
+        inputs: Float[torch.Tensor, "B C D"],
         output_dtype: torch.dtype,
     ) -> tuple[Float[torch.Tensor, "B C D"], NeuralMemoryState]:
-        state, weights_by_token = self._update(
-            state,
-            keys,
-            values,
-            alpha,
-            eta,
-            theta,
+        _, C, _ = queries.shape
+        # _update returns a new state, so this remains the pre-update snapshot.
+        previous_weights = state.weights
+        reaches_chunk_boundary = (
+            state.pending_count + C == self.config.chunk_size
         )
-        output: Float[torch.Tensor, "B C D"] = self._read(
-            weights_by_token, queries
-        ).to(output_dtype)
-        return output, state
+        state = self._update(state, inputs, keys, values)
+
+        outputs: list[Float[torch.Tensor, "B C D"]] = []
+        if reaches_chunk_boundary:
+            # Earlier tokens read the previous completed chunk state. The token
+            # at this chunk boundary can read the newly completed update.
+            if C > 1:
+                outputs.append(self._read(previous_weights, queries[:, :-1]))
+            outputs.append(self._read(state.weights, queries[:, -1:]))
+        else:
+            outputs.append(self._read(previous_weights, queries))
+        return torch.cat(outputs, dim=1).to(output_dtype), state
 
     @jaxtyped(typechecker=beartype)
     def forward(
@@ -334,16 +352,6 @@ class NeuralMemory(nn.Module):
         queries = F.normalize(self.activation(queries), dim=-1, eps=1e-6)
         keys = F.normalize(self.activation(keys), dim=-1, eps=1e-6)
         values = self.activation(values)
-        alpha: Float[torch.Tensor, "B S 1"] = self.forget_projection(
-            inputs
-        ).sigmoid()
-        eta: Float[torch.Tensor, "B S 1"] = self.momentum_projection(
-            inputs
-        ).sigmoid()
-        theta: Float[torch.Tensor, "B S 1"] = self.write_strength_projection(
-            inputs
-        ).sigmoid()
-
         C = self.config.chunk_size
         outputs: list[Float[torch.Tensor, "B C D"]] = []
         start = 0
@@ -356,9 +364,7 @@ class NeuralMemory(nn.Module):
                 queries[:, start:end],
                 keys[:, start:end].float(),
                 values[:, start:end].float(),
-                alpha[:, start:end],
-                eta[:, start:end],
-                theta[:, start:end],
+                inputs[:, start:end],
                 inputs.dtype,
             )
             outputs.append(output)
@@ -380,15 +386,9 @@ class NeuralMemory(nn.Module):
             value_chunks: Float32[torch.Tensor, "B N C D"] = values[
                 :, start:end
             ].float().reshape(batch_size, N, C, dim)
-            alpha_chunks: Float[torch.Tensor, "B N C 1"] = alpha[
+            input_chunks: Float[torch.Tensor, "B N C D"] = inputs[
                 :, start:end
-            ].reshape(batch_size, N, C, 1)
-            eta_chunks: Float[torch.Tensor, "B N C 1"] = eta[
-                :, start:end
-            ].reshape(batch_size, N, C, 1)
-            theta_chunks: Float[torch.Tensor, "B N C 1"] = theta[
-                :, start:end
-            ].reshape(batch_size, N, C, 1)
+            ].reshape(batch_size, N, C, dim)
 
             for chunk_index in range(N):
                 output, state = self._process_chunk(
@@ -396,9 +396,7 @@ class NeuralMemory(nn.Module):
                     query_chunks[:, chunk_index],
                     key_chunks[:, chunk_index],
                     value_chunks[:, chunk_index],
-                    alpha_chunks[:, chunk_index],
-                    eta_chunks[:, chunk_index],
-                    theta_chunks[:, chunk_index],
+                    input_chunks[:, chunk_index],
                     inputs.dtype,
                 )
                 outputs.append(output)
@@ -411,9 +409,7 @@ class NeuralMemory(nn.Module):
                 queries[:, start:],
                 keys[:, start:].float(),
                 values[:, start:].float(),
-                alpha[:, start:],
-                eta[:, start:],
-                theta[:, start:],
+                inputs[:, start:],
                 inputs.dtype,
             )
             outputs.append(output)
