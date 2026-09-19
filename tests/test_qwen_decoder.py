@@ -62,7 +62,8 @@ class DecoderTests(unittest.TestCase):
         layer.mlp.fast_weight_read_scale = 0.0
         kwargs.pop("student_attention_mask")
         with patch("architectures.ttcd.qwen.attention.sdpa_attention_forward", wraps=sdpa_attention_forward) as attention, \
-             patch.object(layer.mlp, "_convolve", side_effect=AssertionError("FW convolution ran")):
+             patch.object(layer.mlp.teacher_conv, "forward", side_effect=AssertionError("Teacher convolution ran")), \
+             patch.object(layer.mlp.student_conv, "forward", side_effect=AssertionError("Student convolution ran")):
             actual, state = layer(self.x, **kwargs)
         self.assertEqual(attention.call_count, 1)
         torch.testing.assert_close(actual, expected)

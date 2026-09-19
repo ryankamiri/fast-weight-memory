@@ -8,6 +8,7 @@ from beartype import beartype
 from jaxtyping import Float, jaxtyped
 from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP
 
+from architectures.shared.causal_conv import CausalDepthwiseConv1d
 
 from ..states.mlp_state import FWMLPState
 
@@ -44,19 +45,11 @@ class FWQwen3MLP(Qwen3MLP):
         if is_fast_weight_layer:
             self.W_proj = nn.Parameter(torch.empty(self.hidden_size, self.hidden_size)) if use_projection else None
             self.beta_proj = nn.Parameter(torch.empty(self.hidden_size)) if dynamic_beta else None
-            self.teacher_conv = nn.Conv1d(
-                self.intermediate_size,
-                self.intermediate_size,
-                conv_kernel_size,
-                groups=self.intermediate_size,
-                bias=False,
+            self.teacher_conv = CausalDepthwiseConv1d(
+                self.intermediate_size, conv_kernel_size
             ) if use_conv else None
-            self.student_conv = nn.Conv1d(
-                self.intermediate_size,
-                self.intermediate_size,
-                conv_kernel_size,
-                groups=self.intermediate_size,
-                bias=False,
+            self.student_conv = CausalDepthwiseConv1d(
+                self.intermediate_size, conv_kernel_size
             ) if use_conv else None
             self.reset_fast_weight_parameters()
 
@@ -91,21 +84,6 @@ class FWQwen3MLP(Qwen3MLP):
     def W_base(self):
         """Alias the pretrained down projection without duplicating parameters."""
         return self.down_proj.weight
-
-    @staticmethod
-    def _convolve(z, conv, history: Float[torch.Tensor, "B d_mlp S_conv"] | None):
-        if conv is None:
-            return z, None
-        z = z.transpose(1, 2)  # [B, d_mlp, S]
-        B, d_mlp, S = z.shape
-        history_size = conv.kernel_size[0] - 1
-        if history is None:
-            history = z.new_zeros(B, d_mlp, history_size)
-        inputs = torch.cat((history, z), dim=-1)
-        # conv(inputs): [B, d_mlp, S]; transpose: [B, S, d_mlp].
-        output: Float[torch.Tensor, "B S d_mlp"] = conv(inputs).transpose(1, 2)
-        history = inputs[..., -history_size:] if history_size != 0 else inputs[..., :0]
-        return output, history
 
     @jaxtyped(typechecker=beartype)
     def forward(
@@ -148,10 +126,15 @@ class FWQwen3MLP(Qwen3MLP):
             # S_chunk = end - start (may be shorter than a full chunk).
             z_teacher_hat: Float[torch.Tensor, "B S_chunk d_mlp"]
             z_student_hat: Float[torch.Tensor, "B S_chunk d_mlp"]
-            z_teacher_hat, state.teacher_conv_state = self._convolve(
-                z_teacher[:, start:end], self.teacher_conv, state.teacher_conv_state)
-            z_student_hat, state.student_conv_state = self._convolve(
-                z_student[:, start:end], self.student_conv, state.student_conv_state)
+            z_teacher_hat = z_teacher[:, start:end]
+            z_student_hat = z_student[:, start:end]
+            if self.teacher_conv is not None:
+                z_teacher_hat, state.teacher_conv_state = self.teacher_conv(
+                    z_teacher_hat, state.teacher_conv_state
+                )
+                z_student_hat, state.student_conv_state = self.student_conv(
+                    z_student_hat, state.student_conv_state
+                )
 
             # Read the incoming state BEFORE committing this chunk's writes.
             z_output: Float[torch.Tensor, "B S_chunk d_mlp"] = z_teacher[:, start:end]
