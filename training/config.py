@@ -23,13 +23,22 @@ class BridgeMemoryRecordRange(RecordRange):
 
 
 @dataclass
-class ModelConfig:
+class ModelConfig(ABC):
     model_id: str = "Qwen/Qwen3-0.6B-Base"
     revision: str | None = None
+    max_persistent_kv_tokens: int = 512
+
+    @property
+    @abstractmethod
+    def architecture(self) -> str:
+        """Stateful model architecture selected by this concrete config type."""
+
+
+@dataclass
+class TTCDModelConfig(ModelConfig):
     fast_weight_layers: list[int] = field(default_factory=lambda: [0, 7, 14, 21])
     teacher_window_size: int = 8192
     student_window_size: int = 4096
-    max_persistent_kv_tokens: int = 512
     chunk_size: int = 4096
     fast_weight_lr: float = 0.3
     fast_weight_read_scale: float = 1.0
@@ -38,6 +47,28 @@ class ModelConfig:
     conv_kernel_size: int = 5
     dynamic_beta: bool = True
     normalize_student_features: bool = False
+
+    @property
+    def architecture(self) -> Literal["ttcd"]:
+        return "ttcd"
+
+
+@dataclass
+class TaalModelConfig(ModelConfig):
+    working_memory_size: int = 2048
+    memory_dim: int = 128
+    memory_depth: int = 2
+    memory_conv_kernel_size: int = 4
+    memory_chunk_size: int = 1
+    memory_initial_forget: float = 0.01
+    memory_initial_momentum: float = 0.9
+    memory_initial_write_strength: float = 0.1
+    num_persistent_tokens: int = 8
+    persistent_init_std: float = 0.02
+
+    @property
+    def architecture(self) -> Literal["taal"]:
+        return "taal"
 
 
 @dataclass
@@ -134,8 +165,29 @@ class LoopConfig:
 
 
 @dataclass
-class ValidationConfig:
+class ValidationConfig(ABC):
+    @property
+    @abstractmethod
+    def read_scales(self) -> list[float]:
+        """Architecture-specific memory-read scales used for validation."""
+
+
+@dataclass
+class TTCDValidationConfig(ValidationConfig):
     fast_weight_read_scales: list[float] = field(default_factory=lambda: [1.0, 0.5, 0.0])
+
+    @property
+    def read_scales(self) -> list[float]:
+        return self.fast_weight_read_scales
+
+
+@dataclass
+class TaalValidationConfig(ValidationConfig):
+    memory_read_scales: list[float] = field(default_factory=lambda: [1.0, 0.5, 0.0])
+
+    @property
+    def read_scales(self) -> list[float]:
+        return self.memory_read_scales
 
 
 @dataclass
@@ -156,18 +208,19 @@ class WandbConfig:
 
 @dataclass
 class TrainingConfig:
-    model: ModelConfig = field(default_factory=ModelConfig)
+    model: TTCDModelConfig | TaalModelConfig = field(default_factory=TTCDModelConfig)
     data: CausalLMDataConfig | BridgeMemoryDataConfig = field(default_factory=CausalLMDataConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     loss: CausalLMLossConfig | BridgeMemoryLossConfig = field(default_factory=CausalLMLossConfig)
     training: LoopConfig = field(default_factory=LoopConfig)
-    validation: ValidationConfig = field(default_factory=ValidationConfig)
+    validation: TTCDValidationConfig | TaalValidationConfig = field(default_factory=TTCDValidationConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
     checkpoints: CheckpointConfig = field(default_factory=CheckpointConfig)
 
     def to_dict(self):
         values = asdict(self)
+        values["model"]["architecture"] = self.model.architecture
         values["data"]["record_format"] = self.data.record_format
         values["loss"]["objective"] = self.loss.objective
         return values
@@ -177,10 +230,54 @@ class TrainingConfig:
             raise ValueError("Causal-LM data requires a causal-LM loss config")
         if isinstance(self.data, BridgeMemoryDataConfig) != isinstance(self.loss, BridgeMemoryLossConfig):
             raise ValueError("Bridge-memory data requires a bridge-memory loss config")
-        if self.training.trainable_parameters not in {"all", "fast_weight_only"}:
-            raise ValueError("training.trainable_parameters must be all or fast_weight_only")
-        if self.training.trainable_parameters == "fast_weight_only" and not self.model.fast_weight_layers:
-            raise ValueError("fast_weight_only training requires fast-weight layers")
+        scopes = {"all", "ttcd_only", "taal_only"}
+        if self.training.trainable_parameters not in scopes:
+            raise ValueError(
+                "training.trainable_parameters must be all, ttcd_only, or taal_only"
+            )
+        if isinstance(self.model, TTCDModelConfig):
+            if not isinstance(self.validation, TTCDValidationConfig):
+                raise ValueError("TTCD models require TTCD validation settings")
+            if self.training.trainable_parameters == "taal_only":
+                raise ValueError("TTCD models cannot use taal_only training")
+            if self.training.trainable_parameters == "ttcd_only" and not self.model.fast_weight_layers:
+                raise ValueError("ttcd_only training requires fast-weight layers")
+        elif isinstance(self.model, TaalModelConfig):
+            if not isinstance(self.validation, TaalValidationConfig):
+                raise ValueError("TaaL models require TaaL validation settings")
+            if self.training.trainable_parameters == "ttcd_only":
+                raise ValueError("TaaL models cannot use ttcd_only training")
+            for name in (
+                "working_memory_size",
+                "memory_dim",
+                "memory_depth",
+                "memory_conv_kernel_size",
+                "memory_chunk_size",
+                "num_persistent_tokens",
+            ):
+                value = getattr(self.model, name)
+                if type(value) is not int or value < 1:
+                    raise ValueError(f"{name} must be a positive integer")
+            for name in (
+                "memory_initial_forget",
+                "memory_initial_momentum",
+                "memory_initial_write_strength",
+            ):
+                value = getattr(self.model, name)
+                if (
+                    type(value) not in (int, float)
+                    or not math.isfinite(value)
+                    or not 0 < value < 1
+                ):
+                    raise ValueError(
+                        f"{name} must be finite and strictly between 0 and 1"
+                    )
+            if (
+                type(self.model.persistent_init_std) not in (int, float)
+                or not math.isfinite(self.model.persistent_init_std)
+                or self.model.persistent_init_std <= 0
+            ):
+                raise ValueError("persistent_init_std must be finite and positive")
         weights = [("all_tokens_weight", self.loss.all_tokens_weight)]
         if isinstance(self.loss, BridgeMemoryLossConfig):
             weights.append(("delayed_answer_weight", self.loss.delayed_answer_weight))
@@ -196,12 +293,17 @@ class TrainingConfig:
                 raise ValueError("Variable-length bridge_memory records require batch_size=1")
             if self.loss.delayed_answer_weight == 0:
                 raise ValueError("bridge_memory training requires delayed_answer_weight > 0")
-        scales = self.validation.fast_weight_read_scales
+        scales = self.validation.read_scales
         if not isinstance(scales, list) or not scales:
-            raise ValueError("fast_weight_read_scales must be a nonempty list")
-        for scale in [self.model.fast_weight_read_scale, *scales]:
+            raise ValueError("Validation read scales must be a nonempty list")
+        training_read_scale = (
+            self.model.fast_weight_read_scale
+            if isinstance(self.model, TTCDModelConfig)
+            else 1.0
+        )
+        for scale in [training_read_scale, *scales]:
             if type(scale) not in (int, float) or not math.isfinite(scale) or scale < 0:
-                raise ValueError("Fast-weight read scales must be finite nonnegative numbers")
+                raise ValueError("Memory-read scales must be finite nonnegative numbers")
         if 1.0 not in scales or len(set(scales)) != len(scales):
             raise ValueError("Validation read scales must include 1.0 and have no duplicates")
         if not isinstance(self.checkpoints.output_dir, str) or not self.checkpoints.output_dir.strip():
@@ -285,14 +387,24 @@ def load_config(path: str | Path) -> TrainingConfig:
         sections = yaml.safe_load(source)
     if not isinstance(sections, dict):
         raise ValueError("Training YAML must contain a mapping")
+    model_options = dict(sections.get("model", {}))
+    architecture = model_options.pop("architecture", "ttcd")
+    if architecture == "ttcd":
+        model_type = TTCDModelConfig
+        validation_type = TTCDValidationConfig
+    elif architecture == "taal":
+        model_type = TaalModelConfig
+        validation_type = TaalValidationConfig
+    else:
+        raise ValueError("model.architecture must be ttcd or taal")
     section_types = {
-        "model": ModelConfig, "optimizer": OptimizerConfig,
+        "optimizer": OptimizerConfig,
         "scheduler": SchedulerConfig,
         "training": LoopConfig, "wandb": WandbConfig,
         "checkpoints": CheckpointConfig,
-        "validation": ValidationConfig,
+        "validation": validation_type,
     }
-    unknown = sections.keys() - (section_types.keys() | {"data", "loss"})
+    unknown = sections.keys() - (section_types.keys() | {"model", "data", "loss"})
     if unknown:
         raise ValueError(f"Unknown config sections: {sorted(unknown)}")
     data_options = dict(sections.get("data", {}))
@@ -312,6 +424,7 @@ def load_config(path: str | Path) -> TrainingConfig:
             data_options[split] = range_type(**data_options[split])
 
     values = {
+        "model": model_type(**model_options),
         "data": data_type(**data_options),
         "loss": loss_type(**dict(sections.get("loss", {}))),
     }

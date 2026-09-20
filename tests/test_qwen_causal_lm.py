@@ -90,7 +90,7 @@ class CausalLMTests(unittest.TestCase):
 
     def test_delayed_loss_reaches_the_frozen_memory_path(self):
         model = TTCDQwen3ForCausalLM(self.config(fast_weight_layers=[0])).train()
-        configure_trainable_parameters(model, "fast_weight_only")
+        configure_trainable_parameters(model, "ttcd_only")
         delayed = torch.full_like(self.ids, -100)
         delayed[:, -1] = self.ids[:, -1]
 

@@ -97,14 +97,14 @@ class LongMemEvalTests(unittest.TestCase):
     def test_three_configs_match_their_launchers(self):
         root = Path(__file__).resolve().parents[1]
         for mode in ("full", "swa", "fw_swa"):
-            config_path = f"evaluation/configs/longmemeval_{mode}.yaml"
+            config_path = f"evaluation/configs/ttcd/longmemeval_{mode}.yaml"
             config = yaml.safe_load((root / config_path).read_text())
             self.assertEqual(config["mode"], mode)
             self.assertEqual(config["dataset"]["variant"], "oracle")
             self.assertNotIn("execution_block_size", config)
             self.assertEqual(config["generation"]["execution_block_size"], 4096)
             self.assertNotIn("#", (root / config_path).read_text())
-            launcher = (root / f"evaluation/sbatch/fs_qwen_eval_{mode}.sbatch").read_text()
+            launcher = (root / f"evaluation/sbatch/ttcd/fs_qwen_eval_{mode}.sbatch").read_text()
             self.assertIn(f"--config {config_path}", launcher)
             self.assertIn("conda activate fast-weight-memory", launcher)
             self.assertIn("--gres=gpu:h200:1", launcher)
@@ -115,11 +115,11 @@ class LongMemEvalTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         configs = {}
         for name in ("instruct_full", "instruct_swa", "base_full", "base_swa", "fw_swa_no_reads", "fw_swa", "swa"):
-            path = root / f"evaluation/configs/longmemeval_{name}.yaml"
+            path = root / f"evaluation/configs/ttcd/longmemeval_{name}.yaml"
             configs[name] = yaml.safe_load(path.read_text())
             self.assertNotIn("#", path.read_text())
-            launcher = (root / f"evaluation/sbatch/fs_qwen_eval_{name}.sbatch").read_text()
-            self.assertIn(f"--config evaluation/configs/longmemeval_{name}.yaml", launcher)
+            launcher = (root / f"evaluation/sbatch/ttcd/fs_qwen_eval_{name}.sbatch").read_text()
+            self.assertIn(f"--config evaluation/configs/ttcd/longmemeval_{name}.yaml", launcher)
             self.assertIn("conda activate fast-weight-memory", launcher)
             position = 1 if name.startswith(("instruct", "base")) else 2
             self.assertIn(f'${{{position}:-output/longmemeval/{name}-${{SLURM_JOB_ID}}}}', launcher)
@@ -154,15 +154,15 @@ class LongMemEvalTests(unittest.TestCase):
 
     def test_half_reads_config_matches_full_reads(self):
         root = Path(__file__).resolve().parents[1]
-        config_path = "evaluation/configs/longmemeval_fw_swa_half_reads.yaml"
+        config_path = "evaluation/configs/ttcd/longmemeval_fw_swa_half_reads.yaml"
         half = yaml.safe_load((root / config_path).read_text())
-        full = yaml.safe_load((root / "evaluation/configs/longmemeval_fw_swa.yaml").read_text())
+        full = yaml.safe_load((root / "evaluation/configs/ttcd/longmemeval_fw_swa.yaml").read_text())
         self.assertEqual(half["model"]["fast_weight_read_scale"], 0.5)
         self.assertEqual(half["dataset"]["revision"], "bdb33409edba22c15721d57cb0b5a76d1620e6ba")
         half["model"]["fast_weight_read_scale"] = 1.0
         half["dataset"]["revision"] = full["dataset"]["revision"]
         self.assertEqual(half, full)
-        launcher = (root / "evaluation/sbatch/fs_qwen_eval_fw_swa_half_reads.sbatch").read_text()
+        launcher = (root / "evaluation/sbatch/ttcd/fs_qwen_eval_fw_swa_half_reads.sbatch").read_text()
         self.assertIn(f"--config {config_path}", launcher)
         self.assertIn("fw_swa_half_reads-${SLURM_JOB_ID}", launcher)
 
@@ -173,7 +173,7 @@ class LongMemEvalTests(unittest.TestCase):
             "longmemeval_fw_swa_native_4k_half_reads.yaml",
             "longmemeval_fw_swa_native_4k.yaml",
         )
-        configs = [yaml.safe_load((root / "evaluation/configs" / name).read_text()) for name in names]
+        configs = [yaml.safe_load((root / "evaluation/configs/ttcd" / name).read_text()) for name in names]
         self.assertEqual([config["model"]["fast_weight_read_scale"] for config in configs], [0.0, 0.5, 1.0])
         for config in configs:
             self.assertEqual(
@@ -184,16 +184,16 @@ class LongMemEvalTests(unittest.TestCase):
         self.assertEqual(configs[0], configs[2])
         self.assertEqual(configs[1], configs[2])
 
-        launcher = (root / "evaluation/sbatch/fs_qwen_eval_fw_swa_native_4k.sbatch").read_text()
+        launcher = (root / "evaluation/sbatch/ttcd/fs_qwen_eval_fw_swa_native_4k.sbatch").read_text()
         self.assertIn("--gres=gpu:a100:1", launcher)
-        self.assertIn("--config evaluation/configs/longmemeval_fw_swa_native_4k.yaml", launcher)
+        self.assertIn("--config evaluation/configs/ttcd/longmemeval_fw_swa_native_4k.yaml", launcher)
 
     def test_small_window_alpha_configs_share_one_evaluation_recipe(self):
         root = Path(__file__).resolve().parents[1]
         suffixes = ("_no_reads", "_half_reads", "")
         configs = [
             yaml.safe_load(
-                (root / f"evaluation/configs/longmemeval_fw_swa_2k_1k_512{suffix}.yaml").read_text()
+                (root / f"evaluation/configs/ttcd/longmemeval_fw_swa_2k_1k_512{suffix}.yaml").read_text()
             )
             for suffix in suffixes
         ]
@@ -209,7 +209,7 @@ class LongMemEvalTests(unittest.TestCase):
 
         for suffix in suffixes:
             launcher = (
-                root / f"evaluation/sbatch/fs_qwen_eval_fw_swa_2k_1k_512{suffix}.sbatch"
+                root / f"evaluation/sbatch/ttcd/fs_qwen_eval_fw_swa_2k_1k_512{suffix}.sbatch"
             ).read_text()
             self.assertIn("--partition=gpu-short", launcher)
             self.assertIn("--gres=gpu:a100:1", launcher)
@@ -220,7 +220,7 @@ class LongMemEvalTests(unittest.TestCase):
         suffixes = ("_no_reads", "_half_reads", "")
         configs = [
             yaml.safe_load(
-                (root / f"evaluation/configs/longmemeval_fw_swa_4k_1k_1k{suffix}.yaml").read_text()
+                (root / f"evaluation/configs/ttcd/longmemeval_fw_swa_4k_1k_1k{suffix}.yaml").read_text()
             )
             for suffix in suffixes
         ]
@@ -236,7 +236,7 @@ class LongMemEvalTests(unittest.TestCase):
 
         for suffix in suffixes:
             launcher = (
-                root / f"evaluation/sbatch/fs_qwen_eval_fw_swa_4k_1k_1k{suffix}.sbatch"
+                root / f"evaluation/sbatch/ttcd/fs_qwen_eval_fw_swa_4k_1k_1k{suffix}.sbatch"
             ).read_text()
             self.assertIn("--partition=gpu-short", launcher)
             self.assertIn("--gres=gpu:a100:1", launcher)
@@ -247,7 +247,7 @@ class LongMemEvalTests(unittest.TestCase):
         suffixes = ("_no_reads", "_half_reads", "")
         configs = [
             yaml.safe_load(
-                (root / f"evaluation/configs/longmemeval_fw_swa_8k_2k_2k{suffix}.yaml").read_text()
+                (root / f"evaluation/configs/ttcd/longmemeval_fw_swa_8k_2k_2k{suffix}.yaml").read_text()
             )
             for suffix in suffixes
         ]
@@ -263,7 +263,7 @@ class LongMemEvalTests(unittest.TestCase):
 
         for suffix in suffixes:
             launcher = (
-                root / f"evaluation/sbatch/fs_qwen_eval_fw_swa_8k_2k_2k{suffix}.sbatch"
+                root / f"evaluation/sbatch/ttcd/fs_qwen_eval_fw_swa_8k_2k_2k{suffix}.sbatch"
             ).read_text()
             self.assertIn("--partition=gpu-short", launcher)
             self.assertIn("--gres=gpu:a100:1", launcher)
@@ -707,7 +707,7 @@ class DiagnosticJudgeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_cpu_launcher_uses_diagnostics_only_without_gpu(self):
         root = Path(__file__).resolve().parents[1]
-        launcher = (root / "evaluation/sbatch/fs_qwen_diagnostics.sbatch").read_text()
+        launcher = (root / "evaluation/sbatch/ttcd/fs_qwen_diagnostics.sbatch").read_text()
         self.assertIn("#SBATCH --partition=short", launcher)
         self.assertIn("#SBATCH --time=48:00:00", launcher)
         self.assertIn("--diagnostics-only", launcher)

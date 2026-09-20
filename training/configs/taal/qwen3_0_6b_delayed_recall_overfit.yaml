@@ -1,0 +1,80 @@
+model:
+  architecture: taal
+  model_id: Qwen/Qwen3-0.6B-Base
+  revision: null
+  working_memory_size: 2048
+  max_persistent_kv_tokens: 512
+  memory_dim: 128
+  memory_depth: 2
+  memory_conv_kernel_size: 4
+  memory_chunk_size: 1
+  memory_initial_forget: 0.01
+  memory_initial_momentum: 0.9
+  memory_initial_write_strength: 0.1
+  num_persistent_tokens: 8
+  persistent_init_std: 0.02
+
+data:
+  dataset_id: ryankamiri/ttcd-bridge-memory
+  dataset_config: t4096-s2048-c1024
+  revision: 591fcef98e1f837ad3cbe7765af5cfaa55469c63
+  record_format: bridge_memory
+  train:
+    split: test
+    start: 0
+    end: 64
+    conditions: [no_bridge]
+    query_variants: [exact]
+  val:
+    split: test
+    start: 0
+    end: 64
+    conditions: [no_bridge]
+    query_variants: [exact]
+  allow_train_val_overlap: true
+  batch_size: 1
+  seq_len: 7695
+  num_workers: 0
+  shuffle_buffer_size: 64
+
+loss:
+  all_tokens_weight: 0.0
+  delayed_answer_weight: 1.0
+
+optimizer:
+  lr: 1.0e-4
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1.0e-8
+  weight_decay: 0.0
+
+scheduler:
+  warmup_steps: 20
+  schedule_steps: 500
+  final_lr: 1.0e-5
+
+training:
+  max_steps: 500
+  seed: 42
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: false
+  max_grad_norm: 1.0
+  eval_every_steps: 10
+  eval_at_end: true
+  log_every_steps: 1
+  trainable_parameters: taal_only
+
+validation:
+  memory_read_scales: [1.0, 0.5, 0.0]
+
+checkpoints:
+  output_dir: checkpoints
+  save_best: true
+  save_final: true
+  selection_metric: val/no_bridge_exact_candidate_accuracy
+  selection_mode: max
+
+wandb:
+  project: fast-weight-memory
+  entity: ryanamiri05-northeastern-university
+  name: taal-qwen3-0.6b-delayed-recall-overfit-2k

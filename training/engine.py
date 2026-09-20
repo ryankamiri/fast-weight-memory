@@ -15,6 +15,7 @@ from .config import (
     TrainingConfig,
 )
 from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
+from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 
 
 @dataclass
@@ -157,8 +158,16 @@ def move_batch(batch, device):
     }
 
 
-def forward_batch(model, batch, loss_config: LossConfig, *, diagnostics=False):
+def forward_batch(
+    model,
+    batch,
+    loss_config: LossConfig,
+    diagnostics=False,
+    memory_read_scale: float | None = None,
+):
     inputs = {name: value for name, value in batch.items() if name not in DIAGNOSTIC_FIELDS}
+    if isinstance(model, TaalQwen3ForCausalLM) and memory_read_scale is not None:
+        inputs["memory_read_scale"] = memory_read_scale
     if diagnostics and "candidate_token_ids" in batch:
         # The final input token is the answer; the preceding hidden state predicts it.
         inputs["logits_to_keep"] = 2
@@ -195,6 +204,7 @@ def build_scheduler(optimizer, config: TrainingConfig):
 def _validate_pass(
     model, dataloader, device: torch.device, should_stop,
     loss_config: LossConfig | None = None,
+    memory_read_scale: float | None = None,
 ) -> dict[str, float] | None:
     loss_config = CausalLMLossConfig() if loss_config is None else loss_config
     was_training = model.training
@@ -209,7 +219,13 @@ def _validate_pass(
             batch = move_batch(batch, device)
             B, S = batch["input_ids"].shape
             with precision_context(device):
-                output = forward_batch(model, batch, loss_config, diagnostics=True)
+                output = forward_batch(
+                    model,
+                    batch,
+                    loss_config,
+                    diagnostics=True,
+                    memory_read_scale=memory_read_scale,
+                )
             totals.add(output, batch, B * S)
             if "candidate_token_ids" in batch:
                 answer_logits = output.logits[:, -2, :]
@@ -241,7 +257,7 @@ def _validate_pass(
 
 
 def validate(model, dataloader, device: torch.device, should_stop=lambda: False,
-             fast_weight_read_scales=(1.0, 0.5, 0.0),
+             read_scales=(1.0, 0.5, 0.0),
              loss_config: LossConfig | None = None) -> dict[str, float] | None:
     layers = [module for module in model.modules()
               if isinstance(module, TTCDQwen3MLP) and module.is_fast_weight_layer]
@@ -250,18 +266,38 @@ def validate(model, dataloader, device: torch.device, should_stop=lambda: False,
         # Standard validation/checkpoint selection always uses full-strength reads.
         for module in layers:
             module.fast_weight_read_scale = 1.0
-        metrics = _validate_pass(model, dataloader, device, should_stop, loss_config)
-        if metrics is None or not layers:
+        metrics = _validate_pass(
+            model,
+            dataloader,
+            device,
+            should_stop,
+            loss_config,
+            memory_read_scale=1.0,
+        )
+        has_memory_reads = bool(layers) or isinstance(model, TaalQwen3ForCausalLM)
+        if metrics is None or not has_memory_reads:
             return metrics
+        read_metric = (
+            "memory_read"
+            if isinstance(model, TaalQwen3ForCausalLM)
+            else "fw_read"
+        )
 
         losses = {1.0: metrics["val/loss"]}
-        for scale in fast_weight_read_scales:
+        for scale in read_scales:
             if scale == 1.0:
                 result = metrics
             else:
                 for module in layers:
                     module.fast_weight_read_scale = scale
-                result = _validate_pass(model, dataloader, device, should_stop, loss_config)
+                result = _validate_pass(
+                    model,
+                    dataloader,
+                    device,
+                    should_stop,
+                    loss_config,
+                    memory_read_scale=scale,
+                )
                 if result is None:
                     return None
             losses[scale] = result["val/loss"]
@@ -269,11 +305,13 @@ def validate(model, dataloader, device: torch.device, should_stop=lambda: False,
             # over a snapshot while adding the explicit scale-suffixed view.
             for name, value in list(result.items()):
                 if name != "val/records":
-                    metrics[f"{name}_fw_read_scale_{scale:g}"] = value
+                    metrics[f"{name}_{read_metric}_scale_{scale:g}"] = value
         if 0.0 in losses:
             for scale, loss in losses.items():
                 if scale != 0:
-                    metrics[f"val/fw_read_loss_improvement_scale_{scale:g}"] = losses[0.0] - loss
+                    metrics[
+                        f"val/{read_metric}_loss_improvement_scale_{scale:g}"
+                    ] = losses[0.0] - loss
         return metrics
     finally:
         for module, scale in zip(layers, previous):
@@ -387,7 +425,7 @@ def train(
             if progress.step % config.training.eval_every_steps == 0 and not should_stop():
                 # Run val
                 metrics = validate(model, val_loader, device, should_stop,
-                                   config.validation.fast_weight_read_scales, config.loss)
+                                   config.validation.read_scales, config.loss)
                 if metrics is not None:
                     log(progress.metrics() | metrics)
                     if on_validation is not None:
@@ -404,7 +442,7 @@ def train(
     optimizer.zero_grad()
     if config.training.eval_at_end and last_validation_step != progress.step and not should_stop():
         metrics = validate(model, val_loader, device, should_stop,
-                           config.validation.fast_weight_read_scales, config.loss)
+                           config.validation.read_scales, config.loss)
         if metrics is not None:
             log(progress.metrics() | metrics)
             if on_validation is not None:
