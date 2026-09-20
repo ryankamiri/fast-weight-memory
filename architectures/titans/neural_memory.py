@@ -56,14 +56,18 @@ class NeuralMemory(nn.Module):
         self.forget_projection = nn.Linear(dim, 1)
         self.momentum_projection = nn.Linear(dim, 1)
         self.write_strength_projection = nn.Linear(dim, 1)
-        with torch.no_grad():
-            for projection, initial_value in (
-                (self.forget_projection, config.initial_forget),
-                (self.momentum_projection, config.initial_momentum),
-                (self.write_strength_projection, config.initial_write_strength),
-            ):
-                projection.weight.zero_()
-                projection.bias.fill_(torch.logit(torch.tensor(initial_value)))
+        self.reset_update_controls()
+
+    @torch.no_grad()
+    def reset_update_controls(self) -> None:
+        """Restore configured online-update controls after host-model init."""
+        for projection, initial_value in (
+            (self.forget_projection, self.config.initial_forget),
+            (self.momentum_projection, self.config.initial_momentum),
+            (self.write_strength_projection, self.config.initial_write_strength),
+        ):
+            projection.weight.zero_()
+            projection.bias.fill_(torch.logit(torch.tensor(initial_value)))
 
     def initial_state(self, batch_size: int) -> NeuralMemoryState:
         if type(batch_size) is not int or batch_size < 1:

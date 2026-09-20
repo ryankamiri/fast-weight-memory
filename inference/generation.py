@@ -1,19 +1,22 @@
 """Generation results and next-token sampling for stateful inference."""
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Generic, Literal, TypeVar
 
 import torch
 from jaxtyping import Float, Int
 
-from architectures.ttcd.states.model_state import TTCDModelState
+from architectures.shared.qwen.state import QwenSessionState
+
+
+StateT = TypeVar("StateT", bound=QwenSessionState)
 
 
 @dataclass
-class GenerationOutput:
+class GenerationOutput(Generic[StateT]):
     # New tokens only, including EOS when emitted. The prompt is not repeated.
     token_ids: Int[torch.Tensor, "1 S_generated"]
-    state: TTCDModelState
+    state: StateT
     stop_reason: Literal["eos", "max_new_tokens"]
 
 

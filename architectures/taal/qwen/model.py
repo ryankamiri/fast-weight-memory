@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 
 import torch
 from beartype import beartype
@@ -10,6 +11,7 @@ from torch.utils.checkpoint import checkpoint
 from architectures.shared.qwen.cache import SlidingWindowKVCache
 from architectures.shared.qwen.masking import prepare_sliding_attention_mask
 from architectures.shared.qwen.model import StatefulQwen3Model
+from architectures.titans.neural_memory import NeuralMemory
 
 from .configuration import TaalQwen3Config
 from .decoder import TaalQwen3DecoderLayer
@@ -34,6 +36,14 @@ class TaalQwen3Model(StatefulQwen3Model):
     _supports_flash_attn = False
     _supports_flex_attn = False
     gradient_checkpointing = False
+
+    @torch.no_grad()
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        if isinstance(module, NeuralMemory):
+            # Qwen initializes every child Linear during post_init; restore the
+            # configured Titans control biases after that traversal.
+            module.reset_update_controls()
 
     def _set_gradient_checkpointing(
         self,
@@ -66,6 +76,8 @@ class TaalQwen3Model(StatefulQwen3Model):
         output_hidden_states: bool = False,
         write_mask: Bool[torch.Tensor, "B S"] | None = None,
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
+        memory_read_scale: float = 1.0,
+        prepend_memory_tokens: bool | None = None,
     ) -> TaalQwen3ModelOutput:
         past_key_values = state.past_key_values if state is not None else None
         if self.training and self.is_gradient_checkpointing:
@@ -96,6 +108,18 @@ class TaalQwen3Model(StatefulQwen3Model):
             raise ValueError("write_mask must be on the input device")
         if persistent_mask is not None and persistent_mask.device != hidden_states.device:
             raise ValueError("persistent_mask must be on the input device")
+        if (
+            type(memory_read_scale) not in (int, float)
+            or not math.isfinite(memory_read_scale)
+            or memory_read_scale < 0
+        ):
+            raise ValueError("memory_read_scale must be finite and nonnegative")
+        if prepend_memory_tokens is None:
+            # A fresh state begins a segment. Cached execution blocks and decode
+            # calls continue it unless the caller explicitly starts a new turn.
+            prepend_memory_tokens = state is None
+        elif type(prepend_memory_tokens) is not bool:
+            raise ValueError("prepend_memory_tokens must be boolean")
 
         if past_key_values is not None:
             if not isinstance(past_key_values, SlidingWindowKVCache):
@@ -192,6 +216,8 @@ class TaalQwen3Model(StatefulQwen3Model):
                         hidden_states,
                         memory_state=memory_states.get(layer_idx),
                         write_mask=write_mask,
+                        memory_read_scale=memory_read_scale,
+                        prepend_memory_tokens=prepend_memory_tokens,
                     )
                 )
                 hidden_states = self._gradient_checkpointing_func(
@@ -215,6 +241,8 @@ class TaalQwen3Model(StatefulQwen3Model):
                     position_embeddings=position_embeddings,
                     memory_state=memory_states.get(layer_idx),
                     write_mask=write_mask,
+                    memory_read_scale=memory_read_scale,
+                    prepend_memory_tokens=prepend_memory_tokens,
                 )
 
         hidden_states = self.norm(hidden_states)

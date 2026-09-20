@@ -33,12 +33,16 @@ class TaalQwen3DecoderLayer(Qwen3DecoderLayer):
         hidden_states: Float[torch.Tensor, "B S D_model"],
         memory_state: NeuralMemoryState | None = None,
         write_mask: Bool[torch.Tensor, "B S"] | None = None,
+        memory_read_scale: float = 1.0,
+        prepend_memory_tokens: bool = True,
     ) -> tuple[Float[torch.Tensor, "B S D_model"], NeuralMemoryState]:
         """Keep torch.func.grad memory updates outside checkpoint saved-tensor hooks."""
         return self.taal(
             hidden_states,
             state=memory_state,
             write_mask=write_mask,
+            memory_read_scale=memory_read_scale,
+            prepend_memory_tokens=prepend_memory_tokens,
         )
 
     def forward_decoder(
@@ -92,6 +96,8 @@ class TaalQwen3DecoderLayer(Qwen3DecoderLayer):
         | None = None,
         memory_state: NeuralMemoryState | None = None,
         write_mask: Bool[torch.Tensor, "B S"] | None = None,
+        memory_read_scale: float = 1.0,
+        prepend_memory_tokens: bool = True,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[Float[torch.Tensor, "B S D_model"], NeuralMemoryState]:
         # Memory changes the representation entering both the ordinary Qwen
@@ -100,6 +106,8 @@ class TaalQwen3DecoderLayer(Qwen3DecoderLayer):
             hidden_states,
             memory_state=memory_state,
             write_mask=write_mask,
+            memory_read_scale=memory_read_scale,
+            prepend_memory_tokens=prepend_memory_tokens,
         )
         hidden_states = self.forward_decoder(
             hidden_states=hidden_states,

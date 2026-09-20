@@ -1,57 +1,48 @@
 from dataclasses import dataclass
-import math
 
 import torch
-from torch import nn
 from beartype import beartype
-from jaxtyping import Bool, Float, Int, jaxtyped
-from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.models.qwen3.modeling_qwen3 import Qwen3PreTrainedModel
+from jaxtyping import Bool, Int, jaxtyped
 
-from architectures.shared.qwen.causal_lm import causal_lm_loss
+from architectures.shared.qwen.causal_lm import (
+    StatefulQwen3BridgeMemoryOutput,
+    StatefulQwen3CausalLMOutput,
+    StatefulQwen3ForCausalLM,
+)
 from .configuration import TTCDQwen3Config
 from .mlp import TTCDQwen3MLP
 from .model import TTCDQwen3Model
 from ..states.model_state import TTCDModelState
-from inference.generation import GenerationOutput, sample_token
+from inference.generation import GenerationOutput
 from inference.prefill import prefill
 
 
 @dataclass
-class TTCDQwen3CausalLMOutput(CausalLMOutputWithPast):
+class TTCDQwen3CausalLMOutput(StatefulQwen3CausalLMOutput):
     state: TTCDModelState | None = None
 
 
 @dataclass
-class TTCDQwen3BridgeMemoryOutput(TTCDQwen3CausalLMOutput):
-    all_token_loss: Float[torch.Tensor, ""] | None = None
-    delayed_answer_loss: Float[torch.Tensor, ""] | None = None
+class TTCDQwen3BridgeMemoryOutput(StatefulQwen3BridgeMemoryOutput):
+    state: TTCDModelState | None = None
 
 
-class TTCDQwen3ForCausalLM(Qwen3PreTrainedModel):
+class TTCDQwen3ForCausalLM(StatefulQwen3ForCausalLM):
     """State-aware LM wrapper with memory-efficient causal training losses."""
 
     config_class = TTCDQwen3Config
-    _tied_weights_keys = ["lm_head.weight"]
     _no_split_modules = ["TTCDQwen3DecoderLayer"]
     _supports_flash_attn = False
     _supports_flex_attn = False
 
-    def __init__(self, config: TTCDQwen3Config):
-        super().__init__(config)
-        self.model = TTCDQwen3Model(config)
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.post_init()
+    def _build_model(self, config: TTCDQwen3Config) -> TTCDQwen3Model:
+        return TTCDQwen3Model(config)
 
     @torch.no_grad()
     def _init_weights(self, module):
         super()._init_weights(module)
         if isinstance(module, TTCDQwen3MLP) and module.is_fast_weight_layer:
             module.reset_fast_weight_parameters()
-
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
 
     @torch.inference_mode()
     @jaxtyped(typechecker=beartype)
@@ -89,45 +80,43 @@ class TTCDQwen3ForCausalLM(Qwen3PreTrainedModel):
         generator: torch.Generator | None = None,
     ) -> GenerationOutput:
         """Prefill new input, then decode one unpadded sequence with session state."""
-        if self.training:
-            raise ValueError("generate requires evaluation mode; call model.eval() first")
-        if type(max_new_tokens) is not int or max_new_tokens < 1:
-            raise ValueError("max_new_tokens must be a positive integer")
-        if do_sample:
-            if not math.isfinite(temperature) or temperature <= 0:
-                raise ValueError("temperature must be finite and positive")
-            if not math.isfinite(top_p) or not 0 < top_p <= 1:
-                raise ValueError("top_p must be in (0, 1]")
-            if type(top_k) is not int or top_k < 0:
-                raise ValueError("top_k must be a nonnegative integer; 0 disables filtering")
-            if generator is not None and torch.device(generator.device) != input_ids.device:
-                raise ValueError("generator must be on the input device")
-        if eos_token_id is None:
-            eos_token_id = self.config.eos_token_id
-        eos_ids = [] if eos_token_id is None else eos_token_id
-        if type(eos_ids) is int:
-            eos_ids = [eos_ids]
-        if any(type(token) is not int or not 0 <= token < self.vocab_size for token in eos_ids):
-            raise ValueError("EOS token IDs must be valid vocabulary IDs")
+        eos_ids = self._validate_generation(
+            input_ids,
+            max_new_tokens,
+            do_sample,
+            temperature,
+            top_p,
+            top_k,
+            eos_token_id,
+            generator,
+        )
 
         output = self.prefill(
             input_ids, execution_block_size=execution_block_size,
             state=state, persistent_mask=persistent_mask,
         )
-        generated = []
-        stop_reason = "max_new_tokens"
-        for _ in range(max_new_tokens):
-            next_token = sample_token(
-                output.logits[:, -1, :], do_sample, temperature, top_k, top_p, generator,
+
+        def decode_token(
+            token: Int[torch.Tensor, "1 1"],
+            current_state: TTCDModelState,
+        ) -> TTCDQwen3CausalLMOutput:
+            return self(
+                token,
+                state=current_state,
+                use_cache=True,
+                logits_to_keep=1,
             )
-            generated.append(next_token)
-            output = self(next_token, state=output.state, use_cache=True, logits_to_keep=1)
-            if next_token.item() in eos_ids:
-                stop_reason = "eos"
-                break
-        return GenerationOutput(
-            token_ids=torch.cat(generated, dim=1), state=output.state,
-            stop_reason=stop_reason,
+
+        return self._generate_from_prefill(
+            output,
+            max_new_tokens,
+            do_sample,
+            temperature,
+            top_p,
+            top_k,
+            eos_ids,
+            generator,
+            decode_token,
         )
 
     @jaxtyped(typechecker=beartype)
@@ -142,29 +131,18 @@ class TTCDQwen3ForCausalLM(Qwen3PreTrainedModel):
         output_hidden_states: bool = False,
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
     ) -> TTCDQwen3CausalLMOutput:
-        if type(logits_to_keep) is not int or logits_to_keep < 0:
-            raise ValueError("logits_to_keep must be a nonnegative integer")
-        if labels is not None and labels.shape != input_ids.shape:
-            raise ValueError("labels must match input_ids")
+        self._validate_lm_inputs(input_ids, labels, logits_to_keep)
 
         output = self.model(
             input_ids=input_ids, state=state, use_cache=use_cache,
             attention_mask=attention_mask, output_hidden_states=output_hidden_states,
             persistent_mask=persistent_mask,
         )
-        logits = None
-        loss = None
-        if labels is not None:
-            # Hidden state at t predicts label at t+1; N = B * (S - 1).
-            hidden_states: Float[torch.Tensor, "N d_model"] = (
-                output.last_hidden_state[:, :-1].reshape(-1, self.config.hidden_size)
-            )
-            loss = causal_lm_loss(self.lm_head, hidden_states, labels)
-        if labels is None or logits_to_keep > 0:
-            # [B, S_logits, d_model] -> [B, S_logits, vocab_size]; -0 keeps all S.
-            logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(
-                output.last_hidden_state[:, -logits_to_keep:, :]
-            )
+        loss, logits = self._causal_head(
+            output.last_hidden_state,
+            labels,
+            logits_to_keep,
+        )
         return TTCDQwen3CausalLMOutput(
             loss=loss, logits=logits, state=output.state,
             past_key_values=output.past_key_values, hidden_states=output.hidden_states,
@@ -186,18 +164,7 @@ class TTCDQwen3ForCausalLM(Qwen3PreTrainedModel):
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
     ) -> TTCDQwen3BridgeMemoryOutput:
         """Run the bridge-memory objective without expanding the standard HF forward API."""
-        if type(logits_to_keep) is not int or logits_to_keep < 0:
-            raise ValueError("logits_to_keep must be a nonnegative integer")
-        for name, weight in (
-            ("all_token_loss_weight", all_token_loss_weight),
-            ("delayed_answer_loss_weight", delayed_answer_loss_weight),
-        ):
-            if type(weight) not in (int, float) or not math.isfinite(weight) or weight < 0:
-                raise ValueError(f"{name} must be a finite nonnegative number")
-        if delayed_answer_loss_weight == 0:
-            raise ValueError("delayed_answer_loss_weight must be positive")
-        if labels is not None and labels.shape != input_ids.shape:
-            raise ValueError("labels must match input_ids")
+        self._validate_lm_inputs(input_ids, labels, logits_to_keep)
         if delayed_labels.shape != input_ids.shape:
             raise ValueError("delayed_labels must match input_ids")
 
@@ -206,31 +173,14 @@ class TTCDQwen3ForCausalLM(Qwen3PreTrainedModel):
             attention_mask=attention_mask, output_hidden_states=output_hidden_states,
             persistent_mask=persistent_mask,
         )
-        hidden_states: Float[torch.Tensor, "N d_model"] = (
-            output.last_hidden_state[:, :-1].reshape(-1, self.config.hidden_size)
-        )
-        all_token_loss = None
-        terms = []
-        if labels is not None and all_token_loss_weight > 0:
-            all_token_loss = causal_lm_loss(
-                self.lm_head,
-                hidden_states,
-                labels,
-            )
-            terms.append(all_token_loss_weight * all_token_loss)
-        delayed_answer_loss = causal_lm_loss(
-            self.lm_head,
-            hidden_states,
+        loss, logits, all_token_loss, delayed_answer_loss = self._bridge_head(
+            output.last_hidden_state,
             delayed_labels,
+            all_token_loss_weight,
+            delayed_answer_loss_weight,
+            labels,
+            logits_to_keep,
         )
-        terms.append(delayed_answer_loss_weight * delayed_answer_loss)
-        loss = torch.stack(terms).sum()
-
-        logits = None
-        if logits_to_keep > 0:
-            logits: Float[torch.Tensor, "B S_logits vocab_size"] = self.lm_head(
-                output.last_hidden_state[:, -logits_to_keep:, :]
-            )
         return TTCDQwen3BridgeMemoryOutput(
             loss=loss, logits=logits, state=output.state,
             past_key_values=output.past_key_values, hidden_states=output.hidden_states,

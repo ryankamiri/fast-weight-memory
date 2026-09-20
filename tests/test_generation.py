@@ -52,7 +52,10 @@ class GenerationTests(unittest.TestCase):
     def test_existing_history_and_eos_are_carried_into_state(self):
         for eos in (None, 39, [38, 39]):
             history = self.model.prefill(self.ids[:, :6], persistent_mask=torch.arange(6) < 2)
-            with patch("architectures.ttcd.qwen.causal_lm.sample_token", return_value=torch.tensor([[39]])) as sample:
+            with patch(
+                "architectures.shared.qwen.causal_lm.sample_token",
+                return_value=torch.tensor([[39]]),
+            ) as sample:
                 result = self.model.generate(self.ids[:, 6:], state=history.state, eos_token_id=eos)
             self.assertEqual(sample.call_count, 1)
             self.assertEqual(result.stop_reason, "eos")
