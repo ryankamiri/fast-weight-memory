@@ -32,7 +32,7 @@ data:
     conditions: [no_bridge]
     query_variants: [exact]
   allow_train_val_overlap: true
-  batch_size: 1
+  batch_size: 2
   seq_len: 7695
   num_workers: 0
   shuffle_buffer_size: 64
@@ -56,10 +56,10 @@ scheduler:
 training:
   max_steps: 500
   seed: 42
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 4
   gradient_checkpointing: false
   max_grad_norm: 1.0
-  eval_every_steps: 10
+  eval_every_steps: 25
   eval_at_end: true
   log_every_steps: 1
   trainable_parameters: taal_only

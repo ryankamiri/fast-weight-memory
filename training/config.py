@@ -289,8 +289,6 @@ class TrainingConfig:
         if isinstance(self.data, BridgeMemoryDataConfig):
             if not self.data.dataset_config.strip():
                 raise ValueError("bridge_memory data requires data.dataset_config")
-            if self.data.batch_size != 1:
-                raise ValueError("Variable-length bridge_memory records require batch_size=1")
             if self.loss.delayed_answer_weight == 0:
                 raise ValueError("bridge_memory training requires delayed_answer_weight > 0")
         scales = self.validation.read_scales

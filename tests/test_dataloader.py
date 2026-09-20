@@ -87,11 +87,19 @@ class DataLoaderTests(unittest.TestCase):
 
         combined = BridgeMemoryCollator(
             all_tokens_weight=1.0, delayed_answer_weight=1.0,
-        )([example])
+        )([example, {**example, "target_token_id": 8}])
         torch.testing.assert_close(combined["labels"], combined["input_ids"])
-        with self.assertRaisesRegex(ValueError, "batch_size=1"):
+        self.assertEqual(combined["input_ids"].shape, (2, 4))
+        torch.testing.assert_close(
+            combined["delayed_labels"][:, -1], torch.tensor([7, 8]),
+        )
+        with self.assertRaisesRegex(ValueError, "equal sequence lengths"):
             BridgeMemoryCollator(all_tokens_weight=0.0, delayed_answer_weight=1.0)(
-                [example, example],
+                [example, {**example, "input_ids": [1, 2]}],
+            )
+        with self.assertRaisesRegex(ValueError, "equal candidate counts"):
+            BridgeMemoryCollator(all_tokens_weight=0.0, delayed_answer_weight=1.0)(
+                [example, {**example, "candidate_token_ids": [7, 8]}],
             )
 
     def test_bridge_loader_filters_facts_conditions_and_length(self):

@@ -63,27 +63,42 @@ class BridgeMemoryCollator:
         self.delayed_answer_weight = delayed_answer_weight
 
     def __call__(self, examples) -> dict[str, torch.Tensor | list[str]]:
-        if len(examples) != 1:
-            raise ValueError("Variable-length bridge-memory training requires batch_size=1")
-        example = examples[0]
-        target = int(example["target_token_id"])
-        input_ids = torch.tensor(
-            [list(example["input_ids"]) + [target]], dtype=torch.long,
+        rows = [
+            list(example["input_ids"]) + [int(example["target_token_id"])]
+            for example in examples
+        ]
+        sequence_lengths = {len(row) for row in rows}
+        if len(sequence_lengths) != 1:
+            raise ValueError(
+                "Bridge-memory examples in one batch must have equal sequence lengths"
+            )
+        candidate_counts = {
+            len(example["candidate_token_ids"]) for example in examples
+        }
+        if len(candidate_counts) != 1:
+            raise ValueError(
+                "Bridge-memory examples in one batch must have equal candidate counts"
+            )
+        input_ids = torch.tensor(rows, dtype=torch.long)
+        targets = torch.tensor(
+            [int(example["target_token_id"]) for example in examples],
+            dtype=torch.long,
         )
         batch: dict[str, torch.Tensor | list[str]] = {
             "input_ids": input_ids,
-            "target_token_ids": torch.tensor([target], dtype=torch.long),
+            "target_token_ids": targets,
             "candidate_token_ids": torch.tensor(
-                [example["candidate_token_ids"]], dtype=torch.long,
+                [example["candidate_token_ids"] for example in examples],
+                dtype=torch.long,
             ),
-            "conditions": [example["condition"]],
-            "query_variants": [example["query_variant"]],
+            "conditions": [example["condition"] for example in examples],
+            "query_variants": [example["query_variant"] for example in examples],
         }
         if self.all_tokens_weight > 0:
             batch["labels"] = input_ids.clone()
         if self.delayed_answer_weight > 0:
             delayed_labels = torch.full_like(input_ids, -100)
-            delayed_labels[:, -1] = target
+            delayed_labels[:, -1] = targets
             batch["delayed_labels"] = delayed_labels
         return batch
 
@@ -134,8 +149,6 @@ def create_dataloader(
     elif isinstance(config, BridgeMemoryDataConfig):
         if not isinstance(loss, BridgeMemoryLossConfig) or not isinstance(records, BridgeMemoryRecordRange):
             raise TypeError("BridgeMemoryDataConfig requires bridge-memory loss and record-range types")
-        if batch_size != 1:
-            raise ValueError("Variable-length bridge_memory records require batch_size=1")
     else:
         raise TypeError(f"Unsupported data config: {type(config).__name__}")
 

@@ -213,8 +213,7 @@ class TrainingConfigTests(unittest.TestCase):
             config.validate()
         config.data.allow_train_val_overlap = True
         config.data.batch_size = 2
-        with self.assertRaisesRegex(ValueError, "batch_size=1"):
-            config.validate()
+        config.validate()
 
     def test_confirmation_experiment_configs(self):
         folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
@@ -260,7 +259,10 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertEqual(config.model.memory_chunk_size, 1)
         self.assertEqual(config.data.train.conditions, ["no_bridge"])
         self.assertEqual(config.data.train, config.data.val)
+        self.assertEqual(config.data.batch_size, 2)
         self.assertEqual(config.loss, BridgeMemoryLossConfig(0.0, 1.0))
+        self.assertEqual(config.training.gradient_accumulation_steps, 4)
+        self.assertEqual(config.training.eval_every_steps, 25)
         self.assertEqual(config.training.trainable_parameters, "taal_only")
         self.assertEqual(config.validation.memory_read_scales, [1.0, 0.5, 0.0])
 
