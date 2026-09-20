@@ -74,7 +74,7 @@ def summarize(rows):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("evaluation/configs/bridge_memory.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("evaluation/configs/ttcd/bridge_memory.yaml"))
     parser.add_argument("--system", choices=SYSTEMS, required=True)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)

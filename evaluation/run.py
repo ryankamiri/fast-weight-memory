@@ -76,7 +76,7 @@ def generate_example(model, tokenizer, example, config, device):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("evaluation/configs/longmemeval_fw_swa.yaml"))
+    parser.add_argument("--config", type=Path, default=Path("evaluation/configs/ttcd/longmemeval_fw_swa.yaml"))
     parser.add_argument("--mode", choices=("full", "swa", "fw_swa"), help="Override the YAML mode")
     parser.add_argument("--checkpoint", type=Path, help="Saved checkpoint; omit when YAML supplies model_id")
     parser.add_argument("--output-dir", type=Path, required=True)

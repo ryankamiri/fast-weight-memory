@@ -1,5 +1,6 @@
 /ttcd-impl.md
 .venv/
+/.cache/
 .env
 .env.*
 !.env.example

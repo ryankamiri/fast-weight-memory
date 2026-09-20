@@ -17,12 +17,18 @@ from training.config import (
     CausalLMDataConfig,
     CausalLMLossConfig,
     RecordRange,
+    TaalModelConfig,
+    TaalValidationConfig,
     TrainingConfig,
+    TTCDModelConfig,
     load_config,
 )
 from training.engine import build_scheduler, perplexity, train, validate
 from training.train import configure_trainable_parameters, load_model, verify_loading
 from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
+from architectures.ttcd.qwen.configuration import TTCDQwen3Config
+from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
+from architectures.taal.qwen.configuration import TaalQwen3Config
 
 
 class TinyModel(nn.Module):
@@ -80,7 +86,7 @@ def batch(value, size=1, length=4):
 
 class TrainingConfigTests(unittest.TestCase):
     def test_2k_chunk_changes_only_chunk_size_and_run_name(self):
-        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
         original = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml")
         larger_chunk = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_2k.yaml")
         self.assertEqual(larger_chunk.model.chunk_size, 2048)
@@ -90,7 +96,7 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertEqual(larger_chunk, original)
 
     def test_native_4k_swa_matches_fw_training_recipe(self):
-        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
         swa = load_config(folder / "qwen3_0_6b_cpt_swa_4k.yaml")
         fw = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml")
         self.assertEqual(swa.model.teacher_window_size, 4096)
@@ -103,7 +109,7 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertEqual(swa, fw)
 
     def test_2k_chunk_batch_two_variant(self):
-        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
         original = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_2k.yaml")
         batch_two = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_2k_bs2.yaml")
         self.assertEqual(batch_two.data.batch_size, 2)
@@ -112,7 +118,7 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertEqual(batch_two, original)
 
     def test_window_decomposition_configs_change_only_named_windows(self):
-        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
         teacher_8k = load_config(folder / "qwen3_0_6b_cpt_fw_swa_8k_2k_2k.yaml")
         expected_teacher_8k = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_2k.yaml")
         expected_teacher_8k.model.teacher_window_size = 8192
@@ -127,7 +133,7 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertEqual(student_4k, expected_student_4k)
 
     def test_small_window_configs_change_one_variable_per_transition(self):
-        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
         recipes = [
             ("qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml", 4096, 2048, 1024),
             ("qwen3_0_6b_cpt_fw_swa_4k_1k_1k.yaml", 4096, 1024, 1024),
@@ -158,12 +164,13 @@ class TrainingConfigTests(unittest.TestCase):
             self.assertEqual(previous_values, current_values)
 
     def test_yaml_defaults(self):
-        config = load_config(Path(__file__).resolve().parents[1] / "training/configs/qwen3_0_6b.yaml")
+        config = load_config(Path(__file__).resolve().parents[1] / "training/configs/ttcd/qwen3_0_6b.yaml")
         expected = TrainingConfig()
         expected.training.eval_every_steps = 10
         expected.training.log_every_steps = 1
         expected.wandb.entity = "ryanamiri05-northeastern-university"
         expected.wandb.name = "qwen3-0.6b-cpt-64k"
+        self.assertIsInstance(config.model, TTCDModelConfig)
         self.assertEqual(config, expected)
         self.assertNotIn("mode", config.to_dict()["wandb"])
         self.assertIsInstance(config.optimizer.lr, float)
@@ -198,7 +205,7 @@ class TrainingConfigTests(unittest.TestCase):
             allow_train_val_overlap=True,
         )
         config.loss = BridgeMemoryLossConfig(all_tokens_weight=0.0, delayed_answer_weight=1.0)
-        config.training.trainable_parameters = "fast_weight_only"
+        config.training.trainable_parameters = "ttcd_only"
         config.validate()
 
         config.data.allow_train_val_overlap = False
@@ -210,7 +217,7 @@ class TrainingConfigTests(unittest.TestCase):
             config.validate()
 
     def test_confirmation_experiment_configs(self):
-        folder = Path(__file__).resolve().parents[1] / "training/configs"
+        folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
         bounded = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml")
         full_teacher = load_config(folder / "qwen3_0_6b_cpt_fw_full_65k_2k_1k.yaml")
 
@@ -225,7 +232,7 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertIsInstance(overfit.loss, BridgeMemoryLossConfig)
         self.assertTrue(overfit.data.allow_train_val_overlap)
         self.assertEqual(overfit.loss, BridgeMemoryLossConfig(0.0, 1.0))
-        self.assertEqual(overfit.training.trainable_parameters, "fast_weight_only")
+        self.assertEqual(overfit.training.trainable_parameters, "ttcd_only")
         self.assertEqual(overfit.checkpoints.selection_mode, "max")
 
         curriculum = load_config(folder / "qwen3_0_6b_bridge_curriculum.yaml")
@@ -237,6 +244,25 @@ class TrainingConfigTests(unittest.TestCase):
 
         self.assertIsInstance(full_teacher.data, CausalLMDataConfig)
         self.assertIsInstance(full_teacher.loss, CausalLMLossConfig)
+
+    def test_taal_delayed_recall_overfit_config(self):
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml"
+        )
+        config = load_config(path)
+
+        self.assertIsInstance(config.model, TaalModelConfig)
+        self.assertIsInstance(config.validation, TaalValidationConfig)
+        self.assertEqual(config.model.architecture, "taal")
+        self.assertEqual(config.model.working_memory_size, 2048)
+        self.assertEqual(config.model.memory_dim, 128)
+        self.assertEqual(config.model.memory_chunk_size, 1)
+        self.assertEqual(config.data.train.conditions, ["no_bridge"])
+        self.assertEqual(config.data.train, config.data.val)
+        self.assertEqual(config.loss, BridgeMemoryLossConfig(0.0, 1.0))
+        self.assertEqual(config.training.trainable_parameters, "taal_only")
+        self.assertEqual(config.validation.memory_read_scales, [1.0, 0.5, 0.0])
 
     def test_unknown_yaml_setting_is_rejected(self):
         with TemporaryDirectory() as folder:
@@ -277,7 +303,7 @@ class TrainingLoopTests(unittest.TestCase):
         model.forward = forward
         model.mlp.fast_weight_read_scale = 0.25
         loader = TinyLoader([batch(1), batch(2)])
-        metrics = validate(model, loader, torch.device("cpu"), fast_weight_read_scales=[1.0, 0.5, 0.0])
+        metrics = validate(model, loader, torch.device("cpu"), read_scales=[1.0, 0.5, 0.0])
         self.assertEqual(metrics["val/loss"], 2.0)
         self.assertEqual(metrics["val/loss_fw_read_scale_0.5"], 2.5)
         self.assertEqual(metrics["val/fw_read_loss_improvement_scale_0.5"], 0.5)
@@ -289,11 +315,11 @@ class TrainingLoopTests(unittest.TestCase):
         self.assertEqual(model.mlp.fast_weight_read_scale, 0.25)
         with patch("training.engine._validate_pass", side_effect=[metrics, RuntimeError("failed")]):
             with self.assertRaisesRegex(RuntimeError, "failed"):
-                validate(model, loader, torch.device("cpu"), fast_weight_read_scales=[1.0, 0.5, 0.0])
+                validate(model, loader, torch.device("cpu"), read_scales=[1.0, 0.5, 0.0])
         self.assertEqual(model.mlp.fast_weight_read_scale, 0.25)
         with patch("training.engine._validate_pass", side_effect=[metrics, None]):
             self.assertIsNone(validate(model, loader, torch.device("cpu"),
-                                       fast_weight_read_scales=[1.0, 0.5, 0.0]))
+                                       read_scales=[1.0, 0.5, 0.0]))
         self.assertEqual(model.mlp.fast_weight_read_scale, 0.25)
 
     def test_bridge_validation_reports_delayed_loss_and_candidate_accuracy(self):
@@ -307,7 +333,7 @@ class TrainingLoopTests(unittest.TestCase):
         }
         metrics = validate(
             TinyBridgeModel(), TinyLoader([batch]), torch.device("cpu"),
-            fast_weight_read_scales=[1.0, 0.5, 0.0],
+            read_scales=[1.0, 0.5, 0.0],
             loss_config=BridgeMemoryLossConfig(all_tokens_weight=0.0, delayed_answer_weight=1.0),
         )
         self.assertEqual(metrics["val/loss"], 0.25)
@@ -315,10 +341,52 @@ class TrainingLoopTests(unittest.TestCase):
         self.assertEqual(metrics["val/bridge_exact_candidate_accuracy"], 1.0)
         self.assertEqual(metrics["val/all_vocabulary_top_1_accuracy"], 1.0)
 
+    def test_taal_validation_reports_all_memory_read_scales(self):
+        model = TaalQwen3ForCausalLM(TaalQwen3Config(
+            vocab_size=16,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=4,
+            working_memory_size=4,
+            memory_dim=4,
+            memory_depth=2,
+            memory_conv_kernel_size=2,
+            num_persistent_tokens=2,
+        ))
+        input_ids = torch.tensor([[1, 2, 3, 7]])
+        batch = {
+            "input_ids": input_ids,
+            "delayed_labels": torch.tensor([[-100, -100, -100, 7]]),
+            "target_token_ids": torch.tensor([7]),
+            "candidate_token_ids": torch.tensor([[7, 8, 9]]),
+            "conditions": ["no_bridge"],
+            "query_variants": ["exact"],
+        }
+        metrics = validate(
+            model,
+            TinyLoader([batch]),
+            torch.device("cpu"),
+            read_scales=[1.0, 0.5, 0.0],
+            loss_config=BridgeMemoryLossConfig(
+                all_tokens_weight=0.0,
+                delayed_answer_weight=1.0,
+            ),
+        )
+
+        for scale in (1, 0.5, 0):
+            self.assertIn(
+                f"val/no_bridge_exact_candidate_accuracy_memory_read_scale_{scale:g}",
+                metrics,
+            )
+        self.assertIn("val/memory_read_loss_improvement_scale_1", metrics)
+
     def test_baseline_validation_does_not_repeat(self):
         model = TinyModel()
         validate(model, TinyLoader([batch(1)]), torch.device("cpu"),
-                 fast_weight_read_scales=[1.0, 0.5, 0.0])
+                 read_scales=[1.0, 0.5, 0.0])
         self.assertEqual(len(model.calls), 1)
 
     def test_max_steps_stops_without_external_signal_and_validates_once(self):
@@ -361,6 +429,38 @@ class TrainingLoopTests(unittest.TestCase):
         progress, logs, _ = self.run_loop(model, TinyLoader([batch(1), batch(2)]), config, 1)
         self.assertEqual(progress.step, 1)
         self.assertTrue(math.isfinite(logs[-1]["val/loss"]))
+
+    def test_real_qwen_loads_as_taal_with_only_memory_weights_added(self):
+        native = Qwen3ForCausalLM(Qwen3Config(
+            vocab_size=16,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=4,
+        ))
+        config = self.config()
+        config.model = TaalModelConfig(
+            working_memory_size=4,
+            max_persistent_kv_tokens=2,
+            memory_dim=4,
+            memory_depth=2,
+            memory_conv_kernel_size=2,
+            num_persistent_tokens=2,
+        )
+        config.validation = TaalValidationConfig()
+        config.training.gradient_checkpointing = True
+        config.training.trainable_parameters = "taal_only"
+        with TemporaryDirectory() as folder:
+            native.save_pretrained(folder)
+            config.model.model_id = folder
+            model = load_model(config)
+
+        self.assertIsInstance(model, TaalQwen3ForCausalLM)
+        self.assertTrue(model.is_gradient_checkpointing)
+        for key, value in native.state_dict().items():
+            torch.testing.assert_close(model.state_dict()[key], value)
 
     def config(self):
         config = TrainingConfig()
@@ -481,8 +581,13 @@ class TrainingLoopTests(unittest.TestCase):
     def test_loading_allows_only_added_parameters(self):
         mlp = SimpleNamespace(W_proj=nn.Parameter(torch.ones(2, 2)), beta_proj=None,
                               teacher_conv=None, student_conv=None)
-        model = SimpleNamespace(config=SimpleNamespace(fast_weight_layers=[0]),
-                                model=SimpleNamespace(layers=[SimpleNamespace(mlp=mlp)]))
+        model = SimpleNamespace(
+            config=TTCDQwen3Config(
+                num_hidden_layers=1,
+                fast_weight_layers=[0],
+            ),
+            model=SimpleNamespace(layers=[SimpleNamespace(mlp=mlp)]),
+        )
         verify_loading(model, {"missing_keys": ["model.layers.0.mlp.W_proj"]})
         for info in ({"missing_keys": ["model.embed_tokens.weight"]},
                      {"unexpected_keys": ["other.weight"]},
@@ -501,12 +606,43 @@ class TrainingLoopTests(unittest.TestCase):
             model=SimpleNamespace(layers=[SimpleNamespace(mlp=model)]),
             parameters=model.parameters,
         )
-        parameters = configure_trainable_parameters(wrapper, "fast_weight_only")
+        parameters = configure_trainable_parameters(wrapper, "ttcd_only")
         trainable_names = {name for name, value in model.named_parameters() if value.requires_grad}
         self.assertEqual(trainable_names, {
             "W_proj", "beta_proj", "teacher_conv.weight", "student_conv.weight",
         })
         self.assertEqual(sum(parameter.numel() for parameter in parameters), 64 + 8 + 120)
+
+    def test_taal_only_parameter_scope(self):
+        model = TaalQwen3ForCausalLM(TaalQwen3Config(
+            vocab_size=16,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=4,
+            working_memory_size=4,
+            memory_dim=4,
+            memory_depth=2,
+            memory_conv_kernel_size=2,
+            num_persistent_tokens=2,
+        ))
+        parameters = configure_trainable_parameters(model, "taal_only")
+        trainable_names = {
+            name for name, parameter in model.named_parameters()
+            if parameter.requires_grad
+        }
+        self.assertTrue(trainable_names)
+        self.assertTrue(all(".taal." in name for name in trainable_names))
+        self.assertEqual(
+            sum(parameter.numel() for parameter in parameters),
+            sum(
+                parameter.numel()
+                for name, parameter in model.named_parameters()
+                if ".taal." in name
+            ),
+        )
 
 
 if __name__ == "__main__":
