@@ -84,6 +84,54 @@ class TaalQwen3CausalLMTests(unittest.TestCase):
         if actual.pending_count != expected.pending_count:
             raise AssertionError("pending counts differ")
 
+    def assert_session_state_equal(self, actual, expected):
+        self.assertEqual(actual.tokens_seen, expected.tokens_seen)
+        self.assertEqual(set(actual.memory_states), set(expected.memory_states))
+        for layer_index in actual.memory_states:
+            self.assert_memory_state_equal(
+                actual.memory_states[layer_index],
+                expected.memory_states[layer_index],
+            )
+        for actual_layer, expected_layer in zip(
+            actual.past_key_values.layers,
+            expected.past_key_values.layers,
+        ):
+            torch.testing.assert_close(actual_layer.keys, expected_layer.keys)
+            torch.testing.assert_close(actual_layer.values, expected_layer.values)
+            torch.testing.assert_close(actual_layer.positions, expected_layer.positions)
+            torch.testing.assert_close(
+                actual_layer.is_persistent,
+                expected_layer.is_persistent,
+            )
+
+    @staticmethod
+    def memory_state_shapes(state):
+        shapes = {}
+        for layer_index, memory_state in state.memory_states.items():
+            layer_shapes = {}
+            for collection_name in ("weights", "momentum", "pending_gradient"):
+                collection = getattr(memory_state, collection_name)
+                layer_shapes[collection_name] = (
+                    None
+                    if collection is None
+                    else {
+                        name: tuple(value.shape)
+                        for name, value in collection.items()
+                    }
+                )
+            for tensor_name in (
+                "pending_input_sum",
+                "query_conv_history",
+                "key_conv_history",
+                "value_conv_history",
+            ):
+                value = getattr(memory_state, tensor_name)
+                layer_shapes[tensor_name] = (
+                    None if value is None else tuple(value.shape)
+                )
+            shapes[layer_index] = layer_shapes
+        return shapes
+
     def test_logits_shifted_and_bridge_losses(self):
         model = TaalQwen3ForCausalLM(self.config()).train()
         labels = self.ids.clone()
@@ -213,6 +261,62 @@ class TaalQwen3CausalLMTests(unittest.TestCase):
             layer.is_persistent,
             torch.tensor([True, True, False, False, False]),
         )
+
+    @torch.inference_mode()
+    def test_long_session_keeps_kv_and_memory_state_bounded(self):
+        model = TaalQwen3ForCausalLM(self.config()).eval()
+        state = None
+        memory_shapes = None
+        for turn in range(20):
+            segment = torch.randint(0, 40, (1, 7))
+            persistent_mask = (
+                torch.arange(7) < 2 if turn == 0 else None
+            )
+            output = model.prefill(
+                segment,
+                execution_block_size=3,
+                state=state,
+                persistent_mask=persistent_mask,
+            )
+            state = output.state
+            for layer in state.past_key_values.layers:
+                self.assertLessEqual(
+                    layer.keys.shape[-2],
+                    model.config.working_memory_size - 1 + 2,
+                )
+                self.assertEqual(layer.keys.shape, layer.values.shape)
+
+            current_shapes = self.memory_state_shapes(state)
+            if memory_shapes is None:
+                memory_shapes = current_shapes
+            else:
+                self.assertEqual(current_shapes, memory_shapes)
+        self.assertEqual(state.tokens_seen, 140)
+
+    @torch.inference_mode()
+    def test_irregular_prefill_splits_preserve_partial_memory_chunks(self):
+        model = TaalQwen3ForCausalLM(
+            self.config(
+                memory_chunk_size=4,
+                memory_conv_kernel_size=3,
+            )
+        ).eval()
+        model.model.layers[0].taal.residual_gate.fill_(0.75)
+        expected = model(
+            self.ids,
+            use_cache=True,
+            logits_to_keep=1,
+            prepend_memory_tokens=True,
+        )
+        actual = model.prefill(
+            self.ids,
+            execution_block_size=3,
+            prepend_memory_tokens=True,
+        )
+
+        torch.testing.assert_close(actual.logits, expected.logits)
+        self.assert_session_state_equal(actual.state, expected.state)
+        self.assertEqual(actual.state.memory_states[0].pending_count, 1)
 
     @torch.inference_mode()
     def test_every_layer_prepends_once_per_utterance_not_per_execution_block(self):
