@@ -88,6 +88,17 @@ class NeuralMemory(nn.Module):
             }
         return NeuralMemoryState(weights=weights, momentum=momentum)
 
+    def zero_state(self, batch_size: int) -> NeuralMemoryState:
+        """Create the explicit all-zero control state for a batch of sessions."""
+        state = self.initial_state(batch_size)
+        return NeuralMemoryState(
+            weights={
+                name: torch.zeros_like(value)
+                for name, value in state.weights.items()
+            },
+            momentum=state.momentum,
+        )
+
     def _validate_state(self, state: NeuralMemoryState, batch_size: int) -> None:
         parameter_names = set(dict(self.memory_mlp.named_parameters()))
         if set(state.weights) != parameter_names:

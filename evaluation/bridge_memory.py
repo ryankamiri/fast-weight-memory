@@ -1,18 +1,18 @@
 import argparse
 import json
-import math
 from pathlib import Path
 import time
 
 from datasets import load_dataset
 from huggingface_hub import HfApi, hf_hub_download
-from jaxtyping import Float, Int
+from jaxtyping import Int
 import torch
 from transformers import AutoTokenizer, Qwen3Config
 import yaml
 
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from evaluation.run import configure_model, load_model
+from evaluation.scoring import grouped_score_summary, score_logits
 from evaluation.storage import append_result, ensure_manifest, read_results
 from utils.seed import seed_everything
 
@@ -24,52 +24,6 @@ SYSTEMS = {
     "fw_0_5": {"mode": "fw_swa", "read_scale": 0.5},
     "fw_1": {"mode": "fw_swa", "read_scale": 1.0},
 }
-
-
-def score_logits(logits, example, tokenizer):
-    logits: Float[torch.Tensor, "vocab_size"] = logits.float()
-    target = int(example["target_token_id"])
-    candidates: Int[torch.Tensor, "num_candidates"] = torch.tensor(
-        example["candidate_token_ids"], dtype=torch.long, device=logits.device,
-    )
-    target_score = logits[target]
-    target_rank = int((logits > target_score).sum().item()) + 1
-    candidate_scores = logits[candidates]
-    candidate_choice = int(candidates[candidate_scores.argmax()].item())
-    decoy_scores = candidate_scores[candidates != target]
-    top_token = int(logits.argmax().item())
-    return {
-        "target_rank": target_rank,
-        "target_reciprocal_rank": 1.0 / target_rank,
-        "target_log_probability": float((target_score - torch.logsumexp(logits, dim=0)).item()),
-        "target_vs_best_decoy_margin": float((target_score - decoy_scores.max()).item()),
-        "candidate_choice_token_id": candidate_choice,
-        "candidate_correct": candidate_choice == target,
-        "vocabulary_top_token_id": top_token,
-        "vocabulary_top_token": tokenizer.decode([top_token]),
-        "vocabulary_top_1_correct": top_token == target,
-    }
-
-
-def summarize(rows):
-    groups = {"all": list(rows)}
-    for row in rows:
-        key = f"{row['condition']}/{row['query_variant']}"
-        groups.setdefault(key, []).append(row)
-    summary = {}
-    for name, group in groups.items():
-        count = len(group)
-        summary[name] = {
-            "examples": count,
-            "candidate_accuracy": sum(row["candidate_correct"] for row in group) / count,
-            "vocabulary_top_1_accuracy": sum(row["vocabulary_top_1_correct"] for row in group) / count,
-            "mean_target_log_probability": math.fsum(row["target_log_probability"] for row in group) / count,
-            "mean_target_reciprocal_rank": math.fsum(row["target_reciprocal_rank"] for row in group) / count,
-            "mean_target_vs_best_decoy_margin": math.fsum(
-                row["target_vs_best_decoy_margin"] for row in group
-            ) / count,
-        }
-    return summary
 
 
 def main():
@@ -139,7 +93,10 @@ def main():
         summary = {
             "system": args.system,
             "fast_weight_read_scale": system["read_scale"],
-            "metrics": summarize(results.values()),
+            "metrics": grouped_score_summary(
+                results.values(),
+                ("condition", "query_variant"),
+            ),
         }
         (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
         print(json.dumps(summary, indent=2), flush=True)
@@ -189,7 +146,10 @@ def main():
     summary = {
         "system": args.system,
         "fast_weight_read_scale": system["read_scale"],
-        "metrics": summarize(results.values()),
+        "metrics": grouped_score_summary(
+            results.values(),
+            ("condition", "query_variant"),
+        ),
     }
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2), flush=True)

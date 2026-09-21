@@ -38,6 +38,22 @@ class NeuralMemoryTests(unittest.TestCase):
         self.assertEqual(updated.pending_count, 2)
         self.assertIsNotNone(updated.pending_input_sum)
 
+    def test_zero_state_is_distinct_from_learned_initial_state(self):
+        memory = NeuralMemory(self.config)
+        initial = memory.initial_state(batch_size=2)
+        zeroed = memory.zero_state(batch_size=2)
+
+        self.assertTrue(any(
+            value.count_nonzero() > 0 for value in initial.weights.values()
+        ))
+        self.assertTrue(all(
+            value.count_nonzero() == 0 for value in zeroed.weights.values()
+        ))
+        self.assertTrue(all(
+            value.count_nonzero() == 0 for value in zeroed.momentum.values()
+        ))
+        self.assertEqual(set(zeroed.weights), set(initial.weights))
+
     def test_split_calls_match_concatenated_call(self):
         full_memory = NeuralMemory(self.config).eval()
         split_memory = copy.deepcopy(full_memory).eval()

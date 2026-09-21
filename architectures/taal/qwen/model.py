@@ -15,7 +15,7 @@ from architectures.titans.neural_memory import NeuralMemory
 
 from .configuration import TaalQwen3Config
 from .decoder import TaalQwen3DecoderLayer
-from .state import TaalModelState
+from .state import NeuralMemoryStates, TaalModelState
 
 
 logger = logging.get_logger(__name__)
@@ -65,6 +65,18 @@ class TaalQwen3Model(StatefulQwen3Model):
             layer_idx,
             taal_config=config.taal_layer_config(),
         )
+
+    def initial_memory_states(self, batch_size: int) -> NeuralMemoryStates:
+        return {
+            layer_index: layer.taal.neural_memory.initial_state(batch_size)
+            for layer_index, layer in enumerate(self.layers)
+        }
+
+    def zero_memory_states(self, batch_size: int) -> NeuralMemoryStates:
+        return {
+            layer_index: layer.taal.neural_memory.zero_state(batch_size)
+            for layer_index, layer in enumerate(self.layers)
+        }
 
     @jaxtyped(typechecker=beartype)
     def forward(
