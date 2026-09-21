@@ -3,7 +3,7 @@ import json
 import torch
 
 from evaluation.bridge_data import BridgeGeometry, build_bridge_example
-from evaluation.bridge_memory import score_logits, summarize
+from evaluation.scoring import grouped_score_summary, score_logits
 from evaluation.storage import read_results
 
 
@@ -88,7 +88,7 @@ def test_objective_scoring_and_summary():
         "condition": "bridge",
         "query_variant": "exact",
     }
-    summary = summarize([row])
+    summary = grouped_score_summary([row], ("condition", "query_variant"))
     assert summary["bridge/exact"]["candidate_accuracy"] == 1
 
 

@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import random
 
-from evaluation.bridge_memory import summarize
+from evaluation.scoring import grouped_score_summary
 from evaluation.storage import read_results
 
 
@@ -66,7 +66,13 @@ def main():
         raise ValueError("Every run must contain the same complete example IDs")
 
     report = {
-        "systems": {name: summarize(run.values()) for name, run in runs.items()},
+        "systems": {
+            name: grouped_score_summary(
+                run.values(),
+                ("condition", "query_variant"),
+            )
+            for name, run in runs.items()
+        },
         "bridge_interaction_relative_to_fw_0": {},
     }
     for name in ("fw_0_5", "fw_1"):
