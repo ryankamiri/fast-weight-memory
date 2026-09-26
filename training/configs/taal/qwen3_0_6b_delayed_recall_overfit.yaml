@@ -7,7 +7,7 @@ model:
   memory_dim: 128
   memory_depth: 2
   memory_conv_kernel_size: 4
-  memory_chunk_size: 1
+  memory_chunk_size: 64
   memory_initial_forget: 0.01
   memory_initial_momentum: 0.9
   memory_initial_write_strength: 0.1
@@ -28,7 +28,7 @@ data:
   val:
     split: test
     start: 0
-    end: 64
+    end: 32
     conditions: [no_bridge]
     query_variants: [exact]
   allow_train_val_overlap: true
@@ -50,11 +50,11 @@ optimizer:
 
 scheduler:
   warmup_steps: 20
-  schedule_steps: 500
+  schedule_steps: 100
   final_lr: 1.0e-5
 
 training:
-  max_steps: 500
+  max_steps: 100
   seed: 42
   gradient_accumulation_steps: 8
   gradient_checkpointing: false
