@@ -1,4 +1,5 @@
 import argparse
+from contextlib import nullcontext
 import copy
 from dataclasses import dataclass
 import json
@@ -18,6 +19,12 @@ from architectures.taal.qwen.state import NeuralMemoryStates, TaalModelState
 from architectures.titans.state import NeuralMemoryState
 from evaluation.scoring import grouped_score_summary, score_logits
 from evaluation.storage import append_result, ensure_manifest, read_results
+from evaluation.taal.trace_contract import TraceComparison, TraceEpisode
+from evaluation.taal.trace_export import (
+    TaalTraceExporter,
+    TaalTraceRecorder,
+    make_trace_tokens,
+)
 from utils.seed import seed_everything
 
 
@@ -286,6 +293,9 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     settings = yaml.safe_load(args.config.read_text())
+    save_traces = settings.get("save_traces", False)
+    if type(save_traces) is not bool:
+        parser.error("save_traces must be true or false")
     dataset_settings = settings["dataset"]
     revision = dataset_settings.get("revision")
     if revision is None:
@@ -330,6 +340,17 @@ def main():
     )
     if not set(results) <= expected_result_ids:
         raise ValueError("Saved results contain unknown state-audit IDs")
+    if save_traces and results:
+        trace_manifest_path = args.output_dir / "memory_traces" / "manifest.json"
+        if not trace_manifest_path.exists():
+            raise ValueError("Saved results have no memory trace manifest")
+        trace_index = json.loads(trace_manifest_path.read_text())["episodes"]
+        missing_traces = set(results) - set(trace_index)
+        if missing_traces:
+            raise ValueError(
+                "Saved results are missing memory traces; use a fresh output "
+                "directory or resume the original run without tracing"
+            )
     if set(results) == expected_result_ids:
         output = summarize(results.values())
         (args.output_dir / "summary.json").write_text(
@@ -347,6 +368,21 @@ def main():
         revision=metadata["tokenizer_revision"],
     )
     model = load_model(args.checkpoint).to(device).eval()
+    trace_layers = list(range(len(model.model.layers))) if save_traces else []
+    trace_exporter = (
+        TaalTraceExporter(
+            args.output_dir / "memory_traces",
+            run_metadata={
+                "checkpoint": checkpoint,
+                "dataset_revision": revision,
+                "tokenizer": metadata["tokenizer"],
+                "tokenizer_revision": metadata["tokenizer_revision"],
+                "layers": trace_layers,
+                "capture": "all_examples_all_layers_compact_scalars",
+            },
+        )
+        if save_traces else None
+    )
     execution_block_size = settings.get(
         "execution_block_size",
         model.config.working_memory_size,
@@ -395,16 +431,25 @@ def main():
         if not pending:
             continue
         prefix_ids, query_ids = split_episode(example)
-        prefix_output = model.prefill(
-            torch.tensor(
-                [prefix_ids],
-                dtype=torch.long,
-                device=device,
-            ),
-            execution_block_size=execution_block_size,
-            memory_read_scale=1.0,
-            prepend_memory_tokens=True,
+        prefix_trace = (
+            TaalTraceRecorder(
+                model,
+                layers=trace_layers,
+                token_count=len(prefix_ids),
+            )
+            if save_traces else None
         )
+        with prefix_trace if prefix_trace is not None else nullcontext():
+            prefix_output = model.prefill(
+                torch.tensor(
+                    [prefix_ids],
+                    dtype=torch.long,
+                    device=device,
+                ),
+                execution_block_size=execution_block_size,
+                memory_read_scale=1.0,
+                prepend_memory_tokens=True,
+            )
         base_state = prefix_output.state
         reset = model.model.initial_memory_states(batch_size=1)
         zeroed = model.model.zero_memory_states(batch_size=1)
@@ -423,17 +468,27 @@ def main():
         for condition in pending:
             state = fork_session_state(base_state, sources[condition.memory_source])
             start = time.perf_counter()
-            output = model.prefill(
-                torch.tensor(
-                    [query_ids],
-                    dtype=torch.long,
-                    device=device,
-                ),
-                execution_block_size=execution_block_size,
-                state=state,
-                memory_read_scale=condition.read_scale,
-                prepend_memory_tokens=False,
+            query_trace = (
+                TaalTraceRecorder(
+                    model,
+                    layers=trace_layers,
+                    token_count=len(query_ids),
+                    position_offset=len(prefix_ids),
+                )
+                if save_traces else None
             )
+            with query_trace if query_trace is not None else nullcontext():
+                output = model.prefill(
+                    torch.tensor(
+                        [query_ids],
+                        dtype=torch.long,
+                        device=device,
+                    ),
+                    execution_block_size=execution_block_size,
+                    state=state,
+                    memory_read_scale=condition.read_scale,
+                    prepend_memory_tokens=False,
+                )
             logits = output.logits[0, -1].float()
             swapped_target = int(swapped_example["target_token_id"])
             swapped_log_probability = float(
@@ -481,6 +536,32 @@ def main():
                 ),
                 **score_logits(logits, example, tokenizer),
             }
+            if save_traces:
+                assert prefix_trace is not None and query_trace is not None
+                assert trace_exporter is not None
+                trace_exporter.export(TraceEpisode(
+                    run_id=args.output_dir.name,
+                    example_id=example["example_id"],
+                    condition_id=condition.name,
+                    checkpoint=checkpoint,
+                    tokenizer_id=metadata["tokenizer"],
+                    tokens=make_trace_tokens(example["input_ids"], tokenizer),
+                    writes=prefix_trace.writes + query_trace.writes,
+                    reads=prefix_trace.reads + query_trace.reads,
+                    internal_prefixes=(
+                        prefix_trace.internal_prefixes + query_trace.internal_prefixes
+                    ),
+                    outcome=result,
+                    metadata={
+                        "query_start_position": len(prefix_ids),
+                        "memory_source_at_query": condition.memory_source,
+                        "read_scale_at_query": condition.read_scale,
+                        "swapped_from_example_id": (
+                            swapped_example["example_id"]
+                            if condition.memory_source == "swapped" else None
+                        ),
+                    },
+                ))
             append_result(args.output_dir / "results.jsonl", result)
             results[result["evaluation_id"]] = result
             print(
@@ -489,6 +570,34 @@ def main():
                 flush=True,
             )
             del output, state
+        if save_traces:
+            assert trace_exporter is not None
+            baseline = results[f"{example['example_id']}/correct_full"]
+            for condition in AUDIT_CONDITIONS:
+                if condition.name == "correct_full":
+                    continue
+                variant = results[f"{example['example_id']}/{condition.name}"]
+                baseline_logp = baseline["target_log_probability"]
+                variant_logp = variant["target_log_probability"]
+                trace_exporter.export_comparison(TraceComparison(
+                    run_id=args.output_dir.name,
+                    example_id=example["example_id"],
+                    baseline_condition="correct_full",
+                    variant_condition=condition.name,
+                    intervention=(
+                        "read_scale"
+                        if condition.memory_source == "correct" else "memory_state"
+                    ),
+                    scope="whole_query",
+                    identical_text_prefix=True,
+                    same_starting_kv=True,
+                    same_starting_memory=condition.memory_source == "correct",
+                    scored_position=len(example["input_ids"]) - 1,
+                    scored_token_id=int(example["target_token_id"]),
+                    baseline_log_probability=baseline_logp,
+                    variant_log_probability=variant_logp,
+                    difference_log_probability=baseline_logp - variant_logp,
+                ))
         del prefix_output, base_state
 
     output = summarize(results.values())

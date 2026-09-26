@@ -38,6 +38,7 @@ class TaalLayer(nn.Module):
         )
         # The adapter initially preserves the host model exactly.
         self.residual_gate = nn.Parameter(torch.zeros(()))
+        self.trace_observer = None
 
     @jaxtyped(typechecker=beartype)
     def forward(
@@ -64,6 +65,12 @@ class TaalLayer(nn.Module):
             ] = torch.cat((persistent, projected), dim=1)
         else:
             memory_inputs = projected
+        if self.trace_observer is not None:
+            _, N_memory, _ = memory_inputs.shape
+            self.trace_observer.begin_call(
+                text_length=S,
+                persistent_count=N_memory - S,
+            )
 
         memory_write_mask: Bool[torch.Tensor, "B N_memory"] | None = None
         if write_mask is not None and prepend_memory_tokens:
@@ -96,8 +103,14 @@ class TaalLayer(nn.Module):
         correction: Float[torch.Tensor, "B S D_model"] = (
             self.memory_projection_out(memory_output)
         )
-        output: Float[torch.Tensor, "B S D_model"] = (
-            hidden_states
-            + memory_read_scale * torch.tanh(self.residual_gate) * correction
-        )
+        gate = torch.tanh(self.residual_gate)
+        injection = memory_read_scale * gate * correction
+        output: Float[torch.Tensor, "B S D_model"] = hidden_states + injection
+        if self.trace_observer is not None:
+            self.trace_observer.record_reads(
+                hidden_states,
+                injection,
+                read_scale=memory_read_scale,
+                residual_gate=gate,
+            )
         return output, next_state

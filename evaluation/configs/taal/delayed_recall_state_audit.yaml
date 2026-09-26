@@ -11,3 +11,4 @@ dataset:
 execution_block_size: 2048
 state_bank_batch_size: 1
 seed: 42
+save_traces: true

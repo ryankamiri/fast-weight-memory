@@ -56,6 +56,7 @@ class NeuralMemory(nn.Module):
         self.forget_projection = nn.Linear(dim, 1)
         self.momentum_projection = nn.Linear(dim, 1)
         self.write_strength_projection = nn.Linear(dim, 1)
+        self.trace_observer = None
         self.reset_update_controls()
 
     @torch.no_grad()
@@ -282,13 +283,22 @@ class NeuralMemory(nn.Module):
                 name: value.detach() for name, value in next_momentum.items()
             }
 
-        return NeuralMemoryState(
+        next_state = NeuralMemoryState(
             weights=next_weights,
             momentum=next_momentum,
             query_conv_history=state.query_conv_history,
             key_conv_history=state.key_conv_history,
             value_conv_history=state.value_conv_history,
         )
+        if self.trace_observer is not None:
+            self.trace_observer(
+                state,
+                chunk_gradient,
+                next_state,
+                write_mask,
+                write_strength,
+            )
+        return next_state
 
     def _read(
         self,
