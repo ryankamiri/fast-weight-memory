@@ -50,11 +50,11 @@ optimizer:
 
 scheduler:
   warmup_steps: 20
-  schedule_steps: 100
+  schedule_steps: 500
   final_lr: 1.0e-5
 
 training:
-  max_steps: 100
+  max_steps: 500
   seed: 42
   gradient_accumulation_steps: 8
   gradient_checkpointing: false

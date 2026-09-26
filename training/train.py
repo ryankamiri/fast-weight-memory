@@ -1,7 +1,6 @@
 import argparse
 from dataclasses import asdict
 import os
-import re
 import signal
 from threading import Event
 
@@ -108,15 +107,6 @@ def configure_trainable_parameters(model, scope: str):
     return parameters
 
 
-def resolve_revision(api: HfApi, repo_id: str, revision: str | None, *, dataset: bool) -> str:
-    """Keep immutable commit pins without requiring a network lookup at launch."""
-    if revision is not None and re.fullmatch(r"[0-9a-f]{40}", revision):
-        return revision
-    if dataset:
-        return api.dataset_info(repo_id, revision=revision).sha
-    return api.model_info(repo_id, revision=revision).sha
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="training/configs/ttcd/qwen3_0_6b.yaml")
@@ -134,14 +124,13 @@ def main():
         raise RuntimeError("This training recipe requires BF16 support")
     seed_everything(config.training.seed)
 
-    # Resolve symbolic refs once; an already-pinned commit needs no network call.
-    api = HfApi()
-    config.model.revision = resolve_revision(
-        api, config.model.model_id, config.model.revision, dataset=False,
-    )
-    config.data.revision = resolve_revision(
-        api, config.data.dataset_id, config.data.revision, dataset=True,
-    )
+    # This pilot pins both revisions; only absent revisions need Hub lookups.
+    if config.model.revision is None or config.data.revision is None:
+        api = HfApi()
+        if config.model.revision is None:
+            config.model.revision = api.model_info(config.model.model_id).sha
+        if config.data.revision is None:
+            config.data.revision = api.dataset_info(config.data.dataset_id).sha
     model = load_model(config).to(device)
     trainable_parameters = configure_trainable_parameters(
         model, config.training.trainable_parameters,
@@ -169,8 +158,6 @@ def main():
         print("Stop requested. Skipping final validation and saving the final model at the next safe boundary.", flush=True)
         stop.set()
 
-    signal.signal(signal.SIGINT, request_stop)
-    signal.signal(signal.SIGTERM, request_stop)
     slurm_job_id = os.environ.get("SLURM_JOB_ID")
     if slurm_job_id:
         run_name = config.wandb.name or config.wandb.project
@@ -179,6 +166,10 @@ def main():
     print(f"Training on {torch.cuda.get_device_name(device)} for up to {config.training.max_steps} optimizer updates.", flush=True)
     
     with wandb.init(**asdict(config.wandb), config=config.to_dict(), mode="online") as run:
+        # Install after W&B initialization so its setup cannot replace our
+        # pre-walltime stop handler.
+        signal.signal(signal.SIGINT, request_stop)
+        signal.signal(signal.SIGTERM, request_stop)
         run.define_metric("train/step")
         run.define_metric("*", step_metric="train/step")
 
@@ -186,7 +177,9 @@ def main():
             run.log(metrics)
             print(" | ".join(f"{key}={value:.6g}" for key, value in metrics.items()), flush=True)
 
-        checkpoints = ModelCheckpoints(config, run.id)
+        checkpoint_run_id = os.environ.get("CHECKPOINT_RUN_ID") or run.id
+        checkpoints = ModelCheckpoints(config, checkpoint_run_id)
+        print(f"Checkpoint directory: {checkpoints.directory}", flush=True)
         progress = Progress()
         reason = "exception"
         try:

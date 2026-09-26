@@ -7,6 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=08:00:00
+#SBATCH --signal=B:TERM@900
 #SBATCH --output=logs/fs-qwen-taal-overfit-%j.log
 #SBATCH --error=logs/fs-qwen-taal-overfit-%j.log
 
@@ -28,8 +29,9 @@ export HF_DATASETS_CACHE="${HF_HOME}/datasets"
 # when the submission shell did not export one.
 export http_proxy="${http_proxy:-http://10.99.0.130:3128}"
 export https_proxy="${https_proxy:-http://10.99.0.130:3128}"
+export CHECKPOINT_RUN_ID="taal-pilot1a-${SLURM_JOB_ID}"
 
-exec torchrun \
-    --standalone --nnodes=1 --nproc-per-node=1 \
-    -m training.train \
+# A single Python process receives Slurm's pre-limit TERM directly and can
+# save final weights before the allocation expires.
+exec python -m training.train \
     --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml
