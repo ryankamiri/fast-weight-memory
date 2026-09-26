@@ -7,7 +7,7 @@ model:
   memory_dim: 128
   memory_depth: 2
   memory_conv_kernel_size: 4
-  memory_chunk_size: 64
+  memory_chunk_size: 1
   memory_initial_forget: 0.01
   memory_initial_momentum: 0.9
   memory_initial_write_strength: 0.1

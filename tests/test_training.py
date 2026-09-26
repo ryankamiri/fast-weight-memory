@@ -257,7 +257,7 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertEqual(config.model.revision, "da87bfb608c14b7cf20ba1ce41287e8de496c0cd")
         self.assertEqual(config.model.working_memory_size, 2048)
         self.assertEqual(config.model.memory_dim, 128)
-        self.assertEqual(config.model.memory_chunk_size, 64)
+        self.assertEqual(config.model.memory_chunk_size, 1)
         self.assertEqual(config.data.train.conditions, ["no_bridge"])
         self.assertEqual((config.data.train.start, config.data.train.end), (0, 64))
         self.assertEqual((config.data.val.start, config.data.val.end), (0, 32))
