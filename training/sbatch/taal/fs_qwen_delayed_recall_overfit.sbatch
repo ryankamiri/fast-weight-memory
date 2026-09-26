@@ -24,6 +24,10 @@ export OMP_NUM_THREADS=4
 export HF_HOME="${HF_HOME:-/projects/llpr/amiri.ry/huggingface}"
 export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
 export HF_DATASETS_CACHE="${HF_HOME}/datasets"
+# Streaming the pinned dataset still contacts the Hub; use Explorer's proxy
+# when the submission shell did not export one.
+export http_proxy="${http_proxy:-http://10.99.0.130:3128}"
+export https_proxy="${https_proxy:-http://10.99.0.130:3128}"
 
 exec torchrun \
     --standalone --nnodes=1 --nproc-per-node=1 \

@@ -20,6 +20,11 @@ cd "${SLURM_SUBMIT_DIR}"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=4
+export HF_HOME="${HF_HOME:-/projects/llpr/amiri.ry/huggingface}"
+export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
+export HF_DATASETS_CACHE="${HF_HOME}/datasets"
+export http_proxy="${http_proxy:-http://10.99.0.130:3128}"
+export https_proxy="${https_proxy:-http://10.99.0.130:3128}"
 
 if (( $# < 1 )); then
     echo "Usage: sbatch $0 CHECKPOINT [OUTPUT_DIR] [extra evaluator arguments]" >&2
