@@ -11,6 +11,7 @@ from torch.utils.checkpoint import checkpoint
 from architectures.shared.qwen.cache import SlidingWindowKVCache
 from architectures.shared.qwen.masking import prepare_sliding_attention_mask
 from architectures.shared.qwen.model import StatefulQwen3Model
+from architectures.taal.layer import TaalLayer
 from architectures.titans.neural_memory import NeuralMemory
 
 from .configuration import TaalQwen3Config
@@ -40,6 +41,13 @@ class TaalQwen3Model(StatefulQwen3Model):
     @torch.no_grad()
     def _init_weights(self, module):
         super()._init_weights(module)
+        if isinstance(module, TaalLayer):
+            # from_pretrained suppresses constructor nn.init calls while it
+            # builds the model; this standalone parameter has no Qwen init.
+            module.persistent_tokens.normal_(
+                mean=0.0,
+                std=module.config.persistent_init_std,
+            )
         if isinstance(module, NeuralMemory):
             # Qwen initializes every child Linear during post_init; restore the
             # configured Titans control biases after that traversal.

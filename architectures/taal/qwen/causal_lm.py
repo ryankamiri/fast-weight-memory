@@ -9,6 +9,7 @@ from architectures.shared.qwen.causal_lm import (
     StatefulQwen3CausalLMOutput,
     StatefulQwen3ForCausalLM,
 )
+from architectures.taal.layer import TaalLayer
 from architectures.titans.neural_memory import NeuralMemory
 from inference.generation import GenerationOutput
 
@@ -41,6 +42,11 @@ class TaalQwen3ForCausalLM(StatefulQwen3ForCausalLM):
     @torch.no_grad()
     def _init_weights(self, module):
         super()._init_weights(module)
+        if isinstance(module, TaalLayer):
+            module.persistent_tokens.normal_(
+                mean=0.0,
+                std=module.config.persistent_init_std,
+            )
         if isinstance(module, NeuralMemory):
             # The wrapper's post_init traverses the already-built backbone a
             # second time, so restore the configured online-update controls.

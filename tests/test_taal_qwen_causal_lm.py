@@ -417,6 +417,17 @@ class TaalQwen3CausalLMTests(unittest.TestCase):
         self.assertTrue(all(".taal." in name for name in info["missing_keys"]))
         for name, value in native.state_dict().items():
             torch.testing.assert_close(loaded.state_dict()[name], value)
+        persistent = loaded.model.layers[0].taal.persistent_tokens
+        self.assertTrue(torch.isfinite(persistent).all())
+        self.assertGreater(torch.count_nonzero(persistent).item(), 0)
+        self.assertLess(persistent.abs().max().item(), 0.2)
+
+        # The host loader must initialize this standalone parameter, even if
+        # the constructor's nn.init call was suppressed during from_pretrained.
+        with torch.no_grad():
+            persistent.fill_(1e30)
+        loaded._init_weights(loaded.model.layers[0].taal)
+        self.assertLess(persistent.abs().max().item(), 0.2)
 
 
 if __name__ == "__main__":

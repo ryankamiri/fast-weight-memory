@@ -159,6 +159,10 @@ class TaalQwen3ModelTests(unittest.TestCase):
         self.assertTrue(all(".taal." in name for name in info["missing_keys"]))
         for name, value in native.state_dict().items():
             torch.testing.assert_close(loaded.state_dict()[name], value)
+        persistent = loaded.layers[0].taal.persistent_tokens
+        self.assertTrue(torch.isfinite(persistent).all())
+        self.assertGreater(torch.count_nonzero(persistent).item(), 0)
+        self.assertLess(persistent.abs().max().item(), 0.2)
 
     def test_rejects_incomplete_continuation_state(self):
         model = TaalQwen3Model(self.config()).eval()
