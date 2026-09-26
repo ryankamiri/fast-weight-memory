@@ -1,6 +1,7 @@
 import argparse
 from dataclasses import asdict
 import os
+import re
 import signal
 from threading import Event
 
@@ -107,6 +108,15 @@ def configure_trainable_parameters(model, scope: str):
     return parameters
 
 
+def resolve_revision(api: HfApi, repo_id: str, revision: str | None, *, dataset: bool) -> str:
+    """Keep immutable commit pins without requiring a network lookup at launch."""
+    if revision is not None and re.fullmatch(r"[0-9a-f]{40}", revision):
+        return revision
+    if dataset:
+        return api.dataset_info(repo_id, revision=revision).sha
+    return api.model_info(repo_id, revision=revision).sha
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="training/configs/ttcd/qwen3_0_6b.yaml")
@@ -124,10 +134,14 @@ def main():
         raise RuntimeError("This training recipe requires BF16 support")
     seed_everything(config.training.seed)
 
-    # Pin both snapshots once so all loaders and the model use the same revisions.
+    # Resolve symbolic refs once; an already-pinned commit needs no network call.
     api = HfApi()
-    config.model.revision = api.model_info(config.model.model_id, revision=config.model.revision).sha
-    config.data.revision = api.dataset_info(config.data.dataset_id, revision=config.data.revision).sha
+    config.model.revision = resolve_revision(
+        api, config.model.model_id, config.model.revision, dataset=False,
+    )
+    config.data.revision = resolve_revision(
+        api, config.data.dataset_id, config.data.revision, dataset=True,
+    )
     model = load_model(config).to(device)
     trainable_parameters = configure_trainable_parameters(
         model, config.training.trainable_parameters,

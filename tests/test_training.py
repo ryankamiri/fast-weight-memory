@@ -24,7 +24,7 @@ from training.config import (
     load_config,
 )
 from training.engine import build_scheduler, perplexity, train, validate
-from training.train import configure_trainable_parameters, load_model, verify_loading
+from training.train import configure_trainable_parameters, load_model, resolve_revision, verify_loading
 from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
@@ -85,6 +85,23 @@ def batch(value, size=1, length=4):
 
 
 class TrainingConfigTests(unittest.TestCase):
+    def test_pinned_revisions_skip_network_lookup(self):
+        api = SimpleNamespace(
+            model_info=lambda *args, **kwargs: self.fail("unexpected model lookup"),
+            dataset_info=lambda *args, **kwargs: self.fail("unexpected dataset lookup"),
+        )
+        revision = "a" * 40
+        self.assertEqual(resolve_revision(api, "model", revision, dataset=False), revision)
+        self.assertEqual(resolve_revision(api, "dataset", revision, dataset=True), revision)
+
+    def test_symbolic_revisions_are_resolved(self):
+        api = SimpleNamespace(
+            model_info=lambda *args, **kwargs: SimpleNamespace(sha="a" * 40),
+            dataset_info=lambda *args, **kwargs: SimpleNamespace(sha="b" * 40),
+        )
+        self.assertEqual(resolve_revision(api, "model", "main", dataset=False), "a" * 40)
+        self.assertEqual(resolve_revision(api, "dataset", None, dataset=True), "b" * 40)
+
     def test_2k_chunk_changes_only_chunk_size_and_run_name(self):
         folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
         original = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml")
@@ -254,6 +271,7 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertIsInstance(config.model, TaalModelConfig)
         self.assertIsInstance(config.validation, TaalValidationConfig)
         self.assertEqual(config.model.architecture, "taal")
+        self.assertEqual(config.model.revision, "da87bfb608c14b7cf20ba1ce41287e8de496c0cd")
         self.assertEqual(config.model.working_memory_size, 2048)
         self.assertEqual(config.model.memory_dim, 128)
         self.assertEqual(config.model.memory_chunk_size, 64)

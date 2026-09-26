@@ -20,6 +20,10 @@ cd "${SLURM_SUBMIT_DIR}"
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=4
+# Keep the model and dataset cache location independent of the submission shell.
+export HF_HOME="${HF_HOME:-/projects/llpr/amiri.ry/huggingface}"
+export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
+export HF_DATASETS_CACHE="${HF_HOME}/datasets"
 
 exec torchrun \
     --standalone --nnodes=1 --nproc-per-node=1 \
