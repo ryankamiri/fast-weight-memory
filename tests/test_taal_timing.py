@@ -71,6 +71,12 @@ class TaalTimingTests(unittest.TestCase):
         config._attn_implementation = "sdpa"
         model = TaalQwen3ForCausalLM(config).train()
         ids = torch.tensor([[1, 2, 3]])
+        baseline = model.forward_bridge_memory(
+            input_ids=ids,
+            delayed_labels=torch.tensor([[-100, -100, 3]]),
+            all_token_loss_weight=0.0,
+            delayed_answer_loss_weight=1.0,
+        )
         timer = TaalMicrobatchTimer(model, torch.device("cpu"), sequence_length=3)
         with timer:
             result = model.forward_bridge_memory(
@@ -79,7 +85,16 @@ class TaalTimingTests(unittest.TestCase):
                 all_token_loss_weight=0.0,
                 delayed_answer_loss_weight=1.0,
             )
-        self.assertEqual(timer.forward_record()["expected_memory_update_and_read_calls"], 10)
+        torch.testing.assert_close(result.loss, baseline.loss, atol=0, rtol=0)
+        record = timer.forward_record()
+        self.assertEqual(record["expected_memory_update_and_read_calls"], 10)
+        stages = record["stage_host_spans_all_layers"]
+        self.assertEqual(stages["gradient_execution"]["calls"], 10)
+        self.assertEqual(stages["read_execution"]["calls"], 10)
+        self.assertEqual(stages["committed_state_construction"]["calls"], 10)
+        self.assertEqual(stages["adapter_projection_in"]["calls"], 2)
+        self.assertIsNone(model.model.layers[0].taal.timing_observer)
+        self.assertIsNone(model.model.layers[0].taal.neural_memory.timing_observer)
         result.loss.backward()
         self.assertIsNotNone(model.model.layers[0].taal.memory_projection_in.weight.grad)
 

@@ -1,4 +1,5 @@
 from dataclasses import replace
+from time import perf_counter
 
 import torch
 from beartype import beartype
@@ -57,6 +58,8 @@ class NeuralMemory(nn.Module):
         self.momentum_projection = nn.Linear(dim, 1)
         self.write_strength_projection = nn.Linear(dim, 1)
         self.trace_observer = None
+        # Set only for an explicitly timed microbatch; no training-state effect.
+        self.timing_observer = None
         self.reset_update_controls()
 
     @torch.no_grad()
@@ -162,6 +165,8 @@ class NeuralMemory(nn.Module):
         # generation. Only training retains the higher-order graph used by the
         # outer delayed-answer objective.
         with torch.inference_mode(False), torch.enable_grad():
+            timer = self.timing_observer
+            tic = perf_counter() if timer is not None else 0.0
             if not self.training:
                 weights = {
                     name: value.detach().clone()
@@ -170,6 +175,8 @@ class NeuralMemory(nn.Module):
                 keys = keys.detach().clone()
                 values = values.detach().clone()
                 write_strength = write_strength.detach().clone()
+            if timer is not None:
+                timer("gradient_input_setup", perf_counter() - tic)
 
             def chunk_loss(
                 sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
@@ -199,8 +206,15 @@ class NeuralMemory(nn.Module):
 
             # One gradient per independent session, taken from the aggregate
             # weighted loss of all C tokens at the shared chunk-start weights.
+            tic = perf_counter() if timer is not None else 0.0
             batched_grad = vmap(grad(chunk_loss), in_dims=(0, 0, 0, 0))
-            return batched_grad(weights, keys, values, write_strength)
+            if timer is not None:
+                timer("gradient_transform_setup", perf_counter() - tic)
+            tic = perf_counter() if timer is not None else 0.0
+            result = batched_grad(weights, keys, values, write_strength)
+            if timer is not None:
+                timer("gradient_execution", perf_counter() - tic)
+            return result
 
     def _update(
         self,
@@ -211,6 +225,8 @@ class NeuralMemory(nn.Module):
         write_mask: Bool[torch.Tensor, "B C"],
     ) -> NeuralMemoryState:
         B, C, _ = keys.shape
+        timer = self.timing_observer
+        tic = perf_counter() if timer is not None else 0.0
         pending_count = state.pending_count + C
         if pending_count > self.config.chunk_size:
             raise ValueError("_update cannot cross a memory chunk boundary")
@@ -225,6 +241,9 @@ class NeuralMemory(nn.Module):
         )
         # A masked token can still read memory, but contributes no write loss.
         write_strength = torch.where(write_mask, write_strength, 0.0)
+        if timer is not None:
+            timer("write_strength_and_mask", perf_counter() - tic)
+        tic = perf_counter() if timer is not None else 0.0
         chunk_gradient: dict[str, Float32[torch.Tensor, "B D D"]] = (
             self._chunk_gradient(
                 state.weights,
@@ -233,6 +252,9 @@ class NeuralMemory(nn.Module):
                 write_strength,
             )
         )
+        if timer is not None:
+            timer("gradient_call_total", perf_counter() - tic)
+        tic = perf_counter() if timer is not None else 0.0
         input_sum: Float32[torch.Tensor, "B D"] = inputs.float().sum(dim=1)
 
         if state.pending_gradient is not None:
@@ -241,22 +263,29 @@ class NeuralMemory(nn.Module):
                 for name, gradient in chunk_gradient.items()
             }
             input_sum = state.pending_input_sum + input_sum
+        if timer is not None:
+            timer("input_and_gradient_accumulation", perf_counter() - tic)
 
         if pending_count < self.config.chunk_size:
+            tic = perf_counter() if timer is not None else 0.0
             if not self.training:
                 chunk_gradient = {
                     name: value.detach() for name, value in chunk_gradient.items()
                 }
                 input_sum = input_sum.detach()
-            return replace(
+            result = replace(
                 state,
                 pending_gradient=chunk_gradient,
                 pending_input_sum=input_sum,
                 pending_count=pending_count,
             )
+            if timer is not None:
+                timer("pending_state_construction", perf_counter() - tic)
+            return result
 
         # Summarize the completed chunk only to choose its forget/momentum controls;
         # the keys, values, and accumulated gradient determine what memory stores.
+        tic = perf_counter() if timer is not None else 0.0
         chunk_input: Float[torch.Tensor, "B D"] = (
             input_sum / self.config.chunk_size
         ).to(self.forget_projection.weight.dtype)
@@ -266,6 +295,9 @@ class NeuralMemory(nn.Module):
         momentum_retention: Float32[torch.Tensor, "B 1 1"] = (
             self.momentum_projection(chunk_input).sigmoid().reshape(B, 1, 1).float()
         )
+        if timer is not None:
+            timer("forget_and_momentum_controls", perf_counter() - tic)
+        tic = perf_counter() if timer is not None else 0.0
         next_momentum: dict[str, Float32[torch.Tensor, "B D D"]] = {
             name: momentum_retention * state.momentum[name] - gradient
             for name, gradient in chunk_gradient.items()
@@ -274,6 +306,9 @@ class NeuralMemory(nn.Module):
             name: (1.0 - forget) * weight + next_momentum[name]
             for name, weight in state.weights.items()
         }
+        if timer is not None:
+            timer("momentum_and_weight_update", perf_counter() - tic)
+        tic = perf_counter() if timer is not None else 0.0
 
         if not self.training:
             next_weights = {
@@ -290,7 +325,10 @@ class NeuralMemory(nn.Module):
             key_conv_history=state.key_conv_history,
             value_conv_history=state.value_conv_history,
         )
+        if timer is not None:
+            timer("committed_state_construction", perf_counter() - tic)
         if self.trace_observer is not None:
+            tic = perf_counter() if timer is not None else 0.0
             self.trace_observer(
                 state,
                 chunk_gradient,
@@ -298,6 +336,8 @@ class NeuralMemory(nn.Module):
                 write_mask,
                 write_strength,
             )
+            if timer is not None:
+                timer("trace_write_observer", perf_counter() - tic)
         return next_state
 
     def _read(
@@ -305,6 +345,8 @@ class NeuralMemory(nn.Module):
         weights: dict[str, Float32[torch.Tensor, "B D D"]],
         queries: Float[torch.Tensor, "B C D"],
     ) -> Float[torch.Tensor, "B C D"]:
+        timer = self.timing_observer
+        tic = perf_counter() if timer is not None else 0.0
         def read_one(
             sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
             query: Float32[torch.Tensor, "D"],
@@ -317,7 +359,13 @@ class NeuralMemory(nn.Module):
 
         per_session_read = vmap(read_one, in_dims=(None, 0))
         batched_read = vmap(per_session_read, in_dims=(0, 0))
-        return batched_read(weights, queries.float())
+        if timer is not None:
+            timer("read_transform_setup", perf_counter() - tic)
+        tic = perf_counter() if timer is not None else 0.0
+        result = batched_read(weights, queries.float())
+        if timer is not None:
+            timer("read_execution", perf_counter() - tic)
+        return result
 
     def _process_chunk(
         self,
@@ -346,7 +394,12 @@ class NeuralMemory(nn.Module):
             outputs.append(self._read(state.weights, queries[:, -1:]))
         else:
             outputs.append(self._read(previous_weights, queries))
-        return torch.cat(outputs, dim=1).to(output_dtype), state
+        timer = self.timing_observer
+        tic = perf_counter() if timer is not None else 0.0
+        output = torch.cat(outputs, dim=1).to(output_dtype)
+        if timer is not None:
+            timer("per_chunk_output_assembly", perf_counter() - tic)
+        return output, state
 
     @jaxtyped(typechecker=beartype)
     def forward(
@@ -356,6 +409,8 @@ class NeuralMemory(nn.Module):
         write_mask: Bool[torch.Tensor, "B S"] | None = None,
     ) -> tuple[Float[torch.Tensor, "B S D"], NeuralMemoryState]:
         batch_size, sequence_length, dim = inputs.shape
+        timer = self.timing_observer
+        tic = perf_counter() if timer is not None else 0.0
         if dim != self.config.dim:
             raise ValueError(f"Expected dimension {self.config.dim}, received {dim}")
         if state is None:
@@ -370,25 +425,39 @@ class NeuralMemory(nn.Module):
             )
         if sequence_length == 0:
             return inputs.new_empty(batch_size, 0, dim), state
+        if timer is not None:
+            timer("state_and_mask_setup", perf_counter() - tic)
 
+        tic = perf_counter() if timer is not None else 0.0
         queries: Float[torch.Tensor, "B S D"]
         query_history: Float[torch.Tensor, "B D S_history"]
         queries, query_history = self.query_conv(
             self.query_projection(inputs), state.query_conv_history
         )
+        if timer is not None:
+            timer("query_projection_and_conv", perf_counter() - tic)
+        tic = perf_counter() if timer is not None else 0.0
         keys: Float[torch.Tensor, "B S D"]
         key_history: Float[torch.Tensor, "B D S_history"]
         keys, key_history = self.key_conv(
             self.key_projection(inputs), state.key_conv_history
         )
+        if timer is not None:
+            timer("key_projection_and_conv", perf_counter() - tic)
+        tic = perf_counter() if timer is not None else 0.0
         values: Float[torch.Tensor, "B S D"]
         value_history: Float[torch.Tensor, "B D S_history"]
         values, value_history = self.value_conv(
             self.value_projection(inputs), state.value_conv_history
         )
+        if timer is not None:
+            timer("value_projection_and_conv", perf_counter() - tic)
+        tic = perf_counter() if timer is not None else 0.0
         queries = F.normalize(self.activation(queries), dim=-1, eps=1e-6)
         keys = F.normalize(self.activation(keys), dim=-1, eps=1e-6)
         values = self.activation(values)
+        if timer is not None:
+            timer("activation_and_normalization", perf_counter() - tic)
         C = self.config.chunk_size
         outputs: list[Float[torch.Tensor, "B C D"]] = []
         start = 0
@@ -413,6 +482,7 @@ class NeuralMemory(nn.Module):
         full_length = ((sequence_length - start) // C) * C
         # Prefill may contain full chunks; token-by-token decoding usually does not.
         if full_length > 0:
+            tic = perf_counter() if timer is not None else 0.0
             end = start + full_length
             N = full_length // C
             query_chunks: Float[torch.Tensor, "B N C D"] = queries[
@@ -430,8 +500,11 @@ class NeuralMemory(nn.Module):
             write_mask_chunks: Bool[torch.Tensor, "B N C"] = write_mask[
                 :, start:end
             ].reshape(batch_size, N, C)
+            if timer is not None:
+                timer("chunk_views_and_casts", perf_counter() - tic)
 
             for chunk_index in range(N):
+                tic = perf_counter() if timer is not None else 0.0
                 output, state = self._process_chunk(
                     state,
                     query_chunks[:, chunk_index],
@@ -441,6 +514,8 @@ class NeuralMemory(nn.Module):
                     write_mask_chunks[:, chunk_index],
                     inputs.dtype,
                 )
+                if timer is not None:
+                    timer("token_loop_dispatch_total", perf_counter() - tic)
                 outputs.append(output)
             start = end
 
@@ -457,10 +532,17 @@ class NeuralMemory(nn.Module):
             )
             outputs.append(output)
 
+        tic = perf_counter() if timer is not None else 0.0
         state = replace(
             state,
             query_conv_history=query_history,
             key_conv_history=key_history,
             value_conv_history=value_history,
         )
-        return torch.cat(outputs, dim=1), state
+        if timer is not None:
+            timer("conv_history_state_construction", perf_counter() - tic)
+        tic = perf_counter() if timer is not None else 0.0
+        result = torch.cat(outputs, dim=1)
+        if timer is not None:
+            timer("sequence_output_concatenation", perf_counter() - tic)
+        return result, state
