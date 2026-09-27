@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
 import math
+import os
 import time
 from typing import Callable
 
@@ -16,6 +17,7 @@ from .config import (
 )
 from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
+from .taal_timing import TaalMicrobatchTimer, print_taal_timing
 
 
 @dataclass
@@ -341,6 +343,7 @@ def train(
         raise ValueError("Training requires at least one trainable parameter")
     group_started = time.perf_counter()
     last_validation_step = None
+    timing_pending = os.environ.get("TAAL_TIMING_FIRST_BATCH") == "1"
 
     while progress.step < config.training.max_steps and not should_stop():
         train_loader.dataset.set_epoch(progress.epoch)
@@ -356,11 +359,20 @@ def train(
             input_tokens = B * S
             progress.tokens_seen += input_tokens
 
-            with precision_context(device):
-                output = forward_batch(model, batch, config.loss)
-                loss = output.loss
-                if isinstance(config.loss, CausalLMLossConfig):
-                    loss = config.loss.all_tokens_weight * loss
+            timer = None
+            if timing_pending and isinstance(model, TaalQwen3ForCausalLM):
+                timer = TaalMicrobatchTimer(model, device, S)
+                timing_pending = False
+                if device.type == "cuda":
+                    torch.cuda.reset_peak_memory_stats(device)
+            with timer if timer is not None else nullcontext():
+                with precision_context(device):
+                    output = forward_batch(model, batch, config.loss)
+                    loss = output.loss
+                    if isinstance(config.loss, CausalLMLossConfig):
+                        loss = config.loss.all_tokens_weight * loss
+            if timer is not None:
+                print_taal_timing(timer.forward_record())
             group.add(output, batch, input_tokens)
             # Do not retain the logits or returned fast-weight state across calls.
             del output, batch
@@ -381,7 +393,19 @@ def train(
                 continue
 
             # Match TTCD: average the microbatch gradients over this update.
+            backward_started_at = time.perf_counter() if timer is not None else None
             (loss / config.training.gradient_accumulation_steps).backward()
+            if backward_started_at is not None:
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                print_taal_timing({
+                    "kind": "taal_first_microbatch_backward",
+                    "backward_wall_s": round(time.perf_counter() - backward_started_at, 4),
+                    "peak_allocated_gib": (
+                        round(torch.cuda.max_memory_allocated(device) / 2**30, 3)
+                        if device.type == "cuda" else None
+                    ),
+                })
             del loss
             if should_stop():
                 break
