@@ -1,0 +1,25 @@
+.shell { grid-template-columns: 280px minmax(0, 1fr); }
+.sidebar { padding: 22px 12px; height: 100vh; min-height: 0; position: sticky; top: 0; }
+.brand { margin: 0 8px; border-bottom: 0; padding-bottom: 26px; }
+.trace-navigation { min-height: 0; overflow: auto; }
+.trace-search { width: calc(100% - 16px); margin: 0 8px 22px; border: 1px solid #303944; border-radius: 7px; padding: 9px 11px; color: #e5e9ee; background: #1a2029; font-size: 12px; }
+.trace-nav-heading { padding: 0 12px 12px; color: #87929e; font-size: 12px; }
+.trace-run { margin-bottom: 12px; }
+.trace-run-heading { display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 12px; background: none; color: #c9cfd7; border: 0; text-align: left; border-radius: 8px; font-size: 13px; }
+.trace-run-heading:hover { background: #202732; }
+.trace-run-heading svg { flex-shrink: 0; }
+.trace-run-heading > span:first-of-type { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trace-chevron { margin-left: auto; color: #7f8c9b; }
+.trace-entries { display: grid; gap: 3px; }
+.trace-entry { display: flex; flex-direction: column; gap: 5px; width: 100%; padding: 10px 12px 10px 39px; border: 0; border-radius: 9px; background: none; color: #c4cbd4; text-align: left; }
+.trace-entry:hover { background: #202732; }
+.trace-entry.active { background: #303039; color: #f0edf5; }
+.trace-entry-title { width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; }
+.trace-entry-condition { font-size: 11px; color: #8f9ca9; }
+.trace-entry.active .trace-entry-condition { color: #c0b4dc; }
+.trace-nav-note { margin: 25px 12px 12px; color: #748190; font-size: 10px; }
+.view-controls { display: flex; gap: 16px; align-items: center; }
+.layer-control { display: flex; align-items: center; gap: 8px; color: #92a0ae; font-size: 12px; }
+.layer-control select { background: #171e28; border: 1px solid #303a46; border-radius: 6px; padding: 7px 10px; color: #d9e1e8; }
+@media(max-width:1000px) { .shell { grid-template-columns: 240px minmax(0, 1fr); } .view-controls { gap: 8px; flex-wrap: wrap; } }
+@media(max-width:640px) { .shell { display: block; } .sidebar { position: static; height: auto; max-height: 350px; } }

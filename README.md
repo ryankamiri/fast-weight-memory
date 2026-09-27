@@ -191,4 +191,5 @@ training/       Typed configs, dataloaders, trainer, and Slurm launchers
 evaluation/     LongMemEval and bridge-memory evaluation tools
 scripts/        Dataset preparation utilities
 tests/          Architecture, state, training, and evaluation tests
+throwaways/     Vibe-coded, disposable research prototypes
 ```
