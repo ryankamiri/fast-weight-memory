@@ -128,19 +128,37 @@ class TaalQwen3ModelTests(unittest.TestCase):
         self.assertTrue(any(differences))
 
     def test_configuration_roundtrip_and_save_reload(self):
-        config = self.config(memory_chunk_size=2)
+        config = self.config(memory_chunk_size=2, memory_depth=3, memory_dim=6)
         restored_config = TaalQwen3Config.from_dict(config.to_dict())
         self.assertEqual(restored_config.working_memory_size, 4)
         self.assertEqual(restored_config.max_persistent_kv_tokens, 4)
         self.assertEqual(restored_config.taal_layer_config().memory.chunk_size, 2)
+        self.assertEqual(restored_config.memory_depth, 3)
+        self.assertEqual(restored_config.memory_dim, 6)
 
         model = TaalQwen3Model(config).eval()
         with tempfile.TemporaryDirectory() as folder:
             model.save_pretrained(folder)
             restored = TaalQwen3Model.from_pretrained(folder).eval()
         self.assertIsInstance(restored.config, TaalQwen3Config)
+        self.assertEqual(restored.config.memory_depth, 3)
+        self.assertEqual(restored.config.memory_dim, 6)
+        for layer in restored.layers:
+            memory = layer.taal.neural_memory
+            self.assertEqual(memory.config.depth, 3)
+            self.assertEqual(memory.config.dim, 6)
+            self.assertEqual(len(memory.memory_mlp.layers), 3)
+            for parameter in memory.memory_mlp.parameters():
+                self.assertEqual(parameter.shape, (6, 6))
         for name, value in model.state_dict().items():
             torch.testing.assert_close(restored.state_dict()[name], value)
+        with torch.no_grad():
+            expected = model(self.input_ids)
+            observed = restored(self.input_ids)
+        torch.testing.assert_close(observed.last_hidden_state, expected.last_hidden_state)
+        for layer_index, state in expected.state.memory_states.items():
+            for name, weight in state.weights.items():
+                torch.testing.assert_close(observed.state.memory_states[layer_index].weights[name], weight)
 
     def test_loads_native_qwen_backbone_weights(self):
         config = self.config()

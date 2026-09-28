@@ -6,7 +6,7 @@ from beartype import beartype
 from jaxtyping import Bool, Float, Float32, jaxtyped
 from torch import nn
 from torch.nn import functional as F
-from torch.func import functional_call, grad, vmap
+from torch.func import grad, vmap
 
 from architectures.shared.causal_conv import CausalDepthwiseConv1d
 
@@ -154,6 +154,51 @@ class NeuralMemory(nn.Module):
             if state.pending_input_sum.dtype != torch.float32:
                 raise ValueError("state.pending_input_sum must be float32")
 
+    def _predict_memory(
+        self,
+        sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
+        key: Float32[torch.Tensor, "D"],
+    ) -> Float[torch.Tensor, "D"]:
+        # Execute with the session's fast weights directly, avoiding module
+        # parameter substitution. The template still supplies init/checkpoint weights.
+        prediction = key
+        for layer_index in range(self.config.depth):
+            weight = sample_weights[f"layers.{layer_index}.weight"]
+            prediction = F.linear(prediction, weight)
+            if layer_index + 1 < self.config.depth:
+                prediction = F.silu(prediction)
+        return prediction
+
+    def _memory_loss(
+        self,
+        sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
+        chunk_keys: Float32[torch.Tensor, "C D"],
+        chunk_values: Float32[torch.Tensor, "C D"],
+        chunk_write_strength: Float32[torch.Tensor, "C"],
+    ) -> Float[torch.Tensor, ""]:
+        # Define the loss once rather than rebuilding annotated functions per write.
+        # Each call still evaluates fresh inputs and the current session weights.
+        C, _ = chunk_keys.shape
+
+        # With one token, vmap adds overhead without any batching benefit.
+        # Restore C afterward so the loss always receives C x D predictions.
+        predictions: Float[torch.Tensor, "C D"]
+        if C == 1:
+            key = chunk_keys.squeeze(0)
+            prediction = self._predict_memory(sample_weights, key)
+            predictions = prediction.unsqueeze(0)
+        else:
+            predict_tokens = vmap(self._predict_memory, in_dims=(None, 0))
+            predictions = predict_tokens(sample_weights, chunk_keys)
+
+        per_token_loss: Float32[torch.Tensor, "C"] = F.mse_loss(
+            predictions,
+            chunk_values,
+            reduction="none",
+        ).mean(dim=-1)
+        # L_chunk = sum_i theta_i * ||M_W(k_i) - v_i||^2 / D
+        return (chunk_write_strength * per_token_loss).sum()
+
     def _chunk_gradient(
         self,
         weights: dict[str, Float32[torch.Tensor, "B D D"]],
@@ -161,6 +206,7 @@ class NeuralMemory(nn.Module):
         values: Float32[torch.Tensor, "B C D"],
         write_strength: Float32[torch.Tensor, "B C"],
     ) -> dict[str, Float32[torch.Tensor, "B D D"]]:
+        B, _, _ = keys.shape
         # Online writes still require a local gradient during no-grad/inference
         # generation. Only training retains the higher-order graph used by the
         # outer delayed-answer objective.
@@ -178,40 +224,50 @@ class NeuralMemory(nn.Module):
             if timer is not None:
                 timer("gradient_input_setup", perf_counter() - tic)
 
-            def chunk_loss(
-                sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
-                chunk_keys: Float32[torch.Tensor, "C D"],
-                chunk_values: Float32[torch.Tensor, "C D"],
-                chunk_write_strength: Float32[torch.Tensor, "C"],
-            ) -> Float[torch.Tensor, ""]:
-                def predict(
-                    key: Float32[torch.Tensor, "D"],
-                ) -> Float[torch.Tensor, "D"]:
-                    return functional_call(
-                        self.memory_mlp,
-                        sample_weights,
-                        (key,),
-                    )
-
-                predictions: Float[torch.Tensor, "C D"] = vmap(predict)(
-                    chunk_keys
-                )
-                per_token_loss: Float32[torch.Tensor, "C"] = F.mse_loss(
-                    predictions,
-                    chunk_values,
-                    reduction="none",
-                ).mean(dim=-1)
-                # L_chunk = sum_i theta_i * ||M_W(k_i) - v_i||^2 / D
-                return (chunk_write_strength * per_token_loss).sum()
-
             # One gradient per independent session, taken from the aggregate
             # weighted loss of all C tokens at the shared chunk-start weights.
             tic = perf_counter() if timer is not None else 0.0
-            batched_grad = vmap(grad(chunk_loss), in_dims=(0, 0, 0, 0))
+            if B > 1:
+                # autograd.grad cannot run inside the session vmap transform.
+                per_session_grad = grad(self._memory_loss)
+                batched_grad = vmap(per_session_grad, in_dims=(0, 0, 0, 0))
             if timer is not None:
                 timer("gradient_transform_setup", perf_counter() - tic)
             tic = perf_counter() if timer is not None else 0.0
-            result = batched_grad(weights, keys, values, write_strength)
+            if B == 1:
+                # Direct autograd avoids torch.func transform overhead for B=1;
+                # CPU benchmarks halved gradient-call time without changing writes.
+                sample_weights = {}
+                for name, weight in weights.items():
+                    sample_weight = weight.squeeze(0)
+                    if not sample_weight.requires_grad:
+                        # Inference or frozen initial weights need a local leaf.
+                        # Never detach weights already connected to earlier writes.
+                        sample_weight = sample_weight.detach().requires_grad_(True)
+                    sample_weights[name] = sample_weight
+                sample_keys = keys.squeeze(0)
+                sample_values = values.squeeze(0)
+                sample_write_strength = write_strength.squeeze(0)
+
+                loss = self._memory_loss(
+                    sample_weights,
+                    sample_keys,
+                    sample_values,
+                    sample_write_strength,
+                )
+                # The outer answer loss must differentiate through this gradient
+                # to teach earlier writes. Keep the same graph policy as func.grad.
+                sample_gradients = torch.autograd.grad(
+                    loss,
+                    tuple(sample_weights.values()),
+                    create_graph=True,
+                )
+
+                result = {}
+                for name, gradient in zip(sample_weights, sample_gradients):
+                    result[name] = gradient.unsqueeze(0)
+            else:
+                result = batched_grad(weights, keys, values, write_strength)
             if timer is not None:
                 timer("gradient_execution", perf_counter() - tic)
             return result
@@ -345,24 +401,43 @@ class NeuralMemory(nn.Module):
         weights: dict[str, Float32[torch.Tensor, "B D D"]],
         queries: Float[torch.Tensor, "B C D"],
     ) -> Float[torch.Tensor, "B C D"]:
+        B, C, _ = queries.shape
         timer = self.timing_observer
         tic = perf_counter() if timer is not None else 0.0
         def read_one(
             sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
             query: Float32[torch.Tensor, "D"],
         ) -> Float[torch.Tensor, "D"]:
-            return functional_call(
-                self.memory_mlp,
-                sample_weights,
-                (query,),
-            )
+            return self._predict_memory(sample_weights, query)
 
-        per_session_read = vmap(read_one, in_dims=(None, 0))
-        batched_read = vmap(per_session_read, in_dims=(0, 0))
+        # A single query can be read directly, avoiding token-vmap overhead.
+        if C == 1:
+            def per_session_read(sample_weights, sample_queries):
+                query = sample_queries.squeeze(0)
+                read = read_one(sample_weights, query)
+                return read.unsqueeze(0)
+        else:
+            per_session_read = vmap(read_one, in_dims=(None, 0))
+
+        # Session batching is independent of token batching: only use it when B > 1.
+        if B == 1:
+            batched_read = per_session_read
+        else:
+            batched_read = vmap(per_session_read, in_dims=(0, 0))
         if timer is not None:
             timer("read_transform_setup", perf_counter() - tic)
         tic = perf_counter() if timer is not None else 0.0
-        result = batched_read(weights, queries.float())
+        if B == 1:
+            # Remove B for the direct call and restore it on the returned reads.
+            sample_weights = {}
+            for name, weight in weights.items():
+                sample_weights[name] = weight.squeeze(0)
+            sample_queries = queries.squeeze(0).float()
+
+            sample_reads = batched_read(sample_weights, sample_queries)
+            result = sample_reads.unsqueeze(0)
+        else:
+            result = batched_read(weights, queries.float())
         if timer is not None:
             timer("read_execution", perf_counter() - tic)
         return result

@@ -257,6 +257,7 @@ class TrainingConfigTests(unittest.TestCase):
         self.assertEqual(config.model.revision, "da87bfb608c14b7cf20ba1ce41287e8de496c0cd")
         self.assertEqual(config.model.working_memory_size, 2048)
         self.assertEqual(config.model.memory_dim, 128)
+        self.assertEqual(config.model.memory_depth, 2)
         self.assertEqual(config.model.memory_chunk_size, 1)
         self.assertEqual(config.data.train.conditions, ["no_bridge"])
         self.assertEqual((config.data.train.start, config.data.train.end), (0, 64))
@@ -452,7 +453,7 @@ class TrainingLoopTests(unittest.TestCase):
             working_memory_size=4,
             max_persistent_kv_tokens=2,
             memory_dim=4,
-            memory_depth=2,
+            memory_depth=3,
             memory_conv_kernel_size=2,
             num_persistent_tokens=2,
         )
@@ -466,6 +467,12 @@ class TrainingLoopTests(unittest.TestCase):
 
         self.assertIsInstance(model, TaalQwen3ForCausalLM)
         self.assertTrue(model.is_gradient_checkpointing)
+        self.assertEqual(model.config.memory_depth, config.model.memory_depth)
+        self.assertEqual(model.config.memory_dim, config.model.memory_dim)
+        memory = model.model.layers[0].taal.neural_memory
+        self.assertEqual(memory.config.depth, config.model.memory_depth)
+        self.assertEqual(memory.config.dim, config.model.memory_dim)
+        self.assertEqual(len(memory.memory_mlp.layers), config.model.memory_depth)
         for key, value in native.state_dict().items():
             torch.testing.assert_close(model.state_dict()[key], value)
 
