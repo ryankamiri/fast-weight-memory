@@ -255,8 +255,15 @@ class TaalKernelSampler:
             "mlp_calls": min(self.sample_calls, self.calls - self.warmup_calls),
             "trace_path": str(self.output_path),
             "self_cpu_total_us": sum(event.self_cpu_time_total for event in averages),
-            "self_device_total_us": sum(event.self_device_time_total for event in averages),
-            "semantics": "bounded forward sample includes intervening writes/reads; profiler overhead and warmup excluded from performance conclusions; inspect timeline for launch gaps",
+            # Kineto reports device time on both CPU operators and CUDA kernels.
+            # Count only kernels, matching PyTorch's table total, not both copies.
+            "self_device_total_us": sum(
+                event.self_device_time_total
+                for event in averages
+                if event.device_type == torch.autograd.DeviceType.CUDA
+                and not event.is_user_annotation
+            ),
+            "semantics": "bounded forward sample includes intervening writes/reads and profiler overhead; device total sums kernels only; inspect timeline for launch gaps, not uninstrumented throughput",
         })
         print(averages.table(sort_by="self_cpu_time_total", row_limit=15), flush=True)
         if self.device.type == "cuda":

@@ -2,7 +2,7 @@ import copy
 import unittest
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
 import torch
@@ -229,6 +229,28 @@ class TaalTimingTests(unittest.TestCase):
                 pass
         self.assertFalse(timer.samples)
         recorded.assert_not_called()
+
+    def test_kernel_summary_does_not_double_count_operator_and_kernel_times(self):
+        sampler = object.__new__(TaalKernelSampler)
+        sampler.device = torch.device("cpu")
+        sampler.warmup_calls, sampler.sample_calls, sampler.calls = 0, 2, 2
+        sampler.profiler = MagicMock()
+        averages = sampler.profiler.key_averages.return_value
+        averages.__iter__.side_effect = lambda: iter([
+            SimpleNamespace(self_cpu_time_total=3, self_device_time_total=5,
+                            device_type=torch.autograd.DeviceType.CPU, is_user_annotation=False),
+            SimpleNamespace(self_cpu_time_total=0, self_device_time_total=5,
+                            device_type=torch.autograd.DeviceType.CUDA, is_user_annotation=False),
+            SimpleNamespace(self_cpu_time_total=0, self_device_time_total=100,
+                            device_type=torch.autograd.DeviceType.CUDA, is_user_annotation=True),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            sampler.output_path = Path(directory) / "sample.json"
+            with patch("training.taal_timing.print_taal_timing") as recorded, patch("builtins.print"):
+                sampler._finish()
+        record = recorded.call_args.args[0]
+        self.assertEqual(record["self_cpu_total_us"], 3)
+        self.assertEqual(record["self_device_total_us"], 5)
 
 
 if __name__ == "__main__":
