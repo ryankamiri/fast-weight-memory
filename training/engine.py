@@ -17,7 +17,7 @@ from .config import (
 )
 from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
-from .taal_timing import TaalMicrobatchTimer, print_taal_timing
+from .taal_timing import TaalKernelSampler, TaalMicrobatchTimer, print_taal_timing
 
 
 @dataclass
@@ -360,19 +360,30 @@ def train(
             progress.tokens_seen += input_tokens
 
             timer = None
+            sampler = None
             if timing_pending and isinstance(model, TaalQwen3ForCausalLM):
                 timer = TaalMicrobatchTimer(model, device, S)
                 timing_pending = False
                 if device.type == "cuda":
                     torch.cuda.reset_peak_memory_stats(device)
-            with timer if timer is not None else nullcontext():
+                if os.environ.get("TAAL_KERNEL_SAMPLE") == "1":
+                    sampler = TaalKernelSampler(
+                        model, device,
+                        f"output/timing/{os.environ.get('SLURM_JOB_ID', 'local')}/train-forward.json",
+                    )
+            with (
+                timer if timer is not None else nullcontext(),
+                sampler if sampler is not None else nullcontext(),
+            ):
                 with precision_context(device):
                     output = forward_batch(model, batch, config.loss)
                     loss = output.loss
                     if isinstance(config.loss, CausalLMLossConfig):
                         loss = config.loss.all_tokens_weight * loss
             if timer is not None:
-                print_taal_timing(timer.forward_record())
+                record = timer.forward_record()
+                record["kernel_sample_instrumented"] = sampler is not None
+                print_taal_timing(record)
             group.add(output, batch, input_tokens)
             # Do not retain the logits or returned fast-weight state across calls.
             del output, batch
@@ -405,6 +416,7 @@ def train(
                         round(torch.cuda.max_memory_allocated(device) / 2**30, 3)
                         if device.type == "cuda" else None
                     ),
+                    **timer.backward_record(),
                 })
             del loss
             if should_stop():

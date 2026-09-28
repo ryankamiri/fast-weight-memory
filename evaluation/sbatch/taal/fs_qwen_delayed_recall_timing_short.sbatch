@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=fs-qwen-taal-timing-short
+#SBATCH --job-name=fs-qwen-taal-audit-timing-short
 #SBATCH --partition=gpu-short
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -7,17 +7,15 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
-#SBATCH --signal=B:TERM@900
-#SBATCH --output=logs/fs-qwen-taal-timing-short-%j.log
-#SBATCH --error=logs/fs-qwen-taal-timing-short-%j.log
+#SBATCH --output=logs/fs-qwen-taal-audit-timing-short-%j.log
+#SBATCH --error=logs/fs-qwen-taal-audit-timing-short-%j.log
 
 set -eo pipefail
-
 source /shared/EL9/explorer/anaconda3/2024.06/etc/profile.d/conda.sh
 conda activate fast-weight-memory
 set -u
-
 cd "${SLURM_SUBMIT_DIR}"
+
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=4
@@ -26,12 +24,19 @@ export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
 export HF_DATASETS_CACHE="${HF_HOME}/datasets"
 export http_proxy="${http_proxy:-http://10.99.0.130:3128}"
 export https_proxy="${https_proxy:-http://10.99.0.130:3128}"
-export CHECKPOINT_RUN_ID="taal-pilot1a-timing-${SLURM_JOB_ID}"
 export TAAL_TIMING_FIRST_BATCH=1
 export TAAL_KERNEL_SAMPLE=1
 
-# Same Pilot 1A config, including per-token memory writes. Only timing is added.
+if (( $# < 1 )); then
+    echo "Usage: sbatch $0 CHECKPOINT [OUTPUT_DIR]" >&2
+    exit 2
+fi
+
+# Separate additive diagnostic: preserve all Pilot 1B examples/conditions/traces.
 python -m utils.explorer_preflight \
-    --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml
-exec python -m training.train \
-    --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml
+    --config evaluation/configs/taal/delayed_recall_state_audit.yaml \
+    --checkpoint "$1"
+exec python -m evaluation.taal.state_audit \
+    --config evaluation/configs/taal/delayed_recall_state_audit.yaml \
+    --checkpoint "$1" \
+    --output-dir "${2:-output/taal/pilot-1b-timing-${SLURM_JOB_ID}}"

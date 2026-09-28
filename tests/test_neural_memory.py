@@ -8,7 +8,7 @@ from torch.func import functional_call, grad, vmap
 from torch.nn import functional as F
 
 from architectures.titans.configuration import NeuralMemoryConfig
-from architectures.titans.neural_memory import NeuralMemory
+from architectures.titans.neural_memory import MemoryMLPResult, NeuralMemory
 
 
 def always_vmap_gradient(memory, weights, keys, values, write_strength):
@@ -22,7 +22,7 @@ def always_vmap_gradient(memory, weights, keys, values, write_strength):
 
         def chunk_loss(sample_weights, chunk_keys, chunk_values, strength):
             def predict(key):
-                return functional_call(memory.memory_mlp, sample_weights, (key,))
+                return functional_call(memory.memory_mlp, sample_weights, (key,)).predicted_values
 
             predictions = vmap(predict)(chunk_keys)
             loss = F.mse_loss(predictions, chunk_values, reduction="none").mean(-1)
@@ -35,10 +35,21 @@ def always_vmap_gradient(memory, weights, keys, values, write_strength):
 
 def always_vmap_read(memory, weights, queries):
     def read_one(sample_weights, query):
-        return functional_call(memory.memory_mlp, sample_weights, (query,))
+        return functional_call(memory.memory_mlp, sample_weights, (query,)).predicted_values
 
     per_session_read = vmap(read_one, in_dims=(None, 0))
     return vmap(per_session_read, in_dims=(0, 0))(weights, queries.float())
+
+
+def indexed_chunk_parts(chunks, dim=0):
+    """Reproduce the old per-chunk indexing for split-once parity tests."""
+    if dim != 1:
+        raise ValueError("The memory loop splits only its chunk dimension")
+    _, N, *remaining_dimensions = chunks.shape
+    parts = []
+    for chunk_index in range(N):
+        parts.append(chunks[:, chunk_index])
+    return tuple(parts)
 
 
 class NeuralMemoryTests(unittest.TestCase):
@@ -55,7 +66,114 @@ class NeuralMemoryTests(unittest.TestCase):
         )
         self.inputs = torch.randn(2, 6, 4)
 
-    def test_singleton_paths_skip_only_the_matching_vmap(self):
+    def _assert_states_close(self, actual, expected):
+        for field_name, expected_value in vars(expected).items():
+            actual_value = getattr(actual, field_name)
+            if isinstance(expected_value, dict):
+                self.assertEqual(actual_value.keys(), expected_value.keys())
+                for name, value in expected_value.items():
+                    torch.testing.assert_close(actual_value[name], value)
+            elif isinstance(expected_value, torch.Tensor):
+                torch.testing.assert_close(actual_value, expected_value)
+            else:
+                self.assertEqual(actual_value, expected_value)
+
+    def test_split_once_matches_indexing_outputs_states_and_delayed_gradients(self):
+        for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
+            for frozen_initial_weights in (False, True):
+                with self.subTest(B=B, C=C, frozen=frozen_initial_weights):
+                    config = NeuralMemoryConfig(dim=4, chunk_size=C, conv_kernel_size=2)
+                    memory = NeuralMemory(config).train()
+                    if frozen_initial_weights:
+                        memory.memory_mlp.requires_grad_(False)
+                    reference = copy.deepcopy(memory)
+                    inputs = torch.randn(B, 11, 4, requires_grad=True)
+                    reference_inputs = inputs.detach().clone().requires_grad_(True)
+                    write_mask = torch.ones(B, 11, dtype=torch.bool)
+                    write_mask[:, 1::3] = False
+
+                    output, state = memory(inputs, write_mask=write_mask)
+                    with patch.object(torch.Tensor, "unbind", indexed_chunk_parts):
+                        expected_output, expected_state = reference(
+                            reference_inputs, write_mask=write_mask
+                        )
+                    torch.testing.assert_close(output, expected_output)
+                    self._assert_states_close(state, expected_state)
+
+                    output[:, -1].square().mean().backward()
+                    expected_output[:, -1].square().mean().backward()
+                    torch.testing.assert_close(inputs.grad, reference_inputs.grad)
+                    self.assertGreater(inputs.grad[:, :2].abs().sum().item(), 0)
+                    for (name, parameter), (_, expected_parameter) in zip(
+                        memory.named_parameters(), reference.named_parameters()
+                    ):
+                        if parameter.requires_grad:
+                            self.assertIsNotNone(parameter.grad, name)
+                            torch.testing.assert_close(parameter.grad, expected_parameter.grad)
+                        else:
+                            self.assertIsNone(parameter.grad)
+                            self.assertIsNone(expected_parameter.grad)
+
+    def test_split_once_matches_indexing_across_training_call_boundaries(self):
+        for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
+            with self.subTest(B=B, C=C):
+                memory = NeuralMemory(NeuralMemoryConfig(dim=4, chunk_size=C)).train()
+                reference = copy.deepcopy(memory)
+                inputs = torch.randn(B, 11, 4, requires_grad=True)
+                reference_inputs = inputs.detach().clone().requires_grad_(True)
+                write_mask = torch.ones(B, 11, dtype=torch.bool)
+                write_mask[:, 2::3] = False
+                state = None
+                expected_state = None
+                outputs = []
+                expected_outputs = []
+                # C=3 carries an incomplete chunk into the second call, then
+                # executes full chunks and retains another incomplete chunk.
+                for start, end in ((0, 2), (2, 11)):
+                    output, state = memory(
+                        inputs[:, start:end], state, write_mask[:, start:end]
+                    )
+                    with patch.object(torch.Tensor, "unbind", indexed_chunk_parts):
+                        expected_output, expected_state = reference(
+                            reference_inputs[:, start:end],
+                            expected_state,
+                            write_mask[:, start:end],
+                        )
+                    outputs.append(output)
+                    expected_outputs.append(expected_output)
+                    self._assert_states_close(state, expected_state)
+
+                output = torch.cat(outputs, dim=1)
+                expected_output = torch.cat(expected_outputs, dim=1)
+                torch.testing.assert_close(output, expected_output)
+                output[:, -1].square().mean().backward()
+                expected_output[:, -1].square().mean().backward()
+                torch.testing.assert_close(inputs.grad, reference_inputs.grad)
+                for (name, parameter), (_, expected_parameter) in zip(
+                    memory.named_parameters(), reference.named_parameters()
+                ):
+                    self.assertIsNotNone(parameter.grad, name)
+                    torch.testing.assert_close(parameter.grad, expected_parameter.grad)
+
+    def test_split_once_matches_indexing_in_inference_modes(self):
+        for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
+            for context in (torch.no_grad, torch.inference_mode):
+                with self.subTest(B=B, C=C, context=context.__name__):
+                    memory = NeuralMemory(NeuralMemoryConfig(dim=4, chunk_size=C)).eval()
+                    reference = copy.deepcopy(memory)
+                    inputs = torch.randn(B, 11, 4)
+                    write_mask = torch.ones(B, 11, dtype=torch.bool)
+                    write_mask[:, 1::3] = False
+                    with context():
+                        output, state = memory(inputs, write_mask=write_mask)
+                        with patch.object(torch.Tensor, "unbind", indexed_chunk_parts):
+                            expected_output, expected_state = reference(
+                                inputs, write_mask=write_mask
+                            )
+                    torch.testing.assert_close(output, expected_output)
+                    self._assert_states_close(state, expected_state)
+
+    def test_batched_writes_and_reads_skip_vmap(self):
         memory = NeuralMemory(self.config).train()
         D = self.config.dim
         for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
@@ -67,11 +185,9 @@ class NeuralMemoryTests(unittest.TestCase):
                 keys = torch.randn(B, C, D, requires_grad=True)
                 values = torch.randn(B, C, D, requires_grad=True)
                 strength = torch.rand(B, C, requires_grad=True)
-                expected_transforms = int(B > 1) + int(C > 1)
-
-                with patch("architectures.titans.neural_memory.vmap", wraps=vmap) as mapped:
+                with patch("torch.func.vmap", wraps=vmap) as mapped:
                     actual = memory._chunk_gradient(weights, keys, values, strength)
-                self.assertEqual(mapped.call_count, expected_transforms)
+                self.assertEqual(mapped.call_count, 0)
                 reference = always_vmap_gradient(memory, weights, keys, values, strength)
                 for name in weights:
                     self.assertEqual(actual[name].shape, (B, D, D))
@@ -87,9 +203,9 @@ class NeuralMemoryTests(unittest.TestCase):
                 for observed, expected in zip(actual_outer, reference_outer):
                     torch.testing.assert_close(observed, expected)
 
-                with patch("architectures.titans.neural_memory.vmap", wraps=vmap) as mapped:
-                    actual_read = memory._read(weights, keys)
-                self.assertEqual(mapped.call_count, expected_transforms)
+                with patch("torch.func.vmap", wraps=vmap) as mapped:
+                    actual_read = memory.memory_mlp(keys.float(), weights=weights).predicted_values
+                self.assertEqual(mapped.call_count, 0)
                 reference_read = always_vmap_read(memory, weights, keys)
                 self.assertEqual(actual_read.shape, (B, C, D))
                 torch.testing.assert_close(actual_read, reference_read)
@@ -106,7 +222,6 @@ class NeuralMemoryTests(unittest.TestCase):
                 memory = NeuralMemory(config).train()
                 reference = copy.deepcopy(memory)
                 reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
-                reference._read = MethodType(always_vmap_read, reference)
                 inputs = torch.randn(B, 7, 4, requires_grad=True)
                 reference_inputs = inputs.detach().clone().requires_grad_(True)
                 write_mask = torch.ones(B, 7, dtype=torch.bool)
@@ -139,7 +254,7 @@ class NeuralMemoryTests(unittest.TestCase):
                     self.assertIsNotNone(parameter.grad, name)
                     torch.testing.assert_close(parameter.grad, expected_parameter.grad)
 
-    def test_singleton_gradient_uses_autograd_without_func_transform(self):
+    def test_explicit_writes_do_not_invoke_inner_autograd_or_vmap(self):
         memory = NeuralMemory(NeuralMemoryConfig(dim=4))
         for B in (1, 2):
             with self.subTest(B=B):
@@ -147,22 +262,26 @@ class NeuralMemoryTests(unittest.TestCase):
                 keys = torch.randn(B, 1, 4)
                 values = torch.randn(B, 1, 4)
                 strength = torch.rand(B, 1)
-                with patch("architectures.titans.neural_memory.grad", wraps=grad) as transformed:
+                with (
+                    patch("torch.autograd.grad", side_effect=AssertionError("No inner autograd")),
+                    patch("torch.func.grad", side_effect=AssertionError("No inner func.grad")),
+                    patch("torch.func.vmap", side_effect=AssertionError("No write vmap")),
+                ):
                     gradients = memory._chunk_gradient(weights, keys, values, strength)
-                self.assertEqual(transformed.call_count, int(B > 1))
                 for gradient in gradients.values():
                     self.assertEqual(gradient.shape, (B, 4, 4))
 
-    def test_autograd_preserves_delayed_gradients_with_frozen_initial_weights(self):
-        for C in (1, 3):
-            with self.subTest(C=C):
-                memory = NeuralMemory(NeuralMemoryConfig(dim=4, chunk_size=C)).train()
+    def test_explicit_preserves_delayed_gradients_with_frozen_initial_weights(self):
+        cases = ((depth, B, C) for depth in (1, 2, 3, 4) for B in (1, 2) for C in (1, 3))
+        for depth, B, C in cases:
+            with self.subTest(depth=depth, B=B, C=C):
+                memory = NeuralMemory(NeuralMemoryConfig(dim=4, depth=depth, chunk_size=C)).train()
                 memory.memory_mlp.requires_grad_(False)
                 reference = copy.deepcopy(memory)
                 reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
-                inputs = torch.randn(1, 7, 4, requires_grad=True)
+                inputs = torch.randn(B, 7, 4, requires_grad=True)
                 reference_inputs = inputs.detach().clone().requires_grad_(True)
-                initial_weights = memory.initial_state(1).weights
+                initial_weights = memory.initial_state(B).weights
                 self.assertTrue(all(not weight.requires_grad for weight in initial_weights.values()))
 
                 outputs = []
@@ -186,7 +305,7 @@ class NeuralMemoryTests(unittest.TestCase):
                     else:
                         self.assertIsNone(parameter.grad)
 
-    def test_autograd_eval_writes_under_no_grad(self):
+    def test_explicit_eval_writes_under_no_grad(self):
         memory = NeuralMemory(NeuralMemoryConfig(dim=4, chunk_size=1)).eval()
         reference = copy.deepcopy(memory)
         reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
@@ -204,7 +323,25 @@ class NeuralMemoryTests(unittest.TestCase):
             torch.testing.assert_close(state.weights[name], expected_state.weights[name])
             self.assertEqual(initial_state.weights[name].requires_grad, initial_requires_grad[name])
 
-    def test_reusable_loss_supports_configurable_memory_depth(self):
+    def test_explicit_eval_gradients_do_not_retain_a_graph(self):
+        for depth in (1, 2, 3, 4):
+            for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
+                with self.subTest(depth=depth, B=B, C=C):
+                    memory = NeuralMemory(NeuralMemoryConfig(dim=4, depth=depth)).eval()
+                    weights = memory.initial_state(B).weights
+                    keys = torch.randn(B, C, 4, requires_grad=True)
+                    values = torch.randn(B, C, 4, requires_grad=True)
+                    strength = torch.rand(B, C, requires_grad=True)
+                    expected = always_vmap_gradient(memory, weights, keys, values, strength)
+                    # Eval must not retain an inner write graph even if its caller
+                    # has gradient recording enabled.
+                    actual = memory._chunk_gradient(weights, keys, values, strength)
+                    for name in weights:
+                        torch.testing.assert_close(actual[name], expected[name])
+                        self.assertFalse(actual[name].requires_grad)
+                        self.assertIsNone(actual[name].grad_fn)
+
+    def test_explicit_gradients_support_configurable_memory_depth(self):
         D = 4
         for depth in (1, 2, 3, 4):
             for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
@@ -225,10 +362,20 @@ class NeuralMemoryTests(unittest.TestCase):
                     with patch.object(
                         memory.memory_mlp,
                         "forward",
-                        side_effect=AssertionError("Online execution must use tensor operations"),
-                    ):
+                        wraps=memory.memory_mlp.forward,
+                    ) as mlp_forward:
                         actual = memory._chunk_gradient(weights, keys, values, strength)
-                        actual_reads = memory._read(weights, keys)
+                        actual_reads = memory.memory_mlp(keys.float(), weights=weights).predicted_values
+                    self.assertEqual(mlp_forward.call_count, 2)
+                    write_call, read_call = mlp_forward.call_args_list
+                    self.assertTrue(write_call.kwargs["return_intermediates"])
+                    self.assertNotIn("return_intermediates", read_call.kwargs)
+                    self.assertIsNotNone(write_call.kwargs["weights"])
+                    self.assertIsNotNone(read_call.kwargs["weights"])
+                    for call in (write_call, read_call):
+                        self.assertEqual(call.args[0].shape, (B, C, D))
+                        for weight in call.kwargs["weights"].values():
+                            self.assertEqual(weight.shape, (B, D, D))
                     for name in weights:
                         torch.testing.assert_close(actual[name], expected[name])
                     torch.testing.assert_close(actual_reads, expected_reads)
@@ -249,13 +396,44 @@ class NeuralMemoryTests(unittest.TestCase):
                     for observed, reference in zip(actual_outer, expected_outer):
                         torch.testing.assert_close(observed, reference)
 
+    def test_memory_mlp_forward_returns_optional_connected_intermediates(self):
+        for depth in (1, 2, 3, 4):
+            for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
+                with self.subTest(depth=depth, B=B, C=C):
+                    memory = NeuralMemory(NeuralMemoryConfig(dim=4, depth=depth))
+                    weights = {
+                        name: torch.randn_like(weight, requires_grad=True)
+                        for name, weight in memory.initial_state(B).weights.items()
+                    }
+                    keys = torch.randn(B, C, 4, requires_grad=True)
+                    result = memory.memory_mlp(
+                        keys, weights=weights, return_intermediates=True
+                    )
+                    reads = memory.memory_mlp(keys, weights=weights)
+                    self.assertIsInstance(result, MemoryMLPResult)
+                    self.assertIsInstance(reads, MemoryMLPResult)
+                    self.assertIsNone(reads.keys_by_layer)
+                    self.assertIsNone(reads.values_before_silu)
+                    torch.testing.assert_close(result.predicted_values, reads.predicted_values)
+                    torch.testing.assert_close(result.predicted_values, always_vmap_read(memory, weights, keys))
+                    self.assertIs(result.keys_by_layer[0], keys)
+                    self.assertEqual(len(result.keys_by_layer), depth)
+                    self.assertEqual(len(result.values_before_silu), depth)
+                    self.assertIs(result.predicted_values, result.values_before_silu[-1])
+                    for tensor in result.values_before_silu:
+                        self.assertTrue(tensor.requires_grad)
+                        self.assertIsNotNone(tensor.grad_fn)
+                    # The returned intermediates remain usable in the outer graph.
+                    loss = sum(tensor.square().mean() for tensor in result.values_before_silu)
+                    gradients = torch.autograd.grad(loss, (keys, *weights.values()))
+                    self.assertTrue(all(torch.isfinite(gradient).all() for gradient in gradients))
+
     def test_singleton_paths_preserve_inference_writes(self):
         for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
             with self.subTest(B=B, C=C):
                 memory = NeuralMemory(NeuralMemoryConfig(dim=4, chunk_size=C)).eval()
                 reference = copy.deepcopy(memory)
                 reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
-                reference._read = MethodType(always_vmap_read, reference)
                 inputs = torch.randn(B, 7, 4)
                 with torch.inference_mode():
                     output, state = memory(inputs)

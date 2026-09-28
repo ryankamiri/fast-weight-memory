@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from time import perf_counter
 
 import torch
@@ -6,12 +6,20 @@ from beartype import beartype
 from jaxtyping import Bool, Float, Float32, jaxtyped
 from torch import nn
 from torch.nn import functional as F
-from torch.func import grad, vmap
 
 from architectures.shared.causal_conv import CausalDepthwiseConv1d
 
 from .configuration import NeuralMemoryConfig
 from .state import NeuralMemoryState
+
+
+@dataclass
+class MemoryMLPResult:
+    """Predicted values and optional per-layer tensors for the write derivative."""
+
+    predicted_values: Float[torch.Tensor, "*B D"]
+    keys_by_layer: list[Float[torch.Tensor, "*B D"]] | None = None
+    values_before_silu: list[Float[torch.Tensor, "*B D"]] | None = None
 
 
 class MemoryMLP(nn.Module):
@@ -23,19 +31,58 @@ class MemoryMLP(nn.Module):
             nn.Linear(dim, dim, bias=False) for _ in range(depth)
         )
         self.activation = nn.SiLU()
+        self.timing_observer = None
 
-    @jaxtyped(typechecker=beartype)
     def forward(
         self,
-        inputs: Float[torch.Tensor, "D"],
-    ) -> Float[torch.Tensor, "D"]:
-        # This is intentionally one session vector, not B x D: vmap owns the
-        # outer batch dimension because every session has different fast weights.
-        for index, layer in enumerate(self.layers):
-            inputs = layer(inputs)
-            if index + 1 != len(self.layers):
-                inputs = self.activation(inputs)
-        return inputs
+        keys: Float[torch.Tensor, "*B D"],
+        weights: dict[str, Float[torch.Tensor, "... D D"]] | None = None,
+        return_intermediates: bool = False,
+    ) -> MemoryMLPResult:
+        """Evaluate M(keys) with current fast weights, or initial weights if omitted."""
+        keys_by_layer = None
+        values_before_silu = None
+        if return_intermediates:
+            keys_by_layer = []
+            values_before_silu = []
+
+        # v_hat = M(k): k^(0) = k; z^(l) = W^(l) k^(l).
+        # Hidden layers pass SiLU(z^(l)) as the next layer's transformed key.
+        # The final layer omits SiLU and returns the predicted value.
+        layer_keys: Float[torch.Tensor, "*B D"] = keys
+        timer = self.timing_observer
+        operation = "write" if return_intermediates else "read"
+        for layer_index, layer in enumerate(self.layers):
+            if weights is None:
+                weight = layer.weight
+            else:
+                weight = weights[f"layers.{layer_index}.weight"]
+            if keys_by_layer is not None:
+                keys_by_layer.append(layer_keys)
+
+            # (B C D) @ (B D D) -> (B C D). Linear weights store output x input,
+            # so transpose their last two axes; @ preserves separate sessions.
+            tic = perf_counter() if timer is not None else 0.0
+            linear_values: Float[torch.Tensor, "*B D"] = (
+                layer_keys @ weight.transpose(-1, -2)
+            )
+            if timer is not None:
+                timer(f"{operation}_mlp_linear", perf_counter() - tic)
+            if values_before_silu is not None:
+                values_before_silu.append(linear_values)
+
+            layer_keys = linear_values
+            if layer_index + 1 < len(self.layers):
+                tic = perf_counter() if timer is not None else 0.0
+                layer_keys = self.activation(linear_values)
+                if timer is not None:
+                    timer(f"{operation}_mlp_silu", perf_counter() - tic)
+
+        return MemoryMLPResult(
+            predicted_values=layer_keys,
+            keys_by_layer=keys_by_layer,
+            values_before_silu=values_before_silu,
+        )
 
 
 class NeuralMemory(nn.Module):
@@ -77,8 +124,8 @@ class NeuralMemory(nn.Module):
         if type(batch_size) is not int or batch_size < 1:
             raise ValueError("batch_size must be a positive integer")
 
-        # Disable an enclosing inference_mode so future online writes can request
-        # gradients with respect to these fast parameter copies.
+        # Keep ordinary tensors so this state can participate in later training,
+        # even when initialized inside an enclosing inference_mode.
         with torch.inference_mode(False):
             weights: dict[str, Float32[torch.Tensor, "B D D"]] = {
                 name: parameter.float().unsqueeze(0).expand(
@@ -154,51 +201,6 @@ class NeuralMemory(nn.Module):
             if state.pending_input_sum.dtype != torch.float32:
                 raise ValueError("state.pending_input_sum must be float32")
 
-    def _predict_memory(
-        self,
-        sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
-        key: Float32[torch.Tensor, "D"],
-    ) -> Float[torch.Tensor, "D"]:
-        # Execute with the session's fast weights directly, avoiding module
-        # parameter substitution. The template still supplies init/checkpoint weights.
-        prediction = key
-        for layer_index in range(self.config.depth):
-            weight = sample_weights[f"layers.{layer_index}.weight"]
-            prediction = F.linear(prediction, weight)
-            if layer_index + 1 < self.config.depth:
-                prediction = F.silu(prediction)
-        return prediction
-
-    def _memory_loss(
-        self,
-        sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
-        chunk_keys: Float32[torch.Tensor, "C D"],
-        chunk_values: Float32[torch.Tensor, "C D"],
-        chunk_write_strength: Float32[torch.Tensor, "C"],
-    ) -> Float[torch.Tensor, ""]:
-        # Define the loss once rather than rebuilding annotated functions per write.
-        # Each call still evaluates fresh inputs and the current session weights.
-        C, _ = chunk_keys.shape
-
-        # With one token, vmap adds overhead without any batching benefit.
-        # Restore C afterward so the loss always receives C x D predictions.
-        predictions: Float[torch.Tensor, "C D"]
-        if C == 1:
-            key = chunk_keys.squeeze(0)
-            prediction = self._predict_memory(sample_weights, key)
-            predictions = prediction.unsqueeze(0)
-        else:
-            predict_tokens = vmap(self._predict_memory, in_dims=(None, 0))
-            predictions = predict_tokens(sample_weights, chunk_keys)
-
-        per_token_loss: Float32[torch.Tensor, "C"] = F.mse_loss(
-            predictions,
-            chunk_values,
-            reduction="none",
-        ).mean(dim=-1)
-        # L_chunk = sum_i theta_i * ||M_W(k_i) - v_i||^2 / D
-        return (chunk_write_strength * per_token_loss).sum()
-
     def _chunk_gradient(
         self,
         weights: dict[str, Float32[torch.Tensor, "B D D"]],
@@ -206,11 +208,8 @@ class NeuralMemory(nn.Module):
         values: Float32[torch.Tensor, "B C D"],
         write_strength: Float32[torch.Tensor, "B C"],
     ) -> dict[str, Float32[torch.Tensor, "B D D"]]:
-        B, _, _ = keys.shape
-        # Online writes still require a local gradient during no-grad/inference
-        # generation. Only training retains the higher-order graph used by the
-        # outer delayed-answer objective.
-        with torch.inference_mode(False), torch.enable_grad():
+        B, C, D = keys.shape
+        with torch.inference_mode(False), torch.set_grad_enabled(self.training):
             timer = self.timing_observer
             tic = perf_counter() if timer is not None else 0.0
             if not self.training:
@@ -224,53 +223,76 @@ class NeuralMemory(nn.Module):
             if timer is not None:
                 timer("gradient_input_setup", perf_counter() - tic)
 
-            # One gradient per independent session, taken from the aggregate
-            # weighted loss of all C tokens at the shared chunk-start weights.
+            execution_started = perf_counter() if timer is not None else 0.0
             tic = perf_counter() if timer is not None else 0.0
-            if B > 1:
-                # autograd.grad cannot run inside the session vmap transform.
-                per_session_grad = grad(self._memory_loss)
-                batched_grad = vmap(per_session_grad, in_dims=(0, 0, 0, 0))
+            result = self.memory_mlp(
+                keys,
+                weights=weights,
+                return_intermediates=True,
+            )
+            predicted_values: Float32[torch.Tensor, "B C D"] = result.predicted_values
+            assert result.keys_by_layer is not None
+            assert result.values_before_silu is not None
             if timer is not None:
-                timer("gradient_transform_setup", perf_counter() - tic)
+                timer("write_prediction", perf_counter() - tic)
+
             tic = perf_counter() if timer is not None else 0.0
-            if B == 1:
-                # Direct autograd avoids torch.func transform overhead for B=1;
-                # CPU benchmarks halved gradient-call time without changing writes.
-                sample_weights = {}
-                for name, weight in weights.items():
-                    sample_weight = weight.squeeze(0)
-                    if not sample_weight.requires_grad:
-                        # Inference or frozen initial weights need a local leaf.
-                        # Never detach weights already connected to earlier writes.
-                        sample_weight = sample_weight.detach().requires_grad_(True)
-                    sample_weights[name] = sample_weight
-                sample_keys = keys.squeeze(0)
-                sample_values = values.squeeze(0)
-                sample_write_strength = write_strength.squeeze(0)
-
-                loss = self._memory_loss(
-                    sample_weights,
-                    sample_keys,
-                    sample_values,
-                    sample_write_strength,
-                )
-                # The outer answer loss must differentiate through this gradient
-                # to teach earlier writes. Keep the same graph policy as func.grad.
-                sample_gradients = torch.autograd.grad(
-                    loss,
-                    tuple(sample_weights.values()),
-                    create_graph=True,
-                )
-
-                result = {}
-                for name, gradient in zip(sample_weights, sample_gradients):
-                    result[name] = gradient.unsqueeze(0)
-            else:
-                result = batched_grad(weights, keys, values, write_strength)
+            # Differentiate Eq. (12) with our theta_t / D scaling:
+            # dL/d(v_hat_t) = (2 theta_t / D) * (v_hat_t - v_t).
+            # This is the value prediction error's derivative, not a weight update.
+            value_gradient: Float32[torch.Tensor, "B C D"] = (
+                (2.0 / D)
+                * (predicted_values - values)
+                * write_strength.unsqueeze(-1)  # B C -> B C 1, broadcast over D.
+            )
             if timer is not None:
-                timer("gradient_execution", perf_counter() - tic)
-            return result
+                timer("write_loss", perf_counter() - tic)
+
+            tic = perf_counter() if timer is not None else 0.0
+            weight_gradients: dict[str, Float32[torch.Tensor, "B D D"]] = {}
+            for layer_index in reversed(range(self.config.depth)):
+                name = f"layers.{layer_index}.weight"
+                layer_keys: Float32[torch.Tensor, "B C D"] = (
+                    result.keys_by_layer[layer_index]
+                )
+                # Chain rule for z^(l) = W^(l) k^(l):
+                # dL/dW^(l) = sum_t [dL/dz_t^(l)] [k_t^(l)]^T.
+                # Each session gets its own sum; no averaging across sessions.
+                # (B D C) @ (B C D) -> (B D D), summing over the C tokens.
+                operation_started = perf_counter() if timer is not None else 0.0
+                weight_gradients[name] = value_gradient.transpose(-1, -2) @ layer_keys
+                if timer is not None:
+                    timer("write_weight_gradient", perf_counter() - operation_started)
+
+                if layer_index > 0:
+                    # Carry the error back to the key entering this layer:
+                    # dL/dk^(l) = [W^(l)]^T [dL/dz^(l)] (column notation).
+                    # Tensors store row vectors, so the code multiplies by W.
+                    weight: Float32[torch.Tensor, "B D D"] = weights[name]
+                    # (B C D) @ (B D D) -> (B C D).
+                    operation_started = perf_counter() if timer is not None else 0.0
+                    key_gradient: Float32[torch.Tensor, "B C D"] = value_gradient @ weight
+                    if timer is not None:
+                        timer("write_key_gradient", perf_counter() - operation_started)
+                    operation_started = perf_counter() if timer is not None else 0.0
+                    linear_values: Float32[torch.Tensor, "B C D"] = (
+                        result.values_before_silu[layer_index - 1]
+                    )
+                    sigmoid: Float32[torch.Tensor, "B C D"] = linear_values.sigmoid()
+                    # Then dL/dz^(l-1) = dL/dk^(l) * SiLU'(z^(l-1)).
+                    # SiLU'(z) = sigmoid(z) * (1 + z * (1 - sigmoid(z))).
+                    value_gradient = (
+                        key_gradient
+                        * sigmoid
+                        * (1 + linear_values * (1 - sigmoid))
+                    )
+                    if timer is not None:
+                        timer("write_silu_derivative", perf_counter() - operation_started)
+            if timer is not None:
+                timer("gradient_calculation", perf_counter() - tic)
+            if timer is not None:
+                timer("gradient_execution", perf_counter() - execution_started)
+            return weight_gradients
 
     def _update(
         self,
@@ -354,10 +376,15 @@ class NeuralMemory(nn.Module):
         if timer is not None:
             timer("forget_and_momentum_controls", perf_counter() - tic)
         tic = perf_counter() if timer is not None else 0.0
+        # Titans Eq. (14): S_t = eta_t S_{t-1} - theta_t * grad ell.
+        # momentum_retention = eta_t; chunk_gradient already includes theta_t
+        # and our 1/D normalization, so do not multiply write_strength again.
         next_momentum: dict[str, Float32[torch.Tensor, "B D D"]] = {
             name: momentum_retention * state.momentum[name] - gradient
             for name, gradient in chunk_gradient.items()
         }
+        # Titans Eq. (13): M_t = (1 - alpha_t) M_{t-1} + S_t.
+        # state.weights = M_{t-1}; forget = alpha_t; next_momentum = S_t.
         next_weights: dict[str, Float32[torch.Tensor, "B D D"]] = {
             name: (1.0 - forget) * weight + next_momentum[name]
             for name, weight in state.weights.items()
@@ -396,52 +423,6 @@ class NeuralMemory(nn.Module):
                 timer("trace_write_observer", perf_counter() - tic)
         return next_state
 
-    def _read(
-        self,
-        weights: dict[str, Float32[torch.Tensor, "B D D"]],
-        queries: Float[torch.Tensor, "B C D"],
-    ) -> Float[torch.Tensor, "B C D"]:
-        B, C, _ = queries.shape
-        timer = self.timing_observer
-        tic = perf_counter() if timer is not None else 0.0
-        def read_one(
-            sample_weights: dict[str, Float32[torch.Tensor, "D D"]],
-            query: Float32[torch.Tensor, "D"],
-        ) -> Float[torch.Tensor, "D"]:
-            return self._predict_memory(sample_weights, query)
-
-        # A single query can be read directly, avoiding token-vmap overhead.
-        if C == 1:
-            def per_session_read(sample_weights, sample_queries):
-                query = sample_queries.squeeze(0)
-                read = read_one(sample_weights, query)
-                return read.unsqueeze(0)
-        else:
-            per_session_read = vmap(read_one, in_dims=(None, 0))
-
-        # Session batching is independent of token batching: only use it when B > 1.
-        if B == 1:
-            batched_read = per_session_read
-        else:
-            batched_read = vmap(per_session_read, in_dims=(0, 0))
-        if timer is not None:
-            timer("read_transform_setup", perf_counter() - tic)
-        tic = perf_counter() if timer is not None else 0.0
-        if B == 1:
-            # Remove B for the direct call and restore it on the returned reads.
-            sample_weights = {}
-            for name, weight in weights.items():
-                sample_weights[name] = weight.squeeze(0)
-            sample_queries = queries.squeeze(0).float()
-
-            sample_reads = batched_read(sample_weights, sample_queries)
-            result = sample_reads.unsqueeze(0)
-        else:
-            result = batched_read(weights, queries.float())
-        if timer is not None:
-            timer("read_execution", perf_counter() - tic)
-        return result
-
     def _process_chunk(
         self,
         state: NeuralMemoryState,
@@ -460,16 +441,27 @@ class NeuralMemory(nn.Module):
         )
         state = self._update(state, inputs, keys, values, write_mask)
 
-        outputs: list[Float[torch.Tensor, "B C D"]] = []
+        read_requests = []
         if reaches_chunk_boundary:
             # Earlier tokens read the previous completed chunk state. The token
             # at this chunk boundary can read the newly completed update.
             if C > 1:
-                outputs.append(self._read(previous_weights, queries[:, :-1]))
-            outputs.append(self._read(state.weights, queries[:, -1:]))
+                read_requests.append((previous_weights, queries[:, :-1]))
+            read_requests.append((state.weights, queries[:, -1:]))
         else:
-            outputs.append(self._read(previous_weights, queries))
+            read_requests.append((previous_weights, queries))
+
         timer = self.timing_observer
+        outputs: list[Float32[torch.Tensor, "B C_read D"]] = []
+        for read_weights, read_queries in read_requests:
+            tic = perf_counter() if timer is not None else 0.0
+            # Titans Eq. (15): y_t = M*(q_t), without adjusting weights.
+            # Keep queries/reads B x C_read x D and fast weights B x D x D.
+            result = self.memory_mlp(read_queries.float(), weights=read_weights)
+            if timer is not None:
+                timer("read_execution", perf_counter() - tic)
+            outputs.append(result.predicted_values)
+
         tic = perf_counter() if timer is not None else 0.0
         output = torch.cat(outputs, dim=1).to(output_dtype)
         if timer is not None:
@@ -575,6 +567,14 @@ class NeuralMemory(nn.Module):
             write_mask_chunks: Bool[torch.Tensor, "B N C"] = write_mask[
                 :, start:end
             ].reshape(batch_size, N, C)
+            # Split once: backward assembles chunk gradients together instead of
+            # scattering each indexed chunk into a full-sequence gradient tensor.
+            # The chunks still execute sequentially with the same memory updates.
+            query_parts = query_chunks.unbind(dim=1)
+            key_parts = key_chunks.unbind(dim=1)
+            value_parts = value_chunks.unbind(dim=1)
+            input_parts = input_chunks.unbind(dim=1)
+            write_mask_parts = write_mask_chunks.unbind(dim=1)
             if timer is not None:
                 timer("chunk_views_and_casts", perf_counter() - tic)
 
@@ -582,11 +582,11 @@ class NeuralMemory(nn.Module):
                 tic = perf_counter() if timer is not None else 0.0
                 output, state = self._process_chunk(
                     state,
-                    query_chunks[:, chunk_index],
-                    key_chunks[:, chunk_index],
-                    value_chunks[:, chunk_index],
-                    input_chunks[:, chunk_index],
-                    write_mask_chunks[:, chunk_index],
+                    query_parts[chunk_index],
+                    key_parts[chunk_index],
+                    value_parts[chunk_index],
+                    input_parts[chunk_index],
+                    write_mask_parts[chunk_index],
                     inputs.dtype,
                 )
                 if timer is not None:

@@ -3,6 +3,7 @@ from contextlib import nullcontext
 import copy
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import time
 from typing import TypedDict
@@ -26,6 +27,7 @@ from evaluation.taal.trace_export import (
     make_trace_tokens,
 )
 from utils.seed import seed_everything
+from training.taal_timing import TaalEvaluationTimings, TaalKernelSampler
 
 
 @dataclass(frozen=True)
@@ -368,6 +370,10 @@ def main():
         revision=metadata["tokenizer_revision"],
     )
     model = load_model(args.checkpoint).to(device).eval()
+    print(f"Evaluating on {torch.cuda.get_device_name(device)}: {len(examples)} episodes, {len(AUDIT_CONDITIONS)} conditions each.", flush=True)
+    timings = TaalEvaluationTimings(
+        model, device, os.environ.get("TAAL_TIMING_FIRST_BATCH") == "1"
+    )
     trace_layers = list(range(len(model.model.layers))) if save_traces else []
     trace_exporter = (
         TaalTraceExporter(
@@ -403,18 +409,26 @@ def main():
             dtype=torch.long,
             device=device,
         )
-        output = model.prefill(
-            batch_ids,
-            execution_block_size=execution_block_size,
-            memory_read_scale=1.0,
-            prepend_memory_tokens=True,
-        )
-        for batch_index, (example, _) in enumerate(batch):
-            memory_bank[example["example_id"]] = select_memory_session(
-                output.state.memory_states,
-                batch_index,
-                device="cpu",
+        sampler = None
+        if built == 0 and timings.enabled and os.environ.get("TAAL_KERNEL_SAMPLE") == "1":
+            sampler = TaalKernelSampler(model, device, args.output_dir / "timing" / "bank-forward.json")
+        with (
+            timings.phase("state_bank_prefill", tokens=len(batch[0][1]), detailed=built == 0),
+            sampler if sampler is not None else nullcontext(),
+        ):
+            output = model.prefill(
+                batch_ids,
+                execution_block_size=execution_block_size,
+                memory_read_scale=1.0,
+                prepend_memory_tokens=True,
             )
+        with timings.phase("state_bank_copy_to_cpu"):
+            for batch_index, (example, _) in enumerate(batch):
+                memory_bank[example["example_id"]] = select_memory_session(
+                    output.state.memory_states,
+                    batch_index,
+                    device="cpu",
+                )
         built += len(batch)
         print(
             f"Built memory states {built}/{len(examples)}",
@@ -439,7 +453,10 @@ def main():
             )
             if save_traces else None
         )
-        with prefix_trace if prefix_trace is not None else nullcontext():
+        with (
+            timings.phase("prefix_reconstruction", tokens=len(prefix_ids), detailed=example_index == 0),
+            prefix_trace if prefix_trace is not None else nullcontext(),
+        ):
             prefix_output = model.prefill(
                 torch.tensor(
                     [prefix_ids],
@@ -451,13 +468,14 @@ def main():
                 prepend_memory_tokens=True,
             )
         base_state = prefix_output.state
-        reset = model.model.initial_memory_states(batch_size=1)
-        zeroed = model.model.zero_memory_states(batch_size=1)
         swapped_example = examples[(example_index + 1) % len(examples)]
-        swapped = clone_memory_states(
-            memory_bank[swapped_example["example_id"]],
-            device=device,
-        )
+        with timings.phase("control_states_and_swapped_copy"):
+            reset = model.model.initial_memory_states(batch_size=1)
+            zeroed = model.model.zero_memory_states(batch_size=1)
+            swapped = clone_memory_states(
+                memory_bank[swapped_example["example_id"]],
+                device=device,
+            )
         sources = {
             "correct": base_state.memory_states,
             "reset": reset,
@@ -466,7 +484,8 @@ def main():
         }
 
         for condition in pending:
-            state = fork_session_state(base_state, sources[condition.memory_source])
+            with timings.phase("fork_kv_and_memory"):
+                state = fork_session_state(base_state, sources[condition.memory_source])
             start = time.perf_counter()
             query_trace = (
                 TaalTraceRecorder(
@@ -477,7 +496,10 @@ def main():
                 )
                 if save_traces else None
             )
-            with query_trace if query_trace is not None else nullcontext():
+            with (
+                timings.phase(f"query/{condition.name}", tokens=len(query_ids), detailed=example_index == 0),
+                query_trace if query_trace is not None else nullcontext(),
+            ):
                 output = model.prefill(
                     torch.tensor(
                         [query_ids],
@@ -489,14 +511,16 @@ def main():
                     memory_read_scale=condition.read_scale,
                     prepend_memory_tokens=False,
                 )
-            logits = output.logits[0, -1].float()
-            swapped_target = int(swapped_example["target_token_id"])
-            swapped_log_probability = float(
-                (
-                    logits[swapped_target]
-                    - torch.logsumexp(logits, dim=0)
-                ).item()
-            )
+            with timings.phase("scoring"):
+                logits = output.logits[0, -1].float()
+                swapped_target = int(swapped_example["target_token_id"])
+                swapped_log_probability = float(
+                    (
+                        logits[swapped_target]
+                        - torch.logsumexp(logits, dim=0)
+                    ).item()
+                )
+                scores = score_logits(logits, example, tokenizer)
             result = {
                 "evaluation_id": f"{example['example_id']}/{condition.name}",
                 "example_id": example["example_id"],
@@ -534,35 +558,37 @@ def main():
                     if condition.memory_source == "swapped"
                     else None
                 ),
-                **score_logits(logits, example, tokenizer),
+                **scores,
             }
             if save_traces:
                 assert prefix_trace is not None and query_trace is not None
                 assert trace_exporter is not None
-                trace_exporter.export(TraceEpisode(
-                    run_id=args.output_dir.name,
-                    example_id=example["example_id"],
-                    condition_id=condition.name,
-                    checkpoint=checkpoint,
-                    tokenizer_id=metadata["tokenizer"],
-                    tokens=make_trace_tokens(example["input_ids"], tokenizer),
-                    writes=prefix_trace.writes + query_trace.writes,
-                    reads=prefix_trace.reads + query_trace.reads,
-                    internal_prefixes=(
-                        prefix_trace.internal_prefixes + query_trace.internal_prefixes
-                    ),
-                    outcome=result,
-                    metadata={
-                        "query_start_position": len(prefix_ids),
-                        "memory_source_at_query": condition.memory_source,
-                        "read_scale_at_query": condition.read_scale,
-                        "swapped_from_example_id": (
-                            swapped_example["example_id"]
-                            if condition.memory_source == "swapped" else None
+                with timings.phase("trace_export"):
+                    trace_exporter.export(TraceEpisode(
+                        run_id=args.output_dir.name,
+                        example_id=example["example_id"],
+                        condition_id=condition.name,
+                        checkpoint=checkpoint,
+                        tokenizer_id=metadata["tokenizer"],
+                        tokens=make_trace_tokens(example["input_ids"], tokenizer),
+                        writes=prefix_trace.writes + query_trace.writes,
+                        reads=prefix_trace.reads + query_trace.reads,
+                        internal_prefixes=(
+                            prefix_trace.internal_prefixes + query_trace.internal_prefixes
                         ),
-                    },
-                ))
-            append_result(args.output_dir / "results.jsonl", result)
+                        outcome=result,
+                        metadata={
+                            "query_start_position": len(prefix_ids),
+                            "memory_source_at_query": condition.memory_source,
+                            "read_scale_at_query": condition.read_scale,
+                            "swapped_from_example_id": (
+                                swapped_example["example_id"]
+                                if condition.memory_source == "swapped" else None
+                            ),
+                        },
+                    ))
+            with timings.phase("result_append"):
+                append_result(args.output_dir / "results.jsonl", result)
             results[result["evaluation_id"]] = result
             print(
                 f"Scored {len(results)}/{len(expected_result_ids)}: "
