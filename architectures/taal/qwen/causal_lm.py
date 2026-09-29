@@ -43,6 +43,9 @@ class TaalQwen3ForCausalLM(StatefulQwen3ForCausalLM):
     def _init_weights(self, module):
         super()._init_weights(module)
         if isinstance(module, TaalLayer):
+            # Missing gates must start at zero after HF materializes meta
+            # storage. Saved TaaL gates are loaded from the checkpoint as usual.
+            module.residual_gate.zero_()
             module.persistent_tokens.normal_(
                 mean=0.0,
                 std=module.config.persistent_init_std,

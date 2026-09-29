@@ -32,6 +32,6 @@ export TAAL_KERNEL_SAMPLE=1
 
 # Same Pilot 1A config, including per-token memory writes. Only timing is added.
 python -m utils.explorer_preflight \
-    --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml
+    --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit_chunk1.yaml
 exec python -m training.train \
-    --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml
+    --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit_chunk1.yaml

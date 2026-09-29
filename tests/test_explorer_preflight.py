@@ -73,6 +73,26 @@ class ExplorerPreflightTests(unittest.TestCase):
             for name in ("HF_HOME", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "http_proxy", "https_proxy"):
                 self.assertIn(f"export {name}=", launcher)
 
+    def test_cadence_launchers_keep_full_budget_and_explicit_config(self):
+        root = Path(__file__).resolve().parents[1]
+        for domain, filename in (
+            ("training", "fs_qwen_delayed_recall_overfit.sbatch"),
+            ("evaluation", "fs_qwen_delayed_recall_scores.sbatch"),
+        ):
+            launcher = (root / domain / "sbatch/taal" / filename).read_text()
+            for setting in (
+                "#SBATCH --partition=gpu", "#SBATCH --gres=gpu:h200:1",
+                "#SBATCH --time=08:00:00", "python -m utils.explorer_preflight",
+            ):
+                self.assertIn(setting, launcher)
+            for name in ("HF_HOME", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "http_proxy", "https_proxy"):
+                self.assertIn(f"export {name}=", launcher)
+        training = (root / "training/sbatch/taal/fs_qwen_delayed_recall_overfit.sbatch").read_text()
+        self.assertIn('TRAIN_CONFIG="${1:-training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml}"', training)
+        self.assertEqual(training.count('--config "${TRAIN_CONFIG}"'), 2)
+        timing = (root / "training/sbatch/taal/fs_qwen_delayed_recall_timing_short.sbatch").read_text()
+        self.assertEqual(timing.count("--config training/configs/taal/qwen3_0_6b_delayed_recall_overfit_chunk1.yaml"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

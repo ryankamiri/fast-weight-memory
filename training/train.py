@@ -45,6 +45,24 @@ def verify_loading(model, loading_info):
     }
     if any(errors.values()):
         raise ValueError(f"Pretrained weight loading failed verification: {errors}")
+    if isinstance(model.config, TaalQwen3Config):
+        missing = set(loading_info.get("missing_keys", []))
+        added_gates = {
+            name: parameter
+            for name, parameter in model.named_parameters()
+            if name in missing and name.endswith(".taal.residual_gate")
+        }
+        invalid_gates = [
+            name for name, parameter in added_gates.items()
+            if parameter.detach().item() != 0.0
+        ]
+        if invalid_gates:
+            raise ValueError(f"New TaaL residual gates must initialize to zero: {invalid_gates}")
+        if added_gates:
+            print(
+                f"Verified TaaL initialization: {len(added_gates)} added residual gates are zero.",
+                flush=True,
+            )
     print(f"Loaded Qwen weights; initialized {len(loading_info.get('missing_keys', []))} added tensors.", flush=True)
 
 

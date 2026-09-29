@@ -88,15 +88,15 @@ class TrainingConfigTests(unittest.TestCase):
     def test_taal_short_chunk_experiments_change_only_cadence_and_run_name(self):
         root = Path(__file__).resolve().parents[1]
         folder = root / "training/configs/taal"
-        original = load_config(folder / "qwen3_0_6b_delayed_recall_overfit.yaml")
+        original = load_config(folder / "qwen3_0_6b_delayed_recall_overfit_chunk1.yaml")
         self.assertEqual(original.model.memory_chunk_size, 1)
         for C in (4, 8):
             with self.subTest(C=C):
                 filename = f"qwen3_0_6b_delayed_recall_overfit_chunk{C}.yaml"
                 experiment = load_config(folder / filename)
-                expected = load_config(folder / "qwen3_0_6b_delayed_recall_overfit.yaml")
+                expected = load_config(folder / "qwen3_0_6b_delayed_recall_overfit_chunk1.yaml")
                 expected.model.memory_chunk_size = C
-                expected.wandb.name += f"-chunk{C}"
+                expected.wandb.name = expected.wandb.name.removesuffix("-chunk1") + f"-chunk{C}"
                 self.assertEqual(experiment, expected)
                 launcher = (
                     root / "training/sbatch/taal"
@@ -111,6 +111,13 @@ class TrainingConfigTests(unittest.TestCase):
                 ):
                     self.assertIn(setting, launcher)
                 self.assertEqual(launcher.count(f"--config training/configs/taal/{filename}"), 2)
+
+    def test_pending_h200_runtime_recipe_selects_chunk8(self):
+        folder = Path(__file__).resolve().parents[1] / "training/configs/taal"
+        runtime = load_config(folder / "qwen3_0_6b_delayed_recall_overfit.yaml")
+        explicit = load_config(folder / "qwen3_0_6b_delayed_recall_overfit_chunk8.yaml")
+        self.assertEqual(runtime, explicit)
+        self.assertEqual(runtime.model.memory_chunk_size, 8)
 
     def test_2k_chunk_changes_only_chunk_size_and_run_name(self):
         folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
@@ -274,7 +281,7 @@ class TrainingConfigTests(unittest.TestCase):
     def test_taal_delayed_recall_overfit_config(self):
         path = (
             Path(__file__).resolve().parents[1]
-            / "training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml"
+            / "training/configs/taal/qwen3_0_6b_delayed_recall_overfit_chunk1.yaml"
         )
         config = load_config(path)
 

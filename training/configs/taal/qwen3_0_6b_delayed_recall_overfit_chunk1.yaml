@@ -1,5 +1,3 @@
-# This runtime path is also read by the already-pending eight-hour H200 job.
-# Keep chunk 1 in the explicit _chunk1 recipe rather than changing its baseline.
 model:
   architecture: taal
   model_id: Qwen/Qwen3-0.6B-Base
@@ -9,7 +7,7 @@ model:
   memory_dim: 128
   memory_depth: 2
   memory_conv_kernel_size: 4
-  memory_chunk_size: 8
+  memory_chunk_size: 1
   memory_initial_forget: 0.01
   memory_initial_momentum: 0.9
   memory_initial_write_strength: 0.1
@@ -79,4 +77,4 @@ checkpoints:
 wandb:
   project: fast-weight-memory
   entity: ryanamiri05-northeastern-university
-  name: taal-qwen3-0.6b-delayed-recall-overfit-2k-chunk8
+  name: taal-qwen3-0.6b-delayed-recall-overfit-2k-chunk1

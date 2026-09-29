@@ -1,13 +1,16 @@
 import unittest
 from pathlib import Path
+import tempfile
 
 import torch
+import yaml
 
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 from architectures.taal.qwen.configuration import TaalQwen3Config
 from evaluation.taal.state_audit import (
     example_batches_by_prefix_length,
     fork_session_state,
+    load_model,
     select_examples,
     select_memory_session,
     split_episode,
@@ -53,6 +56,32 @@ class TaalStateAuditTests(unittest.TestCase):
         )
         self.assertIn('--checkpoint "$1"', launcher)
         self.assertIn("output/taal/pilot-1b-${SLURM_JOB_ID}", launcher)
+
+    def test_scores_only_audit_preserves_selection_and_all_controls(self):
+        folder = Path(__file__).resolve().parents[1] / "evaluation/configs/taal"
+        original = yaml.safe_load((folder / "delayed_recall_state_audit.yaml").read_text())
+        scores = yaml.safe_load((folder / "delayed_recall_state_audit_scores.yaml").read_text())
+        self.assertTrue(original["save_traces"])
+        self.assertFalse(scores["save_traces"])
+        original["save_traces"] = False
+        self.assertEqual(scores, original)
+        self.assertEqual((scores["dataset"]["start"], scores["dataset"]["end"]), (0, 64))
+
+    def test_audit_loads_each_checkpoint_at_its_trained_cadence(self):
+        for C in (1, 4, 8):
+            with self.subTest(C=C):
+                config = self.config()
+                config.memory_chunk_size = C
+                model = TaalQwen3ForCausalLM(config)
+                with torch.no_grad():
+                    model.model.layers[0].taal.residual_gate.fill_(0.25)
+                with tempfile.TemporaryDirectory() as folder:
+                    model.save_pretrained(folder)
+                    loaded = load_model(Path(folder))
+                self.assertEqual(loaded.config.memory_chunk_size, C)
+                memory = loaded.model.layers[0].taal.neural_memory
+                self.assertEqual(memory.config.chunk_size, C)
+                self.assertEqual(loaded.model.layers[0].taal.residual_gate.item(), 0.25)
 
     @torch.inference_mode()
     def test_fork_replaces_only_memory_and_clones_kv(self):

@@ -29,9 +29,15 @@ export HF_DATASETS_CACHE="${HF_HOME}/datasets"
 # when the submission shell did not export one.
 export http_proxy="${http_proxy:-http://10.99.0.130:3128}"
 export https_proxy="${https_proxy:-http://10.99.0.130:3128}"
-export CHECKPOINT_RUN_ID="taal-pilot1a-${SLURM_JOB_ID}"
+TRAIN_CONFIG="${1:-training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml}"
+RUN_PREFIX="${2:-taal-pilot1a}"
+export CHECKPOINT_RUN_ID="${RUN_PREFIX}-${SLURM_JOB_ID}"
+
+# Run on the allocated GPU, not just the login node. Optional arguments select
+# an explicit cadence recipe and a distinct checkpoint directory.
+python -m utils.explorer_preflight --config "${TRAIN_CONFIG}"
 
 # A single Python process receives Slurm's pre-limit TERM directly and can
 # save final weights before the allocation expires.
 exec python -m training.train \
-    --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml
+    --config "${TRAIN_CONFIG}"

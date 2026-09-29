@@ -42,8 +42,9 @@ class TaalQwen3Model(StatefulQwen3Model):
     def _init_weights(self, module):
         super()._init_weights(module)
         if isinstance(module, TaalLayer):
-            # from_pretrained suppresses constructor nn.init calls while it
-            # builds the model; this standalone parameter has no Qwen init.
+            # HF can replace missing meta parameters with empty storage, so
+            # constructor zeros are not enough when loading ordinary Qwen.
+            module.residual_gate.zero_()
             module.persistent_tokens.normal_(
                 mean=0.0,
                 std=module.config.persistent_init_std,

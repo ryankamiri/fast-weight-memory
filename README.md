@@ -84,12 +84,17 @@ windows.
 ```bash
 uv run --frozen --no-dev torchrun --standalone --nproc-per-node=1 \
   -m training.train \
-  --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml
+  --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit_chunk1.yaml
 ```
 
 The initial TaaL recipe is intentionally a small overfitting test. It verifies
 that the memory pathway can learn delayed recall before scaling to held-out facts,
 paraphrases, and natural conversations.
+
+Explicit `..._chunk1.yaml`, `..._chunk4.yaml`, and `..._chunk8.yaml` recipes
+compare memory-update cadences. The unsuffixed recipe currently selects chunk 8
+for the eight-hour H200 run. The scores-only Pilot 1B configuration evaluates
+each trained checkpoint at its own cadence without per-token trace exports.
 
 ### Configuration
 
