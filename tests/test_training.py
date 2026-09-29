@@ -85,6 +85,33 @@ def batch(value, size=1, length=4):
 
 
 class TrainingConfigTests(unittest.TestCase):
+    def test_taal_short_chunk_experiments_change_only_cadence_and_run_name(self):
+        root = Path(__file__).resolve().parents[1]
+        folder = root / "training/configs/taal"
+        original = load_config(folder / "qwen3_0_6b_delayed_recall_overfit.yaml")
+        self.assertEqual(original.model.memory_chunk_size, 1)
+        for C in (4, 8):
+            with self.subTest(C=C):
+                filename = f"qwen3_0_6b_delayed_recall_overfit_chunk{C}.yaml"
+                experiment = load_config(folder / filename)
+                expected = load_config(folder / "qwen3_0_6b_delayed_recall_overfit.yaml")
+                expected.model.memory_chunk_size = C
+                expected.wandb.name += f"-chunk{C}"
+                self.assertEqual(experiment, expected)
+                launcher = (
+                    root / "training/sbatch/taal"
+                    / f"fs_qwen_delayed_recall_chunk{C}_short.sbatch"
+                ).read_text()
+                for setting in (
+                    "#SBATCH --partition=gpu-short", "#SBATCH --gres=gpu:h200:1",
+                    "#SBATCH --time=02:00:00", "#SBATCH --signal=B:TERM@900",
+                    "python -m utils.explorer_preflight", "exec python -m training.train",
+                    "export TAAL_TIMING_FIRST_BATCH=1", "export TAAL_KERNEL_SAMPLE=1",
+                    f'export CHECKPOINT_RUN_ID="taal-pilot1a-chunk{C}-${{SLURM_JOB_ID}}"',
+                ):
+                    self.assertIn(setting, launcher)
+                self.assertEqual(launcher.count(f"--config training/configs/taal/{filename}"), 2)
+
     def test_2k_chunk_changes_only_chunk_size_and_run_name(self):
         folder = Path(__file__).resolve().parents[1] / "training/configs/ttcd"
         original = load_config(folder / "qwen3_0_6b_cpt_fw_swa_4k_2k_1k.yaml")

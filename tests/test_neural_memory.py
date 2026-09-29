@@ -114,6 +114,64 @@ class NeuralMemoryTests(unittest.TestCase):
                             self.assertIsNone(parameter.grad)
                             self.assertIsNone(expected_parameter.grad)
 
+    def test_chunk_four_and_eight_match_autograd_and_tokenwise_execution(self):
+        for B in (1, 2):
+            for C in (4, 8):
+                with self.subTest(B=B, C=C):
+                    memory = NeuralMemory(NeuralMemoryConfig(
+                        dim=4, depth=2, conv_kernel_size=3, chunk_size=C,
+                    )).train()
+                    memory.memory_mlp.requires_grad_(False)
+                    reference = copy.deepcopy(memory)
+                    reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
+                    S = 2 * C + 3  # Includes a trailing incomplete chunk.
+                    inputs = torch.randn(B, S, 4, requires_grad=True)
+                    reference_inputs = inputs.detach().clone().requires_grad_(True)
+                    mask = torch.ones(B, S, dtype=torch.bool)
+                    mask[:, 1::3] = False
+                    output, state = memory(inputs, write_mask=mask)
+                    expected_outputs = []
+                    expected_state = None
+                    # The independent autograd oracle receives one token per
+                    # call. Pending gradients must still commit at C, not per call.
+                    for position in range(S):
+                        token_output, expected_state = reference(
+                            reference_inputs[:, position:position + 1],
+                            state=expected_state,
+                            write_mask=mask[:, position:position + 1],
+                        )
+                        expected_outputs.append(token_output)
+                    expected_output = torch.cat(expected_outputs, dim=1)
+                    torch.testing.assert_close(output, expected_output)
+                    self._assert_states_close(state, expected_state)
+                    self.assertEqual(state.pending_count, 3)
+                    output[:, -1].square().mean().backward()
+                    expected_output[:, -1].square().mean().backward()
+                    torch.testing.assert_close(inputs.grad, reference_inputs.grad)
+                    self.assertGreater(inputs.grad[:, :C].abs().sum().item(), 0)
+                    for (name, parameter), (_, expected) in zip(
+                        memory.named_parameters(), reference.named_parameters()
+                    ):
+                        if parameter.requires_grad:
+                            self.assertIsNotNone(parameter.grad, name)
+                            torch.testing.assert_close(parameter.grad, expected.grad)
+                        else:
+                            self.assertIsNone(parameter.grad)
+
+    def test_chunk_four_and_eight_reads_do_not_use_future_writes(self):
+        for C in (4, 8):
+            with self.subTest(C=C), torch.inference_mode():
+                memory = NeuralMemory(NeuralMemoryConfig(
+                    dim=4, depth=2, conv_kernel_size=3, chunk_size=C,
+                )).eval()
+                inputs = torch.randn(1, 2 * C + 3, 4)
+                expected, _ = memory(inputs)
+                changed = inputs.clone()
+                # Change a token within the first chunk, before its commit.
+                changed[:, C - 2] += 5
+                actual, _ = memory(changed)
+                torch.testing.assert_close(actual[:, :C - 2], expected[:, :C - 2])
+
     def test_split_once_matches_indexing_across_training_call_boundaries(self):
         for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
             with self.subTest(B=B, C=C):
@@ -270,6 +328,72 @@ class NeuralMemoryTests(unittest.TestCase):
                     gradients = memory._chunk_gradient(weights, keys, values, strength)
                 for gradient in gradients.values():
                     self.assertEqual(gradient.shape, (B, 4, 4))
+
+    def test_manual_write_derivative_matches_autograd_with_tight_tolerance(self):
+        generator = torch.Generator().manual_seed(304)
+        # Equivalent FP32 operations can round differently. Bound the absolute
+        # error by twice FP32 epsilon, rather than expecting bitwise equality.
+        absolute_tolerance = 2 * torch.finfo(torch.float32).eps
+        for D in (4, 128):
+            for depth in (1, 2, 3, 4):
+                memory = NeuralMemory(NeuralMemoryConfig(dim=D, depth=depth)).train()
+                for B, C in ((1, 1), (2, 1), (1, 3), (2, 3)):
+                    weights = {
+                        f"layers.{layer_index}.weight": (
+                            torch.randn(B, D, D, generator=generator) / D**0.5
+                        ).requires_grad_(True)
+                        for layer_index in range(depth)
+                    }
+                    keys = F.normalize(torch.randn(B, C, D, generator=generator), dim=-1)
+                    values = torch.randn(B, C, D, generator=generator)
+                    strength = torch.rand(B, C, generator=generator)
+
+                    for write_pattern in ("unmasked", "partially_masked", "fully_masked"):
+                        with self.subTest(D=D, depth=depth, B=B, C=C, writes=write_pattern):
+                            write_strength = strength.clone()
+                            if write_pattern == "partially_masked":
+                                write_strength[:, 0] = 0
+                            elif write_pattern == "fully_masked":
+                                write_strength.zero_()
+
+                            actual = memory._chunk_gradient(weights, keys, values, write_strength)
+
+                            # Independent reference: ordinary Linear + SiLU and
+                            # autograd, with neither the manual derivative nor vmap.
+                            predictions_by_session = []
+                            for session_index in range(B):
+                                predicted_values = keys[session_index]
+                                for layer_index in range(depth):
+                                    name = f"layers.{layer_index}.weight"
+                                    predicted_values = F.linear(
+                                        predicted_values, weights[name][session_index]
+                                    )
+                                    if layer_index + 1 < depth:
+                                        predicted_values = F.silu(predicted_values)
+                                predictions_by_session.append(predicted_values)
+                            predictions = torch.stack(predictions_by_session)
+
+                            # Same write objective: sum_t theta_t ||M(k_t)-v_t||^2 / D.
+                            # Summing sessions preserves independent writes, not a B average.
+                            per_token_loss = F.mse_loss(
+                                predictions, values, reduction="none"
+                            ).mean(dim=-1)
+                            write_loss = (write_strength * per_token_loss).sum()
+                            expected_gradients = torch.autograd.grad(
+                                write_loss, tuple(weights.values())
+                            )
+
+                            for name, expected in zip(weights, expected_gradients):
+                                self.assertEqual(actual[name].shape, (B, D, D))
+                                torch.testing.assert_close(
+                                    actual[name], expected, rtol=1e-6, atol=absolute_tolerance
+                                )
+                                # Require a tiny absolute difference as well, including
+                                # zero gradients from fully masked writes.
+                                max_error = (actual[name] - expected).abs().max().item()
+                                self.assertLessEqual(max_error, absolute_tolerance, name)
+                                if write_pattern == "fully_masked":
+                                    self.assertTrue(torch.equal(actual[name], torch.zeros_like(expected)))
 
     def test_explicit_preserves_delayed_gradients_with_frozen_initial_weights(self):
         cases = ((depth, B, C) for depth in (1, 2, 3, 4) for B in (1, 2) for C in (1, 3))

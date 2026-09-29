@@ -231,6 +231,38 @@ class TaalQwen3CausalLMTests(unittest.TestCase):
             0,
         )
 
+    def test_chunk_four_and_eight_complete_frozen_qwen_training_update(self):
+        from training.train import configure_trainable_parameters
+
+        for C in (4, 8):
+            with self.subTest(C=C):
+                model = TaalQwen3ForCausalLM(self.config(
+                    memory_chunk_size=C, num_persistent_tokens=8,
+                )).train()
+                trainable = configure_trainable_parameters(model, "taal_only")
+                optimizer = torch.optim.AdamW(trainable, lr=1e-4)
+                with torch.no_grad():
+                    model.model.layers[0].taal.residual_gate.fill_(0.25)
+                delayed = torch.full_like(self.ids, -100)
+                delayed[:, -1] = self.ids[:, -1]
+                host_before = model.model.embed_tokens.weight.detach().clone()
+                memory = model.model.layers[0].taal.neural_memory
+                weights_before = memory.memory_mlp.layers[0].weight.detach().clone()
+                output = model.forward_bridge_memory(
+                    self.ids, delayed_labels=delayed,
+                    all_token_loss_weight=0.0, delayed_answer_loss_weight=1.0,
+                )
+                self.assertTrue(torch.isfinite(output.loss))
+                output.loss.backward()
+                self.assertTrue(all(parameter.grad is not None for parameter in trainable))
+                self.assertTrue(all(torch.isfinite(parameter.grad).all() for parameter in trainable))
+                self.assertGreater(memory.write_strength_projection.weight.grad.abs().sum().item(), 0)
+                optimizer.step()
+                torch.testing.assert_close(model.model.embed_tokens.weight, host_before, atol=0, rtol=0)
+                # taal_only trains the learned memory initialization, not just
+                # the controls. Online per-episode weights remain separate state.
+                self.assertFalse(torch.equal(memory.memory_mlp.layers[0].weight, weights_before))
+
     @torch.inference_mode()
     def test_blocked_prefill_inserts_learned_prefix_once(self):
         model = TaalQwen3ForCausalLM(self.config()).eval()

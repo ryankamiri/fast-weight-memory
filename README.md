@@ -166,6 +166,16 @@ sbatch evaluation/sbatch/ttcd/fs_qwen_eval_fw_swa.sbatch checkpoints/TTCD_RUN/be
 Predictions and judgments are written under `output/longmemeval/`. Saved
 predictions can be graded again without rerunning generation.
 
+The TaaL delayed-recall state audit saves complete pre-query snapshots and optional
+prefix traces under `OUTPUT_DIR/prefix_states/`. Each prefix is computed once,
+then restored for the six query conditions. Episodes are scored as soon as their
+own and swap-donor snapshots are ready, without waiting for the full state bank.
+Resume with the same checkpoint,
+config, and output directory to reuse completed snapshots and scores. Changed
+checkpoint contents or settings require a new output directory. Snapshots include
+bounded K/V, neural weights, momentum, convolution history, and position metadata;
+they are evaluation artifacts, not training checkpoints.
+
 ## Research status
 
 This repository is an active research prototype, not a production memory system.

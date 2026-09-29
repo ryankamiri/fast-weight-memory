@@ -20,6 +20,7 @@ from architectures.taal.qwen.state import NeuralMemoryStates, TaalModelState
 from architectures.titans.state import NeuralMemoryState
 from evaluation.scoring import grouped_score_summary, score_logits
 from evaluation.storage import append_result, ensure_manifest, read_results
+from evaluation.taal.prefix_store import PrefixStore, PrefixTrace, checkpoint_fingerprint
 from evaluation.taal.trace_contract import TraceComparison, TraceEpisode
 from evaluation.taal.trace_export import (
     TaalTraceExporter,
@@ -298,6 +299,11 @@ def main():
     save_traces = settings.get("save_traces", False)
     if type(save_traces) is not bool:
         parser.error("save_traces must be true or false")
+    state_bank_batch_size = settings.get("state_bank_batch_size", 1)
+    if type(state_bank_batch_size) is not int or state_bank_batch_size < 1:
+        parser.error("state_bank_batch_size must be a positive integer")
+    if save_traces and state_bank_batch_size != 1:
+        parser.error("save_traces requires state_bank_batch_size=1")
     dataset_settings = settings["dataset"]
     revision = dataset_settings.get("revision")
     if revision is None:
@@ -325,8 +331,10 @@ def main():
         for condition in AUDIT_CONDITIONS
     }
     checkpoint = str(args.checkpoint.resolve())
+    checkpoint_sha256 = checkpoint_fingerprint(args.checkpoint.resolve())
     ensure_manifest(args.output_dir / "manifest.json", {
         "checkpoint": checkpoint,
+        "checkpoint_sha256": checkpoint_sha256,
         "config": settings,
         "dataset_revision": revision,
         "dataset_metadata": metadata,
@@ -393,48 +401,60 @@ def main():
         "execution_block_size",
         model.config.working_memory_size,
     )
-    state_bank_batch_size = settings.get("state_bank_batch_size", 1)
+    prefix_store = PrefixStore(args.output_dir / "prefix_states", {
+        "checkpoint": checkpoint,
+        "checkpoint_sha256": checkpoint_sha256,
+        "model_config": model.config.to_dict(),
+        "evaluation_config": settings,
+        "dataset_revision": revision,
+        "tokenizer": metadata["tokenizer"],
+        "tokenizer_revision": metadata["tokenizer_revision"],
+    })
 
-    # Phase 1 retains only compact NeuralMemory states on CPU. Saving every
-    # episode's full 2K KV cache would dominate memory, so phase 2 reconstructs
-    # one episode's own KV immediately before forking its audit conditions.
-    memory_bank = {}
     built = 0
-    for batch in example_batches_by_prefix_length(
-        examples,
-        state_bank_batch_size,
-    ):
-        batch_ids = torch.tensor(
-            [prefix_ids for _, prefix_ids in batch],
-            dtype=torch.long,
-            device=device,
-        )
-        sampler = None
-        if built == 0 and timings.enabled and os.environ.get("TAAL_KERNEL_SAMPLE") == "1":
-            sampler = TaalKernelSampler(model, device, args.output_dir / "timing" / "bank-forward.json")
-        with (
-            timings.phase("state_bank_prefill", tokens=len(batch[0][1]), detailed=built == 0),
-            sampler if sampler is not None else nullcontext(),
-        ):
-            output = model.prefill(
-                batch_ids,
-                execution_block_size=execution_block_size,
-                memory_read_scale=1.0,
-                prepend_memory_tokens=True,
+
+    def ensure_prefixes(required_examples):
+        nonlocal built
+        # Prepare only this episode and its swap donor. A two-hour run can
+        # produce scores without first completing the whole 64-prefix bank.
+        missing = [example for example in required_examples if not prefix_store.contains(example)]
+        for batch in example_batches_by_prefix_length(missing, state_bank_batch_size):
+            batch_ids = torch.tensor(
+                [prefix_ids for _, prefix_ids in batch], dtype=torch.long, device=device,
             )
-        with timings.phase("state_bank_copy_to_cpu"):
-            for batch_index, (example, _) in enumerate(batch):
-                memory_bank[example["example_id"]] = select_memory_session(
-                    output.state.memory_states,
-                    batch_index,
-                    device="cpu",
+            sampler = None
+            if built == 0 and timings.enabled and os.environ.get("TAAL_KERNEL_SAMPLE") == "1":
+                sampler = TaalKernelSampler(model, device, args.output_dir / "timing" / "bank-forward.json")
+            prefix_trace = (
+                TaalTraceRecorder(model, layers=trace_layers, token_count=len(batch[0][1]))
+                if save_traces else None
+            )
+            with (
+                timings.phase("state_bank_prefill", tokens=len(batch[0][1]), detailed=built == 0),
+                sampler if sampler is not None else nullcontext(),
+                prefix_trace if prefix_trace is not None else nullcontext(),
+            ):
+                output = model.prefill(
+                    batch_ids,
+                    execution_block_size=execution_block_size,
+                    memory_read_scale=1.0,
+                    prepend_memory_tokens=True,
                 )
-        built += len(batch)
-        print(
-            f"Built memory states {built}/{len(examples)}",
-            flush=True,
-        )
-        del output
+            with timings.phase("prefix_snapshot_save"):
+                for batch_index, (example, _) in enumerate(batch):
+                    prefix_store.save(
+                        example,
+                        output.state,
+                        None if prefix_trace is None else PrefixTrace(
+                            writes=prefix_trace.writes,
+                            reads=prefix_trace.reads,
+                            internal_prefixes=prefix_trace.internal_prefixes,
+                        ),
+                        batch_index=batch_index,
+                    )
+            built += len(batch)
+            print(f"Saved {built} new prefix states this run", flush=True)
+            del output
 
     for example_index, example in enumerate(examples):
         pending = [
@@ -444,37 +464,25 @@ def main():
         ]
         if not pending:
             continue
-        prefix_ids, query_ids = split_episode(example)
-        prefix_trace = (
-            TaalTraceRecorder(
-                model,
-                layers=trace_layers,
-                token_count=len(prefix_ids),
-            )
-            if save_traces else None
-        )
-        with (
-            timings.phase("prefix_reconstruction", tokens=len(prefix_ids), detailed=example_index == 0),
-            prefix_trace if prefix_trace is not None else nullcontext(),
-        ):
-            prefix_output = model.prefill(
-                torch.tensor(
-                    [prefix_ids],
-                    dtype=torch.long,
-                    device=device,
-                ),
-                execution_block_size=execution_block_size,
-                memory_read_scale=1.0,
-                prepend_memory_tokens=True,
-            )
-        base_state = prefix_output.state
         swapped_example = examples[(example_index + 1) % len(examples)]
+        required_examples = [example]
+        if any(condition.memory_source == "swapped" for condition in pending):
+            required_examples.append(swapped_example)
+        ensure_prefixes(required_examples)
+        prefix_ids, query_ids = split_episode(example)
+        with timings.phase("prefix_snapshot_load"):
+            saved_prefix = prefix_store.load(example, device)
+        base_state = saved_prefix.state
+        prefix_trace = saved_prefix.trace
+        if save_traces and prefix_trace is None:
+            raise ValueError("Saved prefix has no trace; use a fresh output directory")
         with timings.phase("control_states_and_swapped_copy"):
             reset = model.model.initial_memory_states(batch_size=1)
             zeroed = model.model.zero_memory_states(batch_size=1)
-            swapped = clone_memory_states(
-                memory_bank[swapped_example["example_id"]],
-                device=device,
+            swapped = (
+                prefix_store.load_memory(swapped_example, device)
+                if any(condition.memory_source == "swapped" for condition in pending)
+                else None
             )
         sources = {
             "correct": base_state.memory_states,
@@ -624,7 +632,7 @@ def main():
                     variant_log_probability=variant_logp,
                     difference_log_probability=baseline_logp - variant_logp,
                 ))
-        del prefix_output, base_state
+        del saved_prefix, base_state, sources, reset, zeroed, swapped
 
     output = summarize(results.values())
     (args.output_dir / "summary.json").write_text(
