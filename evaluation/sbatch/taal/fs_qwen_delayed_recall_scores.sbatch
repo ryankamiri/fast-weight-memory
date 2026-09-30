@@ -26,18 +26,20 @@ export http_proxy="${http_proxy:-http://10.99.0.130:3128}"
 export https_proxy="${https_proxy:-http://10.99.0.130:3128}"
 
 if (( $# < 1 )); then
-    echo "Usage: sbatch $0 CHECKPOINT [OUTPUT_DIR]" >&2
+    echo "Usage: sbatch $0 CHECKPOINT [OUTPUT_DIR] [AUDIT_CONFIG]" >&2
     exit 2
 fi
+
+AUDIT_CONFIG="${3:-evaluation/configs/taal/delayed_recall_state_audit_scores.yaml}"
 
 # Full 64-episode, six-condition audit. Cadence comes from the trained
 # checkpoint, and the prefix store retains each episode's own KV and memory.
 # Chunk 4/8 can use --partition=gpu-short --time=02:00:00 at submission;
 # chunk 1 needs the longer budget based on the measured prefix timings.
 python -m utils.explorer_preflight \
-    --config evaluation/configs/taal/delayed_recall_state_audit_scores.yaml \
+    --config "${AUDIT_CONFIG}" \
     --checkpoint "$1"
 exec python -m evaluation.taal.state_audit \
-    --config evaluation/configs/taal/delayed_recall_state_audit_scores.yaml \
+    --config "${AUDIT_CONFIG}" \
     --checkpoint "$1" \
     --output-dir "${2:-output/taal/pilot-1b-scores-${SLURM_JOB_ID}}"

@@ -114,9 +114,9 @@ class NeuralMemoryTests(unittest.TestCase):
                             self.assertIsNone(parameter.grad)
                             self.assertIsNone(expected_parameter.grad)
 
-    def test_chunk_four_and_eight_match_autograd_and_tokenwise_execution(self):
+    def test_chunked_writes_match_autograd_and_tokenwise_execution(self):
         for B in (1, 2):
-            for C in (4, 8):
+            for C in ((4, 8, 64) if B == 1 else (4, 8)):
                 with self.subTest(B=B, C=C):
                     memory = NeuralMemory(NeuralMemoryConfig(
                         dim=4, depth=2, conv_kernel_size=3, chunk_size=C,
@@ -158,8 +158,8 @@ class NeuralMemoryTests(unittest.TestCase):
                         else:
                             self.assertIsNone(parameter.grad)
 
-    def test_chunk_four_and_eight_reads_do_not_use_future_writes(self):
-        for C in (4, 8):
+    def test_chunked_reads_do_not_use_future_writes(self):
+        for C in (4, 8, 64):
             with self.subTest(C=C), torch.inference_mode():
                 memory = NeuralMemory(NeuralMemoryConfig(
                     dim=4, depth=2, conv_kernel_size=3, chunk_size=C,
