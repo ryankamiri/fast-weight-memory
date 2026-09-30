@@ -71,7 +71,7 @@ checkpoints:
   output_dir: checkpoints
   save_best: true
   save_final: true
-  selection_metric: val/no_bridge_exact_candidate_accuracy
+  selection_metric: val/bridge_exact_candidate_accuracy
   selection_mode: max
 
 wandb:
