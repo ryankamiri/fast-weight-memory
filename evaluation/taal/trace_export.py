@@ -33,9 +33,10 @@ def _difference_norm(left: dict[str, torch.Tensor], right: dict[str, torch.Tenso
 
 
 class _LayerRecorder:
-    def __init__(self, layer: int, offset: int):
+    def __init__(self, layer: int, offset: int, chunk_size: int):
         self.layer = layer
         self.offset = offset
+        self.chunk_size = chunk_size
         self.cursor = 0
         self.segment_index = -1
         self.writes: list[WriteEvent] = []
@@ -44,6 +45,7 @@ class _LayerRecorder:
         self._active = False
         self._prefix_start: dict[str, torch.Tensor] | None = None
         self._pending_writes: list[torch.Tensor] = []
+        self._pending_boundaries: list[bool] = []
         self._pending_prefix_change: torch.Tensor | None = None
 
     def begin_call(self, *, text_length: int, persistent_count: int) -> None:
@@ -60,12 +62,13 @@ class _LayerRecorder:
         self._persistent_count = persistent_count
         self._write_index = 0
         self._pending_writes = []
+        self._pending_boundaries = []
         self._pending_prefix_change = None
 
     def record_write(
         self,
         before: NeuralMemoryState,
-        gradient: dict[str, torch.Tensor],
+        token_gradients: dict[str, torch.Tensor],
         after: NeuralMemoryState,
         write_mask: torch.Tensor,
         write_strength: torch.Tensor,
@@ -75,46 +78,60 @@ class _LayerRecorder:
         B, C = write_mask.shape
         if B != 1:
             raise ValueError("TaaL trace export currently requires one session per batch")
-        if C != 1:
-            raise ValueError("TaaL scalar tracing requires memory_chunk_size=1")
-        index = self._write_index
-        if index >= self._persistent_count + self._text_length:
+        if self._write_index + C > self._persistent_count + self._text_length:
             raise RuntimeError("More writes than memory input tokens")
-        internal = index < self._persistent_count
         old = {name: value[0].detach() for name, value in before.weights.items()}
         new = {name: value[0].detach() for name, value in after.weights.items()}
-        grad = {name: value[0].detach() for name, value in gradient.items()}
-        if internal and index == 0:
-            self._prefix_start = {name: value.clone() for name, value in old.items()}
-        with torch.no_grad():
-            proposed = _parameter_norm(grad)
-            previous = _parameter_norm(old)
-            net = _difference_norm(new, old)
-            other = torch.stack([
-                (new[name].float() - old[name].float() + grad[name].float())
-                .square().sum()
-                for name in old
-            ]).sum().sqrt()
-            dot = torch.stack([
-                (-grad[name].float() * (new[name].float() - old[name].float())).sum()
-                for name in old
-            ]).sum()
-            # Keep only detached scalar tensors until the block finishes. One
-            # batched transfer is far cheaper than syncing the GPU per token.
-            self._pending_writes.append(torch.stack((
-                proposed,
-                previous,
-                net,
-                other,
-                dot,
-                write_strength[0, 0].detach().float(),
-                write_mask[0, 0].detach().float(),
-            )))
-        if internal and index + 1 == self._persistent_count:
-            assert self._prefix_start is not None
-            self._pending_prefix_change = _difference_norm(new, self._prefix_start)
-            self._prefix_start = None
-        self._write_index += 1
+        committed = after.pending_count == 0
+        for token_index in range(C):
+            index = self._write_index
+            internal = index < self._persistent_count
+            boundary = committed and token_index == C - 1
+            grad = {
+                name: value[0, token_index].detach()
+                for name, value in token_gradients.items()
+            }
+            if internal and index == 0:
+                self._prefix_start = {name: value.clone() for name, value in old.items()}
+            with torch.no_grad():
+                proposed = _parameter_norm(grad)
+                previous = _parameter_norm(old)
+                net = _difference_norm(new, old) if boundary else proposed.new_zeros(())
+                if self.chunk_size == 1:
+                    other = torch.stack([
+                        (new[name].float() - old[name].float() + grad[name].float())
+                        .square().sum()
+                        for name in old
+                    ]).sum().sqrt()
+                    dot = torch.stack([
+                        (-grad[name].float() * (new[name].float() - old[name].float())).sum()
+                        for name in old
+                    ]).sum()
+                else:
+                    # For a multi-token update, comparing one token's proposed
+                    # gradient to the entire chunk's net movement is invalid.
+                    other = proposed.new_full((), float("nan"))
+                    dot = proposed.new_full((), float("nan"))
+                # Transfer scalars together after the forward call, not once
+                # per token, to avoid forcing repeated GPU synchronization.
+                self._pending_writes.append(torch.stack((
+                    proposed,
+                    previous,
+                    net,
+                    other,
+                    dot,
+                    write_strength[0, token_index].detach().float(),
+                    write_mask[0, token_index].detach().float(),
+                )))
+            self._pending_boundaries.append(boundary)
+            if internal and index + 1 == self._persistent_count:
+                assert self._prefix_start is not None
+                end_weights = new if boundary else old
+                self._pending_prefix_change = _difference_norm(
+                    end_weights, self._prefix_start
+                )
+                self._prefix_start = None
+            self._write_index += 1
 
     def record_reads(
         self,
@@ -133,7 +150,11 @@ class _LayerRecorder:
         for index, metrics in enumerate(write_metrics):
             proposed, previous, net, other, dot, strength, mask = metrics
             internal = index < self._persistent_count
-            alignment = dot / (proposed * net) if proposed > 0 and net > 0 else None
+            alignment = (
+                dot / (proposed * net)
+                if self.chunk_size == 1 and proposed > 0 and net > 0
+                else None
+            )
             self.writes.append(WriteEvent(
                 layer=self.layer,
                 position=(
@@ -147,8 +168,10 @@ class _LayerRecorder:
                 proposed_write_norm=proposed,
                 previous_weight_norm=previous,
                 net_weight_change_norm=net,
-                other_movement_norm=other,
+                other_movement_norm=other if self.chunk_size == 1 else None,
                 write_to_net_alignment=alignment,
+                chunk_size=self.chunk_size,
+                chunk_boundary=self._pending_boundaries[index],
             ))
         if self._persistent_count:
             assert self._pending_prefix_change is not None
@@ -173,9 +196,15 @@ class _LayerRecorder:
                 relative_injection=(
                     injected_norm / incoming_norm if incoming_norm > 0 else None
                 ),
+                state_timing=(
+                    "post-write"
+                    if self._pending_boundaries[self._persistent_count + index]
+                    else "pre-write"
+                ),
             ))
         self.cursor += self._text_length
         self._pending_writes = []
+        self._pending_boundaries = []
         self._pending_prefix_change = None
         self._active = False
 
@@ -199,12 +228,15 @@ class TaalTraceRecorder(AbstractContextManager):
         decoder_layers = model.model.layers
         if any(layer < 0 or layer >= len(decoder_layers) for layer in layers):
             raise ValueError("Trace layer index is out of range")
-        if any(decoder_layers[layer].taal.neural_memory.config.chunk_size != 1 for layer in layers):
-            raise ValueError("TaaL scalar tracing currently requires memory_chunk_size=1")
         self.model = model
         self.token_count = token_count
         self.recorders = {
-            layer: _LayerRecorder(layer, position_offset) for layer in sorted(layers)
+            layer: _LayerRecorder(
+                layer,
+                position_offset,
+                decoder_layers[layer].taal.neural_memory.config.chunk_size,
+            )
+            for layer in sorted(layers)
         }
         self._attached = False
 

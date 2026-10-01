@@ -89,6 +89,54 @@ class TaalTraceExportTests(unittest.TestCase):
         self.assertTrue(all(event.injected_norm == 0 for event in recorder.reads))
         self.assertTrue(all(not event.enabled for event in recorder.reads))
 
+    @torch.inference_mode()
+    def test_chunked_trace_preserves_outputs_and_marks_boundary(self):
+        torch.manual_seed(94)
+        model = self.model(memory_chunk_size=4)
+        ids = torch.tensor([[1, 2, 3, 4, 5]])
+        baseline = model.prefill(ids, execution_block_size=3)
+
+        recorder = TaalTraceRecorder(model, layers=[0], token_count=5)
+        with recorder:
+            traced = model.prefill(ids, execution_block_size=3)
+
+        torch.testing.assert_close(traced.logits, baseline.logits, atol=0, rtol=0)
+        for name, weight in baseline.state.memory_states[0].weights.items():
+            torch.testing.assert_close(
+                traced.state.memory_states[0].weights[name], weight, atol=0, rtol=0
+            )
+        self.assertEqual(len(recorder.writes), 7)
+        self.assertEqual(len(recorder.reads), 5)
+        self.assertEqual([event.position for event in recorder.writes], [
+            None, None, 0, 1, 2, 3, 4,
+        ])
+        self.assertEqual([event.chunk_boundary for event in recorder.writes], [
+            False, False, False, True, False, False, False,
+        ])
+        self.assertEqual([event.state_timing for event in recorder.reads], [
+            "pre-write", "post-write", "pre-write", "pre-write", "pre-write",
+        ])
+        self.assertEqual(recorder.writes[0].net_weight_change_norm, 0)
+        self.assertGreater(recorder.writes[3].net_weight_change_norm, 0)
+        self.assertIsNone(recorder.writes[3].other_movement_norm)
+        self.assertEqual(recorder.internal_prefixes[0].net_weight_change_norm, 0)
+
+    @torch.inference_mode()
+    def test_token_gradients_sum_to_chunk_gradient(self):
+        torch.manual_seed(95)
+        memory = self.model(memory_chunk_size=4).model.layers[0].taal.neural_memory
+        weights = memory.initial_state(1).weights
+        keys = torch.randn(1, 4, memory.config.dim)
+        values = torch.randn_like(keys)
+        strength = torch.rand(1, 4)
+        combined, by_token = memory._chunk_gradient(
+            weights, keys, values, strength, trace_tokens=True
+        )
+        for name in combined:
+            torch.testing.assert_close(
+                by_token[name].sum(dim=1), combined[name], atol=1e-6, rtol=1e-5
+            )
+
     def test_export_round_trip_and_contract_rejects_unaligned_event(self):
         torch.manual_seed(93)
         model = self.model()
@@ -146,10 +194,10 @@ class TaalTraceExportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "absent visible token"):
             episode.to_dict()
 
-    def test_rejects_non_unit_memory_chunks(self):
+    def test_accepts_non_unit_memory_chunks(self):
         model = self.model(memory_chunk_size=2)
-        with self.assertRaisesRegex(ValueError, "memory_chunk_size=1"):
-            TaalTraceRecorder(model, layers=[0], token_count=2)
+        recorder = TaalTraceRecorder(model, layers=[0], token_count=2)
+        self.assertEqual(recorder.recorders[0].chunk_size, 2)
 
     @torch.inference_mode()
     def test_resumed_query_keeps_absolute_positions_without_repeating_prefix(self):

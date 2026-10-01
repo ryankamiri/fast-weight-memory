@@ -207,7 +207,15 @@ class NeuralMemory(nn.Module):
         keys: Float32[torch.Tensor, "B C D"],
         values: Float32[torch.Tensor, "B C D"],
         write_strength: Float32[torch.Tensor, "B C"],
-    ) -> dict[str, Float32[torch.Tensor, "B D D"]]:
+        *,
+        trace_tokens: bool = False,
+    ) -> (
+        dict[str, Float32[torch.Tensor, "B D D"]]
+        | tuple[
+            dict[str, Float32[torch.Tensor, "B D D"]],
+            dict[str, Float32[torch.Tensor, "B C D D"]],
+        ]
+    ):
         B, C, D = keys.shape
         with torch.inference_mode(False), torch.set_grad_enabled(self.training):
             timer = self.timing_observer
@@ -250,6 +258,7 @@ class NeuralMemory(nn.Module):
 
             tic = perf_counter() if timer is not None else 0.0
             weight_gradients: dict[str, Float32[torch.Tensor, "B D D"]] = {}
+            token_gradients: dict[str, Float32[torch.Tensor, "B C D D"]] = {}
             for layer_index in reversed(range(self.config.depth)):
                 name = f"layers.{layer_index}.weight"
                 layer_keys: Float32[torch.Tensor, "B C D"] = (
@@ -261,6 +270,13 @@ class NeuralMemory(nn.Module):
                 # (B D C) @ (B C D) -> (B D D), summing over the C tokens.
                 operation_started = perf_counter() if timer is not None else 0.0
                 weight_gradients[name] = value_gradient.transpose(-1, -2) @ layer_keys
+                if trace_tokens:
+                    # Each token contributes its own outer product to the one
+                    # chunk gradient. This is observation only: the model still
+                    # commits exactly one update at the chunk boundary.
+                    token_gradients[name] = (
+                        value_gradient.unsqueeze(-1) * layer_keys.unsqueeze(-2)
+                    )
                 if timer is not None:
                     timer("write_weight_gradient", perf_counter() - operation_started)
 
@@ -292,6 +308,8 @@ class NeuralMemory(nn.Module):
                 timer("gradient_calculation", perf_counter() - tic)
             if timer is not None:
                 timer("gradient_execution", perf_counter() - execution_started)
+            if trace_tokens:
+                return weight_gradients, token_gradients
             return weight_gradients
 
     def _update(
@@ -322,14 +340,15 @@ class NeuralMemory(nn.Module):
         if timer is not None:
             timer("write_strength_and_mask", perf_counter() - tic)
         tic = perf_counter() if timer is not None else 0.0
-        chunk_gradient: dict[str, Float32[torch.Tensor, "B D D"]] = (
-            self._chunk_gradient(
-                state.weights,
-                keys,
-                values,
-                write_strength,
+        if self.trace_observer is None:
+            chunk_gradient = self._chunk_gradient(
+                state.weights, keys, values, write_strength
             )
-        )
+            token_gradients = None
+        else:
+            chunk_gradient, token_gradients = self._chunk_gradient(
+                state.weights, keys, values, write_strength, trace_tokens=True
+            )
         if timer is not None:
             timer("gradient_call_total", perf_counter() - tic)
         tic = perf_counter() if timer is not None else 0.0
@@ -359,6 +378,11 @@ class NeuralMemory(nn.Module):
             )
             if timer is not None:
                 timer("pending_state_construction", perf_counter() - tic)
+            if self.trace_observer is not None:
+                assert token_gradients is not None
+                self.trace_observer(
+                    state, token_gradients, result, write_mask, write_strength
+                )
             return result
 
         # Summarize the completed chunk only to choose its forget/momentum controls;
@@ -412,9 +436,10 @@ class NeuralMemory(nn.Module):
             timer("committed_state_construction", perf_counter() - tic)
         if self.trace_observer is not None:
             tic = perf_counter() if timer is not None else 0.0
+            assert token_gradients is not None
             self.trace_observer(
                 state,
-                chunk_gradient,
+                token_gradients,
                 next_state,
                 write_mask,
                 write_strength,

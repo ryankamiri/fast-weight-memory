@@ -57,13 +57,12 @@ class TaalStateAuditTests(unittest.TestCase):
         self.assertIn('--checkpoint "$1"', launcher)
         self.assertIn("output/taal/pilot-1b-${SLURM_JOB_ID}", launcher)
 
-    def test_scores_only_audit_preserves_selection_and_all_controls(self):
+    def test_trace_audit_preserves_selection_and_all_controls(self):
         folder = Path(__file__).resolve().parents[1] / "evaluation/configs/taal"
         original = yaml.safe_load((folder / "delayed_recall_state_audit.yaml").read_text())
         scores = yaml.safe_load((folder / "delayed_recall_state_audit_scores.yaml").read_text())
         self.assertTrue(original["save_traces"])
-        self.assertFalse(scores["save_traces"])
-        original["save_traces"] = False
+        self.assertTrue(scores["save_traces"])
         self.assertEqual(scores, original)
         self.assertEqual((scores["dataset"]["start"], scores["dataset"]["end"]), (0, 64))
 

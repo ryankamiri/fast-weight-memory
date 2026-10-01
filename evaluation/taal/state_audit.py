@@ -296,7 +296,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     settings = yaml.safe_load(args.config.read_text())
-    save_traces = settings.get("save_traces", False)
+    save_traces = settings.get("save_traces", True)
     if type(save_traces) is not bool:
         parser.error("save_traces must be true or false")
     state_bank_batch_size = settings.get("state_bank_batch_size", 1)

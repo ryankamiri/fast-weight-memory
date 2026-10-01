@@ -93,8 +93,10 @@ paraphrases, and natural conversations.
 
 Explicit `..._chunk1.yaml`, `..._chunk4.yaml`, and `..._chunk8.yaml` recipes
 compare memory-update cadences. The unsuffixed recipe currently selects chunk 8
-for the eight-hour H200 run. The scores-only Pilot 1B configuration evaluates
-each trained checkpoint at its own cadence without per-token trace exports.
+for the eight-hour H200 run. Pilot 1B evaluates each checkpoint at its own
+memory-update cadence and saves traces by default. For chunk sizes above one,
+per-token proposed gradients are recorded, while the actual weight change is
+attributed to the chunk boundary rather than any single token.
 
 ### Configuration
 

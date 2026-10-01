@@ -24,8 +24,12 @@ class WriteEvent:
     proposed_write_norm: float
     previous_weight_norm: float
     net_weight_change_norm: float
-    other_movement_norm: float
+    other_movement_norm: float | None
     write_to_net_alignment: float | None
+    # For chunked memory, the proposed write belongs to this token but the
+    # actual state moves only when the entire chunk commits.
+    chunk_size: int = 1
+    chunk_boundary: bool = True
 
 
 @dataclass(frozen=True)
@@ -39,7 +43,7 @@ class ReadEvent:
     injected_norm: float
     incoming_norm: float
     relative_injection: float | None
-    state_timing: Literal["post-write"] = "post-write"
+    state_timing: Literal["pre-write", "post-write"] = "post-write"
 
 
 @dataclass(frozen=True)

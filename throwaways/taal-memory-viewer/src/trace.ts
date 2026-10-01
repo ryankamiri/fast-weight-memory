@@ -19,8 +19,10 @@ export interface WriteEvent {
   proposed_write_norm: number;
   previous_weight_norm: number;
   net_weight_change_norm: number;
-  other_movement_norm: number;
+  other_movement_norm: number | null;
   write_to_net_alignment: number | null;
+  chunk_size?: number;
+  chunk_boundary?: boolean;
 }
 
 export interface ReadEvent {
@@ -33,7 +35,7 @@ export interface ReadEvent {
   injected_norm: number;
   incoming_norm: number;
   relative_injection: number | null;
-  state_timing: 'post-write';
+  state_timing: 'pre-write' | 'post-write';
 }
 
 export interface InternalPrefix {
