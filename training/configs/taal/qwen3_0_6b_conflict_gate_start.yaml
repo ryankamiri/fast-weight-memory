@@ -1,0 +1,80 @@
+model:
+  architecture: taal
+  model_id: Qwen/Qwen3-0.6B-Base
+  revision: da87bfb608c14b7cf20ba1ce41287e8de496c0cd
+  working_memory_size: 128
+  max_persistent_kv_tokens: 64
+  memory_dim: 128
+  memory_depth: 2
+  memory_conv_kernel_size: 4
+  memory_chunk_size: 1
+  memory_initial_forget: 0.01
+  memory_initial_momentum: 0.9
+  memory_initial_write_strength: 0.1
+  num_persistent_tokens: 8
+  persistent_init_std: 0.02
+
+data:
+  dataset_id: data/taal_conflict_control.jsonl
+  dataset_config: local-jsonl
+  record_format: bridge_memory
+  train:
+    split: train
+    start: 0
+    end: 16
+    conditions: [micro_conflict]
+    query_variants: [exact]
+  val:
+    split: train
+    start: 0
+    end: 16
+    conditions: [micro_conflict]
+    query_variants: [exact]
+  allow_train_val_overlap: true
+  batch_size: 1
+  seq_len: 256
+  num_workers: 0
+  shuffle_buffer_size: 16
+
+loss:
+  all_tokens_weight: 0.0
+  delayed_answer_weight: 1.0
+
+optimizer:
+  lr: 1.0e-4
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1.0e-8
+  weight_decay: 0.0
+
+scheduler:
+  warmup_steps: 10
+  schedule_steps: 150
+  final_lr: 1.0e-5
+
+training:
+  max_steps: 150
+  seed: 42
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: false
+  max_grad_norm: 1.0
+  eval_every_steps: 25
+  eval_at_end: true
+  log_every_steps: 1
+  trainable_parameters: taal_only
+  initial_taal_gate: 0.05
+
+validation:
+  memory_read_scales: [1.0, 0.0]
+
+checkpoints:
+  output_dir: checkpoints
+  save_best: true
+  save_final: true
+  selection_metric: val/micro_conflict_exact_candidate_accuracy
+  selection_mode: max
+
+wandb:
+  project: fast-weight-memory
+  entity: ryanamiri05-northeastern-university
+  name: taal-conflict-c1-gate-start

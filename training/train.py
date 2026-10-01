@@ -1,4 +1,5 @@
 import argparse
+import math
 from dataclasses import asdict
 import os
 import signal
@@ -125,6 +126,16 @@ def configure_trainable_parameters(model, scope: str):
     return parameters
 
 
+@torch.no_grad()
+def initialize_taal_gates(model, effective_gate: float | None) -> None:
+    """Set only the gate ablation's starting value, before optimization."""
+    if effective_gate is None:
+        return
+    raw_gate = math.atanh(effective_gate)
+    for layer in model.model.layers:
+        layer.taal.residual_gate.fill_(raw_gate)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="training/configs/ttcd/qwen3_0_6b.yaml")
@@ -151,6 +162,7 @@ def main():
         if config.data.revision is None and not local_dataset:
             config.data.revision = api.dataset_info(config.data.dataset_id).sha
     model = load_model(config).to(device)
+    initialize_taal_gates(model, config.training.initial_taal_gate)
     trainable_parameters = configure_trainable_parameters(
         model, config.training.trainable_parameters,
     )

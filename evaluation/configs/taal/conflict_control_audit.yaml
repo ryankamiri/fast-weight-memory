@@ -9,3 +9,4 @@ execution_block_size: 128
 state_bank_batch_size: 1
 seed: 42
 save_traces: true
+swap_group_field: record_name

@@ -15,6 +15,7 @@ from evaluation.taal.state_audit import (
     select_memory_session,
     split_episode,
     summarize,
+    swap_sources,
 )
 
 
@@ -205,6 +206,27 @@ class TaalStateAuditTests(unittest.TestCase):
                 "conditions": ["no_bridge"],
                 "query_variants": ["exact"],
             })
+
+    def test_conflict_swap_uses_opposing_answer_in_same_record(self):
+        examples = [
+            {
+                "example_id": f"conflict-{group}-{variant}",
+                "record_name": f"Record {group}",
+                "target_token_id": 2 * group + variant,
+            }
+            for group in range(2)
+            for variant in range(2)
+        ]
+        donors = swap_sources(examples, "record_name")
+        self.assertEqual(donors["conflict-0-0"]["example_id"], "conflict-0-1")
+        self.assertEqual(donors["conflict-0-1"]["example_id"], "conflict-0-0")
+        self.assertEqual(donors["conflict-1-1"]["example_id"], "conflict-1-0")
+        self.assertEqual(
+            swap_sources(examples, None)["conflict-0-1"]["example_id"],
+            "conflict-1-0",
+        )
+        with self.assertRaisesRegex(ValueError, "exactly two"):
+            swap_sources(examples[:3], "record_name")
 
     def test_summary_reports_paired_condition_effects(self):
         def row(example, condition, correct, log_probability, choice=7):

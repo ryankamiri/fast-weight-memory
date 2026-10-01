@@ -16,7 +16,12 @@ from evaluation.storage import append_result, ensure_manifest, read_results
 from evaluation.taal.prefix_store import checkpoint_fingerprint
 from evaluation.taal.state_audit import fork_session_state, load_model, select_examples, split_episode
 from evaluation.taal.trace_contract import TraceEpisode
-from evaluation.taal.trace_export import TaalTraceExporter, TaalTraceRecorder, make_trace_tokens
+from evaluation.taal.trace_export import (
+    TaalTraceExporter,
+    TaalTraceRecorder,
+    make_trace_tokens,
+    trace_greedy_prediction,
+)
 from utils.seed import seed_everything
 
 
@@ -162,22 +167,48 @@ def main() -> None:
                     ),
                     **scores,
                 }
+                prediction_trace = trace_greedy_prediction(
+                    model,
+                    tokenizer,
+                    token_id=int(scores["vocabulary_top_token_id"]),
+                    position=len(moved["input_ids"]),
+                    state=output.state,
+                    layers=layers,
+                    memory_read_scale=query_scale,
+                )
                 exporter.export(TraceEpisode(
                     run_id=args.output_dir.name,
                     example_id=example["example_id"],
                     condition_id=f"{label}/{name}",
                     checkpoint=checkpoint,
                     tokenizer_id=metadata["tokenizer"],
-                    tokens=make_trace_tokens(moved["input_ids"], tokenizer),
-                    writes=prefix_trace.writes + query_trace.writes,
-                    reads=prefix_trace.reads + query_trace.reads,
+                    tokens=[
+                        *make_trace_tokens(moved["input_ids"], tokenizer),
+                        prediction_trace.token,
+                    ],
+                    writes=(
+                        prefix_trace.writes + query_trace.writes
+                        + prediction_trace.writes
+                    ),
+                    reads=(
+                        prefix_trace.reads + query_trace.reads
+                        + prediction_trace.reads
+                    ),
                     internal_prefixes=(
                         prefix_trace.internal_prefixes + query_trace.internal_prefixes
+                        + prediction_trace.internal_prefixes
                     ),
-                    outcome=row,
+                    outcome={
+                        **row,
+                        "candidate_choice_token": tokenizer.decode(
+                            [int(row["candidate_choice_token_id"])]
+                        ),
+                    },
                     metadata={
                         "query_start_position": len(prefix),
                         "fact_position": moved["fact_position"],
+                        "expected_answer": moved["answer"],
+                        "expected_token_id": int(moved["target_token_id"]),
                         "prefix_read_scale": prefix_scale,
                         "query_read_scale": query_scale,
                     },

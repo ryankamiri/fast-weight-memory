@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { TraceFolder } from './trace';
 import { splitEpisodeKey } from './trace';
+import { exampleName } from './answer';
 
 export function conditionLabel(condition: string): string {
   const labels: Record<string, string> = {
@@ -27,7 +28,7 @@ export function TraceSidebar({ runs, selectedRun, selectedKey, onSelect }: {
     run,
     keys: Object.keys(run.manifest.episodes)
       .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-      .filter(key => `${run.rootName} ${key} ${conditionLabel(splitEpisodeKey(key).condition)}`.toLowerCase().includes(search.toLowerCase())),
+      .filter(key => `${run.rootName} ${key} ${exampleName(splitEpisodeKey(key).exampleId, run.exampleLabels)} ${conditionLabel(splitEpisodeKey(key).condition)}`.toLowerCase().includes(search.toLowerCase())),
   })).filter(group => group.keys.length > 0), [runs, search]);
 
   function toggle(id: string) {
@@ -51,7 +52,7 @@ export function TraceSidebar({ runs, selectedRun, selectedKey, onSelect }: {
         const { exampleId, condition } = splitEpisodeKey(key);
         const active = run.id === selectedRun && key === selectedKey;
         return <button key={key} className={`trace-entry${active ? ' active' : ''}`} aria-current={active ? 'page' : undefined} onClick={() => onSelect(run.id, key)} title={`${exampleId} / ${condition}`}>
-          <span className="trace-entry-title">{exampleId}</span>
+          <span className="trace-entry-title">{exampleName(exampleId, run.exampleLabels)}</span>
           <span className="trace-entry-condition">{conditionLabel(condition)}</span>
         </button>;
       })}</div>}

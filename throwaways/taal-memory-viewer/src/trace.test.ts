@@ -6,7 +6,8 @@ import { gzipSync } from 'node:zlib';
 import { scanTraces, seedSynthetic } from '../server/local-traces';
 import { calibrateLayer, percentile } from './calibration';
 import { demoEpisode, demoManifest } from './demo';
-import { loadEpisode } from './trace';
+import { loadEpisode, splitEpisodeKey } from './trace';
+import { exampleName, expectedAnswer, trajectoryTokens } from './answer';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -34,6 +35,7 @@ describe('fixed local trace directory', () => {
     expect(index.errors).toEqual([]);
     expect(index.runs).toHaveLength(1);
     expect(index.runs[0].synthetic).toBe(true);
+    expect(index.runs[0].exampleLabels).toEqual({});
     vi.stubGlobal('fetch', vi.fn(async (input: string) => {
       const url = new URL(input, 'http://localhost');
       return new Response(await readFile(resolve(directory, url.searchParams.get('run')!, url.searchParams.get('path')!)));
@@ -65,5 +67,61 @@ describe('fixed local trace directory', () => {
     const index = await scanTraces(directory);
     expect(index.runs).toHaveLength(0);
     expect(index.errors).toHaveLength(1);
+  });
+  it('accepts unavailable chunk movement and keeps compound conditions together', async () => {
+    const directory = await root();
+    const episode = {
+      ...demoEpisode,
+      condition_id: '1536/episode_off',
+      writes: demoEpisode.writes.map(write => ({ ...write, other_movement_norm: null })),
+      reads: demoEpisode.reads.map(read => ({ ...read, state_timing: 'pre-write' })),
+    };
+    const manifest = { ...demoManifest, episodes: { 'example-01/1536/episode_off': 'episodes/demo.json.gz' } };
+    await addExport(directory, 'chunked-run', manifest, episode);
+    const index = await scanTraces(directory);
+    expect(index.errors).toEqual([]);
+    expect(index.runs).toHaveLength(1);
+    expect(splitEpisodeKey('example-01/1536/episode_off')).toEqual({ exampleId: 'example-01', condition: '1536/episode_off' });
+  });
+});
+
+describe('answer labels', () => {
+  it('prefers the exported answer and falls back to a known fact position', () => {
+    const episode = {
+      ...demoEpisode,
+      metadata: { expected_answer: 'amber', fact_position: 4 },
+    };
+    expect(expectedAnswer(episode)).toBe('amber');
+    expect(expectedAnswer({ ...episode, metadata: { fact_position: 4 } })).toBe('amber');
+  });
+
+  it('recovers the answer from an older TTCD trace without inventing one for unrelated text', () => {
+    const text = "User: Remember that Record R0001's archive label is anchor.\nAssistant: Understood.\n\n";
+    const episode = {
+      ...demoEpisode,
+      example_id: 'fact-0001-no_bridge-exact',
+      tokens: [{ position: 0, token_id: 1, text, phase: 'prompt' as const }],
+      metadata: {},
+    };
+    expect(expectedAnswer(episode)).toBe('anchor');
+    expect(expectedAnswer({ ...episode, example_id: 'unrelated-example' })).toBeNull();
+    expect(exampleName(episode.example_id, { [episode.example_id]: 'anchor' })).toBe('anchor');
+  });
+
+  it('shows a clickable greedy prediction for old exports without inventing trace events', () => {
+    const older = {
+      ...demoEpisode,
+      outcome: { vocabulary_top_token_id: 7, vocabulary_top_token: ' anchor' },
+    };
+    const visible = trajectoryTokens(older);
+    expect(visible.at(-1)).toEqual({
+      position: demoEpisode.tokens.length,
+      token_id: 7,
+      text: ' anchor',
+      phase: 'generated',
+    });
+    expect(older.writes.some(write => write.position === visible.at(-1)?.position)).toBe(false);
+    const traced = { ...older, tokens: visible };
+    expect(trajectoryTokens(traced)).toBe(visible);
   });
 });

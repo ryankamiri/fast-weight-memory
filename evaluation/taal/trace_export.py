@@ -1,4 +1,5 @@
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 import gzip
 import hashlib
 import json
@@ -9,6 +10,7 @@ import tempfile
 import torch
 
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
+from architectures.taal.qwen.state import TaalModelState
 from architectures.titans.state import NeuralMemoryState
 from evaluation.taal.trace_contract import (
     InternalPrefix,
@@ -294,6 +296,51 @@ def make_trace_tokens(token_ids: list[int], tokenizer, *, offset: int = 0, phase
         )
         for index, token_id in enumerate(token_ids)
     ]
+
+
+@dataclass(frozen=True)
+class TracedPrediction:
+    token: TraceToken
+    writes: list[WriteEvent]
+    reads: list[ReadEvent]
+    internal_prefixes: list[InternalPrefix]
+
+
+@torch.inference_mode()
+def trace_greedy_prediction(
+    model: TaalQwen3ForCausalLM,
+    tokenizer,
+    *,
+    token_id: int,
+    position: int,
+    state: TaalModelState,
+    layers: list[int],
+    memory_read_scale: float,
+) -> TracedPrediction:
+    """Feed back the already-scored greedy token and trace its later update/read.
+
+    The caller's prompt logits chose this token. These events happen afterward
+    and therefore cannot be credited with choosing the token itself.
+    """
+    token = make_trace_tokens(
+        [token_id], tokenizer, offset=position, phase="generated"
+    )[0]
+    recorder = TaalTraceRecorder(model, layers, 1, position_offset=position)
+    with recorder:
+        model(
+            torch.tensor([[token_id]], dtype=torch.long, device=model.device),
+            state=state,
+            use_cache=True,
+            logits_to_keep=1,
+            memory_read_scale=memory_read_scale,
+            prepend_memory_tokens=False,
+        )
+    return TracedPrediction(
+        token=token,
+        writes=recorder.writes,
+        reads=recorder.reads,
+        internal_prefixes=recorder.internal_prefixes,
+    )
 
 
 def _atomic_json(path: Path, payload: dict) -> None:

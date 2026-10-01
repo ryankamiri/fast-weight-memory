@@ -6,6 +6,8 @@ import type { LayerCalibration } from './calibration';
 import { calibrateLayer, intensity, percentile } from './calibration';
 import { TraceSidebar, conditionLabel } from './TraceSidebar';
 import { InternalToken } from './InternalToken';
+import { exampleName, expectedAnswer, trajectoryTokens } from './answer';
+import './answer.css';
 
 type Mode = 'writes' | 'reads';
 type Selection = { kind: 'text'; position: number } | { kind: 'internal'; segment: number; index: number };
@@ -58,6 +60,8 @@ function App() {
   const keys = useMemo(() => Object.keys(folder?.manifest.episodes ?? {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })), [folder]);
   const currentCondition = key ? splitEpisodeKey(key).condition : '';
   const layers = useMemo(() => [...new Set([...(episode?.writes ?? []).map(item => item.layer), ...(episode?.reads ?? []).map(item => item.layer)])].sort((a, b) => a - b), [episode]);
+  const visibleTokens = useMemo(() => episode ? trajectoryTokens(episode) : [], [episode]);
+  const predictingToken = useMemo(() => episode?.tokens.filter(token => token.phase === 'prompt').at(-1), [episode]);
 
   useEffect(() => {
     if (!folder) return;
@@ -147,9 +151,19 @@ function App() {
 
   const selectedWrite: WriteEvent | undefined = selection?.kind === 'text' ? writeAt.get(selection.position) : episode?.writes.find(item => item.layer === layer && item.position === null && item.segment_index === selection?.segment && item.internal_index === selection.index);
   const selectedRead: ReadEvent | undefined = selection?.kind === 'text' ? readAt.get(selection.position) : undefined;
-  const selectedToken = selection?.kind === 'text' ? episode?.tokens.find(token => token.position === selection.position) : undefined;
-  const relevantComparisons = selection?.kind === 'text' ? comparisons.filter(item => item.scored_position === selection.position && (item.baseline_condition === currentCondition || item.variant_condition === currentCondition)) : [];
+  const selectedToken = selection?.kind === 'text' ? visibleTokens.find(token => token.position === selection.position) : undefined;
+  const scoredPosition = selectedToken?.phase === 'generated' ? predictingToken?.position : selection?.kind === 'text' ? selection.position : undefined;
+  const relevantComparisons = scoredPosition !== undefined ? comparisons.filter(item => item.scored_position === scoredPosition && (item.baseline_condition === currentCondition || item.variant_condition === currentCondition)) : [];
   const refValues = mode === 'writes' ? calibration?.writes : calibration?.reads;
+  const answer = episode ? expectedAnswer(episode) : null;
+  const candidateText = episode?.outcome && typeof episode.outcome.candidate_choice_token === 'string'
+    ? episode.outcome.candidate_choice_token.trim()
+    : null;
+  const candidateId = episode?.outcome?.candidate_choice_token_id;
+  const candidateChoice = candidateText || (typeof candidateId === 'number' ? `Token #${candidateId}` : null);
+  const topToken = episode?.outcome?.vocabulary_top_token;
+  const targetLogProbability = episode?.outcome?.target_log_probability;
+  const candidateCorrect = episode?.outcome?.candidate_correct;
 
   return <div className="shell">
     <aside className="sidebar">
@@ -158,14 +172,20 @@ function App() {
     </aside>
 
     <main className="main">
-      <header className="topbar"><div><span className="eyebrow">TRAJECTORY INSPECTION</span><h1>{episode ? episode.example_id : 'Inspect a memory trace'}</h1><p>{episode ? `${conditionLabel(episode.condition_id)} · ${episode.tokens.length.toLocaleString()} visible tokens` : 'A token-level view of online writes and injected reads.'}</p></div><div className="topbar-meta">{episode?.checkpoint && <><span>CHECKPOINT</span><strong title={episode.checkpoint}>{episode.checkpoint.split('/').at(-1)}</strong></>}</div></header>
+      <header className="topbar"><div><span className="eyebrow">TRAJECTORY INSPECTION</span><h1>{episode ? exampleName(episode.example_id, folder?.exampleLabels ?? {}) : 'Inspect a memory trace'}</h1><p>{episode ? `${conditionLabel(episode.condition_id)} · ${episode.tokens.filter(token => token.phase === 'prompt').length.toLocaleString()} prompt tokens` : 'A token-level view of online writes and injected reads.'}</p></div><div className="topbar-meta">{episode?.checkpoint && <><span>CHECKPOINT</span><strong title={episode.checkpoint}>{episode.checkpoint.split('/').at(-1)}</strong></>}</div></header>
       {error && <div role="alert" className="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}
       {discoveryErrors.length > 0 && <div role="alert" className="alert"><div><strong>Exports not loaded</strong>{discoveryErrors.map(message => <p key={message}>{message}</p>)}</div></div>}
       {!episode ? <section className="empty"><h2>{busy ? 'Reading episode…' : 'Checking local traces…'}</h2></section> : <>
+        {episode.outcome && <section className="answer-summary" aria-label="Answer scoring">
+          <div><span>EXPECTED NEXT TOKEN</span><strong>{answer ?? 'Not exported'}</strong></div>
+          <div><span>BEST OF CANDIDATES</span><strong>{candidateChoice ?? 'Not recorded'}</strong><small>{candidateCorrect === true ? 'Correct' : candidateCorrect === false ? 'Incorrect' : 'Not scored'}</small></div>
+          <div><span>GREEDY NEXT TOKEN</span><strong>{typeof topToken === 'string' ? JSON.stringify(topToken) : 'Not recorded'}</strong></div>
+          <div><span>TARGET LOG PROBABILITY</span><strong>{typeof targetLogProbability === 'number' ? number(targetLogProbability) : 'Not recorded'}</strong></div>
+        </section>}
         <section className="viewbar"><div className="view-controls"><div className="segmented"><button className={mode === 'writes' ? 'active' : ''} onClick={() => setMode('writes')}>Memory writes</button><button className={mode === 'reads' ? 'active' : ''} onClick={() => setMode('reads')}>Memory reads</button></div><label className="layer-control">Layer<select aria-label="Memory layer" value={layer} onChange={event => setLayer(Number(event.target.value))}>{layers.map(item => <option key={item} value={item}>{item}</option>)}</select></label></div><div className="search"><input aria-label="Find text" value={search} onChange={event => setSearch(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') jumpToSearch(); }} placeholder="Find text in episode" /><button onClick={jumpToSearch}>Find</button></div></section>
         <div className="content-grid">
           <section className="trajectory-panel"><div className="panel-heading"><div><span className="eyebrow">SEQUENCE</span><h2>Token trajectory</h2></div><span>Click a token to inspect its signal</span></div><div className="trajectory" aria-label="Token trajectory" aria-busy={!calibration}>
-            {episode.tokens.map(token => {
+            {visibleTokens.map(token => {
               const write = writeAt.get(token.position);
               const read = readAt.get(token.position);
               let className = 'token';
@@ -179,6 +199,7 @@ function App() {
                 else if (!read.enabled || !read.relative_injection) className += ' neutral';
                 else if (calibration) strength = intensity(read.relative_injection, calibration.readP99);
               }
+              if (token.phase === 'generated') className += ' generated-token';
               if (selection?.kind === 'text' && selection.position === token.position) className += ' selected';
               return <span key={token.position} className="token-slot">
                 {(prefixesAt.get(token.position) ?? []).map(prefix => {
@@ -187,16 +208,17 @@ function App() {
                   const internals = episode.writes.filter(item => item.layer === layer && item.position === null && item.segment_index === prefix.segment_index).sort((a, b) => (a.internal_index ?? 0) - (b.internal_index ?? 0));
                   return <span key={id} className="prefix-wrap"><button className="prefix-marker" onClick={() => togglePrefix(prefix)} aria-expanded={expanded}>{prefix.count} internal memory tokens <b>{expanded ? '▴' : '▾'}</b></button>{expanded && <span className="prefix-expanded">{Array.from({ length: prefix.count }, (_, index) => <InternalToken key={index} index={index} write={internals.find(item => item.internal_index === index)} mode={mode} writeP99={calibration?.writeP99 ?? null} selected={selection?.kind === 'internal' && selection.segment === prefix.segment_index && selection.index === index} onSelect={() => setSelection({ kind: 'internal', segment: prefix.segment_index, index })} />)}</span>}</span>;
                 })}
-                <button id={`token-${token.position}`} title={`Token ${token.position} · id ${token.token_id} · ${JSON.stringify(token.text)}`} aria-label={`Token ${token.position}: ${JSON.stringify(token.text)}`} className={className} style={eventColor(strength, 1, mode)} onClick={() => setSelection({ kind: 'text', position: token.position })}><span>{token.text.trim() || (token.text.includes('\n') ? '↵' : token.text.includes('\t') ? '⇥' : token.text ? '␠' : `⟨${token.token_id}⟩`)}</span></button>
+                <button id={`token-${token.position}`} title={`${token.phase === 'generated' ? 'Greedy prediction' : `Token ${token.position}`} · id ${token.token_id} · ${JSON.stringify(token.text)}`} aria-label={`${token.phase === 'generated' ? 'Greedy prediction' : `Token ${token.position}`}: ${JSON.stringify(token.text)}`} className={className} style={eventColor(strength, 1, mode)} onClick={() => setSelection({ kind: 'text', position: token.position })}><span>{token.text.trim() || (token.text.includes('\n') ? '↵' : token.text.includes('\t') ? '⇥' : token.text ? '␠' : `⟨${token.token_id}⟩`)}</span></button>
               </span>;
             })}
           </div></section>
           <aside className="details-panel"><div className="panel-heading"><div><span className="eyebrow">INSPECTOR</span><h2>{selection?.kind === 'internal' ? `Internal token P${selection.index + 1}` : selectedToken ? `Token ${selectedToken.position}` : 'Select a token'}</h2></div></div>
             {selection && <>
+              {selectedToken?.phase === 'generated' && <div className="prediction-note">The preceding prompt token's read influenced this prediction. Reads and writes on the predicted token happen only after it is fed back.{predictingToken && <button onClick={() => { setSelection({ kind: 'text', position: predictingToken.position }); document.getElementById(`token-${predictingToken.position}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }); }}>Inspect predicting token</button>}</div>}
               {selectedToken && <div className="selected-text"><span>TEXT FRAGMENT</span><strong>{JSON.stringify(selectedToken.text)}</strong><small>ID {selectedToken.token_id} · {selectedToken.phase}</small></div>}
-              {mode === 'writes' ? selectedWrite ? <div className="metric-grid">{(selectedWrite.chunk_size ?? 1) > 1 && <p className="inspector-note">This token contributes to a {selectedWrite.chunk_size}-token gradient. Weights change only at the chunk boundary; the boundary's net change belongs to the whole chunk.</p>}<Metric label="NEW WRITE · ||−gₜ||" value={selectedWrite.write_enabled ? number(selectedWrite.proposed_write_norm) : 'Masked'} note="Includes learned write strength" /><Metric label="REFERENCE PERCENTILE" value={selectedWrite.write_enabled && calibration ? `${number(percentile(refValues ?? [], selectedWrite.proposed_write_norm), 3)}%` : 'Unavailable'} note="Rank among reference writes, not usefulness" /><Metric label="PREVIOUS ||W||" value={number(selectedWrite.previous_weight_norm)} /><Metric label="WRITE / PREVIOUS" value={number(selectedWrite.previous_weight_norm ? selectedWrite.proposed_write_norm / selectedWrite.previous_weight_norm : null)} /><Metric label={selectedWrite.chunk_boundary && (selectedWrite.chunk_size ?? 1) > 1 ? 'CHUNK NET CHANGE · ||ΔW||' : 'NET CHANGE · ||ΔWₜ||'} value={number(selectedWrite.net_weight_change_norm)} note={selectedWrite.chunk_boundary ? 'Includes momentum and forgetting' : 'No weight update before this chunk boundary'} /><Metric label="OTHER MOVEMENT · ||ΔWₜ + gₜ||" value={number(selectedWrite.other_movement_norm)} /><Metric label="WRITE ↔ NET ALIGNMENT" value={number(selectedWrite.write_to_net_alignment)} note="Unavailable for chunk-level updates" /><Metric label="WRITE STRENGTH θₜ" value={number(selectedWrite.write_strength)} /></div> : <p className="unavailable">This token has no write measurement at the selected layer.</p>
+              {mode === 'writes' ? selectedWrite ? <div className="metric-grid">{(selectedWrite.chunk_size ?? 1) > 1 && <p className="inspector-note">This token contributes to a {selectedWrite.chunk_size}-token gradient. Weights change only at the chunk boundary; the boundary's net change belongs to the whole chunk.</p>}<Metric label="NEW WRITE · ||−gₜ||" value={selectedWrite.write_enabled ? number(selectedWrite.proposed_write_norm) : 'Masked'} note="Includes learned write strength" /><Metric label="REFERENCE PERCENTILE" value={selectedWrite.write_enabled && calibration ? `${number(percentile(refValues ?? [], selectedWrite.proposed_write_norm), 3)}%` : 'Unavailable'} note="Rank among reference writes, not usefulness" /><Metric label="PREVIOUS ||W||" value={number(selectedWrite.previous_weight_norm)} /><Metric label="WRITE / PREVIOUS" value={number(selectedWrite.previous_weight_norm ? selectedWrite.proposed_write_norm / selectedWrite.previous_weight_norm : null)} /><Metric label={selectedWrite.chunk_boundary && (selectedWrite.chunk_size ?? 1) > 1 ? 'CHUNK NET CHANGE · ||ΔW||' : 'NET CHANGE · ||ΔWₜ||'} value={number(selectedWrite.net_weight_change_norm)} note={selectedWrite.chunk_boundary ? 'Includes momentum and forgetting' : 'No weight update before this chunk boundary'} /><Metric label="OTHER MOVEMENT · ||ΔWₜ + gₜ||" value={number(selectedWrite.other_movement_norm)} /><Metric label="WRITE ↔ NET ALIGNMENT" value={number(selectedWrite.write_to_net_alignment)} note="Unavailable for chunk-level updates" /><Metric label="WRITE STRENGTH θₜ" value={number(selectedWrite.write_strength)} /></div> : <p className="unavailable">{selectedToken?.phase === 'generated' ? 'This older export saved the prediction but did not replay it, so its write was not measured.' : 'This token has no write measurement at the selected layer.'}</p>
                 : selection.kind === 'internal' ? <div className="metric-grid"><Metric label="READ STATUS" value="Read output discarded" note="Not injected into the transformer residual stream" /></div>
-                : selectedRead ? <div className="metric-grid"><Metric label="READ STATUS" value={selectedRead.enabled ? 'Enabled' : 'Disabled'} note={selectedRead.state_timing === 'post-write' ? 'Read uses the newly committed state' : 'Read uses the previous completed chunk state'} /><Metric label="INJECTED ||δ||" value={number(selectedRead.injected_norm)} note="After gate and read scale" /><Metric label="INCOMING ||h||" value={number(selectedRead.incoming_norm)} /><Metric label="RELATIVE INJECTION" value={number(selectedRead.relative_injection)} /><Metric label="REFERENCE PERCENTILE" value={selectedRead.enabled && calibration && selectedRead.relative_injection != null ? `${number(percentile(refValues ?? [], selectedRead.relative_injection), 3)}%` : 'Unavailable'} /><Metric label="READ SCALE" value={number(selectedRead.read_scale)} /><Metric label="RESIDUAL GATE" value={number(selectedRead.residual_gate)} /></div> : <p className="unavailable">This token has no read measurement at the selected layer.</p>}
+                : selectedRead ? <div className="metric-grid"><Metric label="READ STATUS" value={selectedRead.enabled ? 'Enabled' : 'Disabled'} note={selectedRead.state_timing === 'post-write' ? 'Read uses the newly committed state' : 'Read uses the previous completed chunk state'} /><Metric label="INJECTED ||δ||" value={number(selectedRead.injected_norm)} note="After gate and read scale" /><Metric label="INCOMING ||h||" value={number(selectedRead.incoming_norm)} /><Metric label="RELATIVE INJECTION" value={number(selectedRead.relative_injection)} /><Metric label="REFERENCE PERCENTILE" value={selectedRead.enabled && calibration && selectedRead.relative_injection != null ? `${number(percentile(refValues ?? [], selectedRead.relative_injection), 3)}%` : 'Unavailable'} /><Metric label="READ SCALE" value={number(selectedRead.read_scale)} /><Metric label="RESIDUAL GATE" value={number(selectedRead.residual_gate)} /></div> : <p className="unavailable">{selectedToken?.phase === 'generated' ? 'This older export saved the prediction but did not replay it, so its read was not measured.' : 'This token has no read measurement at the selected layer.'}</p>}
               {selection.kind === 'internal' && <p className="inspector-note">This is a learned memory-only token. Its read output is discarded; its write can still change the fast-weight state.</p>}
               {selection.kind === 'text' && (prefixesAt.get(selection.position) ?? []).map(prefix => <div key={prefix.segment_index} className="prefix-note">Internal prefix before this token: {prefix.count} tokens · group net state change {number(prefix.net_weight_change_norm)}</div>)}
               {mode === 'reads' && relevantComparisons.map(item => <div className="comparison" key={`${item.baseline_condition}/${item.variant_condition}`}><span className="eyebrow">PAIRED PREDICTION · WHOLE QUERY</span><h3>{item.baseline_condition} − {item.variant_condition}</h3><strong>{number(item.difference_log_probability)} Δ log p</strong><p>Scored next-token ID {item.scored_token_id}. Same text prefix: {item.identical_text_prefix ? 'yes' : 'no'} · same starting KV: {item.same_starting_kv ? 'yes' : 'no'}. This is a query-level intervention, not attribution to this one layer’s read.</p></div>)}

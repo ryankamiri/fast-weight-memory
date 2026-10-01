@@ -282,9 +282,10 @@ class TaalPrefixStoreTests(unittest.TestCase):
                         episode_traces.append(trace)
                 self.assertEqual(len(episode_traces), 18)
                 for trace in episode_traces:
-                    self.assertEqual(len(trace["reads"]), 14)
+                    self.assertEqual(len(trace["reads"]), 16)
                     self.assertEqual(len(trace["internal_prefixes"]), 2)
-                    self.assertEqual({event["position"] for event in trace["reads"]}, set(range(7)))
+                    self.assertEqual({event["position"] for event in trace["reads"]}, set(range(8)))
+                    self.assertEqual(trace["tokens"][-1]["phase"], "generated")
                 with patch.object(model, "prefill", side_effect=AssertionError("already finished")):
                     state_audit.main()
                 # An interrupted query phase also resumes from disk without a

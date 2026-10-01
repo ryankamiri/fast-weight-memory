@@ -9,7 +9,11 @@ import torch
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 from architectures.taal.qwen.configuration import TaalQwen3Config
 from evaluation.taal.trace_contract import TraceComparison, TraceEpisode, TraceToken
-from evaluation.taal.trace_export import TaalTraceExporter, TaalTraceRecorder
+from evaluation.taal.trace_export import (
+    TaalTraceExporter,
+    TaalTraceRecorder,
+    trace_greedy_prediction,
+)
 
 
 class TaalTraceExportTests(unittest.TestCase):
@@ -207,6 +211,36 @@ class TaalTraceExportTests(unittest.TestCase):
         model = self.model(memory_chunk_size=2)
         recorder = TaalTraceRecorder(model, layers=[0], token_count=2)
         self.assertEqual(recorder.recorders[0].chunk_size, 2)
+
+    @torch.inference_mode()
+    def test_greedy_prediction_replay_records_events_after_scoring(self):
+        model = self.model()
+        prompt = model.prefill(torch.tensor([[1, 2, 3]]), execution_block_size=2)
+        chosen = int(prompt.logits[0, -1].argmax().item())
+
+        class Tokenizer:
+            @staticmethod
+            def decode(ids, **_kwargs):
+                return f" token-{ids[0]}"
+
+        traced = trace_greedy_prediction(
+            model,
+            Tokenizer(),
+            token_id=chosen,
+            position=3,
+            state=prompt.state,
+            layers=[0, 1],
+            memory_read_scale=1.0,
+        )
+        self.assertEqual(traced.token.position, 3)
+        self.assertEqual(traced.token.phase, "generated")
+        self.assertEqual(traced.token.token_id, chosen)
+        self.assertEqual(traced.token.text, f" token-{chosen}")
+        self.assertEqual({event.position for event in traced.writes}, {3})
+        self.assertEqual({event.position for event in traced.reads}, {3})
+        self.assertEqual(len(traced.writes), 2)
+        self.assertEqual(len(traced.reads), 2)
+        self.assertEqual(traced.internal_prefixes, [])
 
     @torch.inference_mode()
     def test_resumed_query_keeps_absolute_positions_without_repeating_prefix(self):

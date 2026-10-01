@@ -162,6 +162,7 @@ class LoopConfig:
     eval_at_end: bool = True
     log_every_steps: int = 10
     trainable_parameters: str = "all"
+    initial_taal_gate: float | None = None
 
 
 @dataclass
@@ -247,6 +248,13 @@ class TrainingConfig:
                 raise ValueError("TaaL models require TaaL validation settings")
             if self.training.trainable_parameters == "ttcd_only":
                 raise ValueError("TaaL models cannot use ttcd_only training")
+            gate = self.training.initial_taal_gate
+            if gate is not None and (
+                type(gate) not in (int, float)
+                or not math.isfinite(gate)
+                or not 0 <= gate < 1
+            ):
+                raise ValueError("initial_taal_gate must be in [0, 1)")
             for name in (
                 "working_memory_size",
                 "memory_dim",
@@ -278,6 +286,8 @@ class TrainingConfig:
                 or self.model.persistent_init_std <= 0
             ):
                 raise ValueError("persistent_init_std must be finite and positive")
+        elif self.training.initial_taal_gate is not None:
+            raise ValueError("initial_taal_gate requires a TaaL model")
         weights = [("all_tokens_weight", self.loss.all_tokens_weight)]
         if isinstance(self.loss, BridgeMemoryLossConfig):
             weights.append(("delayed_answer_weight", self.loss.delayed_answer_weight))

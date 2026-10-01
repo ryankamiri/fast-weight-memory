@@ -24,7 +24,12 @@ from training.config import (
     load_config,
 )
 from training.engine import build_scheduler, perplexity, train, validate
-from training.train import configure_trainable_parameters, load_model, verify_loading
+from training.train import (
+    configure_trainable_parameters,
+    initialize_taal_gates,
+    load_model,
+    verify_loading,
+)
 from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
@@ -85,6 +90,41 @@ def batch(value, size=1, length=4):
 
 
 class TrainingConfigTests(unittest.TestCase):
+    def test_conflict_ablations_change_one_setting_each(self):
+        folder = Path(__file__).resolve().parents[1] / "training/configs/taal"
+        baseline = load_config(folder / "qwen3_0_6b_conflict_control.yaml")
+        low_forget = load_config(folder / "qwen3_0_6b_conflict_low_forget.yaml")
+        gate_start = load_config(folder / "qwen3_0_6b_conflict_gate_start.yaml")
+
+        expected_forget = load_config(folder / "qwen3_0_6b_conflict_control.yaml")
+        expected_forget.model.memory_initial_forget = 0.0001
+        expected_forget.wandb.name = low_forget.wandb.name
+        self.assertEqual(low_forget, expected_forget)
+
+        expected_gate = load_config(folder / "qwen3_0_6b_conflict_control.yaml")
+        expected_gate.training.initial_taal_gate = 0.05
+        expected_gate.wandb.name = gate_start.wandb.name
+        self.assertEqual(gate_start, expected_gate)
+        self.assertEqual(baseline.model.memory_chunk_size, 1)
+
+    def test_gate_ablation_sets_effective_gate_before_training(self):
+        config = TaalQwen3Config(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=24,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=4,
+            memory_dim=8,
+        )
+        model = TaalQwen3ForCausalLM(config)
+        initialize_taal_gates(model, 0.05)
+        for layer in model.model.layers:
+            self.assertAlmostEqual(
+                torch.tanh(layer.taal.residual_gate).item(), 0.05, places=6
+            )
+
     def test_taal_short_chunk_experiments_change_only_cadence_and_run_name(self):
         root = Path(__file__).resolve().parents[1]
         folder = root / "training/configs/taal"

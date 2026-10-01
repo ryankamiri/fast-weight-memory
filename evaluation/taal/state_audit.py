@@ -27,6 +27,7 @@ from evaluation.taal.trace_export import (
     TaalTraceExporter,
     TaalTraceRecorder,
     make_trace_tokens,
+    trace_greedy_prediction,
 )
 from utils.seed import seed_everything
 from training.taal_timing import TaalEvaluationTimings, TaalKernelSampler
@@ -42,6 +43,7 @@ class AuditCondition:
 class StateAuditExample(TypedDict):
     example_id: str
     fact_id: int
+    answer: str
     condition: str
     query_variant: str
     input_ids: list[int]
@@ -178,6 +180,37 @@ def select_examples(dataset, settings) -> list[StateAuditExample]:
                 f"record range and filters, received {len(selected)}"
             )
     return selected
+
+
+def swap_sources(
+    examples: list[StateAuditExample], group_field: str | None
+) -> dict[str, StateAuditExample]:
+    """Select the other member of a matched pair, or the standard cyclic donor."""
+    if group_field is None:
+        return {
+            example["example_id"]: examples[(index + 1) % len(examples)]
+            for index, example in enumerate(examples)
+        }
+    if not group_field:
+        raise ValueError("swap_group_field must be a nonempty field name")
+
+    groups: dict[str, list[StateAuditExample]] = {}
+    for example in examples:
+        group = example.get(group_field)
+        if not isinstance(group, str) or not group:
+            raise ValueError(f"Every example needs a nonempty {group_field!r}")
+        groups.setdefault(group, []).append(example)
+
+    donors: dict[str, StateAuditExample] = {}
+    for group, pair in groups.items():
+        if len(pair) != 2:
+            raise ValueError(f"Swap group {group!r} must contain exactly two examples")
+        first, second = pair
+        if first["target_token_id"] == second["target_token_id"]:
+            raise ValueError(f"Swap group {group!r} must have opposing answers")
+        donors[first["example_id"]] = second
+        donors[second["example_id"]] = first
+    return donors
 
 
 def example_batches_by_prefix_length(examples, batch_size):
@@ -332,6 +365,10 @@ def main():
     examples = select_examples(dataset, dataset_settings)
     if len(examples) < 2:
         raise ValueError("Swapped-state evaluation requires at least two episodes")
+    swap_group_field = settings.get("swap_group_field")
+    if swap_group_field is not None and not isinstance(swap_group_field, str):
+        parser.error("swap_group_field must be a string")
+    swapped_sources = swap_sources(examples, swap_group_field)
     example_ids = {example["example_id"] for example in examples}
     expected_result_ids = {
         f"{example_id}/{condition.name}"
@@ -350,7 +387,10 @@ def main():
         # Pilot 1A treated each record as one segment. The resumed query must
         # therefore continue that segment rather than insert TaaL tokens again.
         "query_prepends_memory_tokens": False,
-        "swapped_pairing": "cyclic_next_episode",
+        "swapped_pairing": (
+            "cyclic_next_episode" if swap_group_field is None
+            else f"matched_by_{swap_group_field}"
+        ),
     })
     results = read_results(
         args.output_dir / "results.jsonl",
@@ -472,7 +512,7 @@ def main():
         ]
         if not pending:
             continue
-        swapped_example = examples[(example_index + 1) % len(examples)]
+        swapped_example = swapped_sources[example["example_id"]]
         required_examples = [example]
         if any(condition.memory_source == "swapped" for condition in pending):
             required_examples.append(swapped_example)
@@ -579,6 +619,16 @@ def main():
             if save_traces:
                 assert prefix_trace is not None and query_trace is not None
                 assert trace_exporter is not None
+                with timings.phase("trace_generated_token"):
+                    prediction_trace = trace_greedy_prediction(
+                        model,
+                        tokenizer,
+                        token_id=int(scores["vocabulary_top_token_id"]),
+                        position=len(example["input_ids"]),
+                        state=output.state,
+                        layers=trace_layers,
+                        memory_read_scale=condition.read_scale,
+                    )
                 with timings.phase("trace_export"):
                     trace_exporter.export(TraceEpisode(
                         run_id=args.output_dir.name,
@@ -586,15 +636,32 @@ def main():
                         condition_id=condition.name,
                         checkpoint=checkpoint,
                         tokenizer_id=metadata["tokenizer"],
-                        tokens=make_trace_tokens(example["input_ids"], tokenizer),
-                        writes=prefix_trace.writes + query_trace.writes,
-                        reads=prefix_trace.reads + query_trace.reads,
+                        tokens=[
+                            *make_trace_tokens(example["input_ids"], tokenizer),
+                            prediction_trace.token,
+                        ],
+                        writes=(
+                            prefix_trace.writes + query_trace.writes
+                            + prediction_trace.writes
+                        ),
+                        reads=(
+                            prefix_trace.reads + query_trace.reads
+                            + prediction_trace.reads
+                        ),
                         internal_prefixes=(
                             prefix_trace.internal_prefixes + query_trace.internal_prefixes
+                            + prediction_trace.internal_prefixes
                         ),
-                        outcome=result,
+                        outcome={
+                            **result,
+                            "candidate_choice_token": tokenizer.decode(
+                                [int(result["candidate_choice_token_id"])]
+                            ),
+                        },
                         metadata={
                             "query_start_position": len(prefix_ids),
+                            "expected_answer": example.get("answer"),
+                            "expected_token_id": int(example["target_token_id"]),
                             "memory_source_at_query": condition.memory_source,
                             "read_scale_at_query": condition.read_scale,
                             "swapped_from_example_id": (

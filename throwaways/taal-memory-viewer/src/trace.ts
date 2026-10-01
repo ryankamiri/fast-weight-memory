@@ -91,6 +91,7 @@ export interface TraceFolder {
   revision: string;
   synthetic: boolean;
   rootName: string;
+  exampleLabels?: Record<string, string>;
 }
 
 export interface TraceIndex { runs: TraceFolder[]; errors: string[] }
@@ -131,7 +132,7 @@ export async function loadComparisons(folder: TraceFolder, exampleId: string): P
 }
 
 export function splitEpisodeKey(key: string): { exampleId: string; condition: string } {
-  const split = key.lastIndexOf('/');
+  const split = key.indexOf('/');
   if (split < 0) throw new Error(`Invalid episode key: ${key}`);
   return { exampleId: key.slice(0, split), condition: key.slice(split + 1) };
 }

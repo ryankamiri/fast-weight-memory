@@ -4,7 +4,8 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import type { Plugin } from 'vite';
 import { demoEpisode, demoManifest } from '../src/demo.ts';
-import { SCHEMA, type Manifest, type TraceIndex } from '../src/trace.ts';
+import { expectedAnswer } from '../src/answer.ts';
+import { SCHEMA, type Episode, type Manifest, type TraceIndex } from '../src/trace.ts';
 
 export async function seedSynthetic(root: string) {
   const directory = resolve(root, 'synthetic-example/memory_traces');
@@ -21,7 +22,7 @@ async function safeFile(root: string, path: string) {
   return file;
 }
 
-const validated = new Set<string>();
+const validated = new Map<string, string | null>();
 
 function checkFields(record: unknown, fields: Record<string, 'number' | 'string' | 'boolean' | 'nullable'>) {
   if (!record || typeof record !== 'object') throw new Error('Invalid event record');
@@ -42,11 +43,11 @@ function validateEvents(payload: Record<string, unknown>) {
   for (const event of payload.writes as unknown[]) checkFields(event, {
     layer: 'number', position: 'nullable', segment_index: 'number', internal_index: 'nullable',
     write_enabled: 'boolean', write_strength: 'number', proposed_write_norm: 'number',
-    previous_weight_norm: 'number', net_weight_change_norm: 'number', other_movement_norm: 'number', write_to_net_alignment: 'nullable',
+    previous_weight_norm: 'number', net_weight_change_norm: 'number', other_movement_norm: 'nullable', write_to_net_alignment: 'nullable',
   });
   for (const event of payload.reads as unknown[]) {
     checkFields(event, { layer: 'number', position: 'number', segment_index: 'number', enabled: 'boolean', read_scale: 'number', residual_gate: 'number', injected_norm: 'number', incoming_norm: 'number', relative_injection: 'nullable' });
-    if ((event as { state_timing: string }).state_timing !== 'post-write') throw new Error('Unsupported read timing');
+    if (!['pre-write', 'post-write'].includes((event as { state_timing: string }).state_timing)) throw new Error('Unsupported read timing');
   }
   for (const event of payload.internal_prefixes as unknown[]) checkFields(event, { layer: 'number', segment_index: 'number', before_position: 'number', count: 'number', net_weight_change_norm: 'number' });
 }
@@ -65,6 +66,7 @@ export async function scanTraces(root: string): Promise<TraceIndex> {
         }
         if (!Object.keys(manifest.episodes).length) throw new Error('No episodes indexed');
         const revisions = [(await stat(resolve(directory, 'manifest.json'))).mtimeMs];
+        const exampleLabels: Record<string, string> = {};
         for (const [kind, mapping] of [['episodes', manifest.episodes], ['comparisons', manifest.comparisons]] as const) {
           for (const [key, path] of Object.entries(mapping)) {
             if (!key.includes('/') || typeof path !== 'string' || !new RegExp(`^${kind}/[^/]+\\.json\\.gz$`).test(path)) throw new Error(`Invalid ${kind} entry: ${key}`);
@@ -81,17 +83,23 @@ export async function scanTraces(root: string): Promise<TraceIndex> {
                 for (const field of ['tokens', 'writes', 'reads', 'internal_prefixes']) if (!Array.isArray(payload[field])) throw new Error(`Missing ${field}: ${key}`);
                 if (!payload.metadata || typeof payload.metadata !== 'object') throw new Error(`Missing metadata: ${key}`);
                 validateEvents(payload);
+                validated.set(fingerprint, expectedAnswer(payload as Episode));
               } else {
                 if (payload.scope !== 'whole_query' || !['read_scale', 'memory_state'].includes(payload.intervention)) throw new Error(`Invalid comparison: ${key}`);
                 checkFields(payload, { example_id: 'string', baseline_condition: 'string', variant_condition: 'string', identical_text_prefix: 'boolean', same_starting_kv: 'boolean', same_starting_memory: 'boolean', scored_position: 'number', scored_token_id: 'number', baseline_log_probability: 'number', variant_log_probability: 'number', difference_log_probability: 'number' });
                 if (`${payload.example_id}/${payload.baseline_condition}/${payload.variant_condition}` !== key) throw new Error(`Comparison identity mismatch: ${key}`);
+                validated.set(fingerprint, null);
               }
-              validated.add(fingerprint);
+            }
+            if (kind === 'episodes') {
+              const exampleId = key.slice(0, key.indexOf('/'));
+              const answer = validated.get(fingerprint);
+              if (answer && !exampleLabels[exampleId]) exampleLabels[exampleId] = answer;
             }
             revisions.push(info.mtimeMs, info.size);
           }
         }
-        index.runs.push({ id, rootName: id.replace(/\/memory_traces$/, ''), synthetic: id === 'synthetic-example/memory_traces', manifest, revision: createHash('sha256').update(revisions.join(':')).digest('hex') });
+        index.runs.push({ id, rootName: id.replace(/\/memory_traces$/, ''), synthetic: id === 'synthetic-example/memory_traces', manifest, revision: createHash('sha256').update(revisions.join(':')).digest('hex'), exampleLabels });
       } catch (error) { index.errors.push(`${id}: ${error instanceof Error ? error.message : String(error)}`); }
       return;
     }
