@@ -1,4 +1,4 @@
-"""Generate paired episodes that differ only in an evicted fact value."""
+"""Generate paired episodes differing only in one answer token."""
 
 import argparse
 import json
@@ -13,9 +13,11 @@ MODEL_ID = "Qwen/Qwen3-0.6B-Base"
 MODEL_REVISION = "da87bfb608c14b7cf20ba1ce41287e8de496c0cd"
 
 
-def build_examples(tokenizer, *, pairs: int, window: int, gap: int) -> list[dict]:
-    if pairs < 2 or window < 32 or gap <= window:
-        raise ValueError("Need at least two pairs and a fact-to-answer gap beyond KV")
+def build_examples(
+    tokenizer, *, pairs: int, window: int, gap: int, allow_visible: bool = False
+) -> list[dict]:
+    if pairs < 2 or window < 32 or gap < 64 or (gap <= window and not allow_visible):
+        raise ValueError("Need at least two pairs and a valid fact-to-answer gap")
     labels = single_token_labels(tokenizer, pairs * 2)
     candidates = [token_id for _, token_id in labels]
     filler_seed = tokenizer.encode(
@@ -68,9 +70,14 @@ def build_examples(tokenizer, *, pairs: int, window: int, gap: int) -> list[dict
     return examples
 
 
-def write_dataset(output: Path, *, pairs: int, window: int, gap: int) -> None:
+def write_dataset(
+    output: Path, *, pairs: int, window: int, gap: int, allow_visible: bool = False
+) -> None:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
-    examples = build_examples(tokenizer, pairs=pairs, window=window, gap=gap)
+    examples = build_examples(
+        tokenizer, pairs=pairs, window=window, gap=gap,
+        allow_visible=allow_visible,
+    )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("".join(json.dumps(row) + "\n" for row in examples))
     output.with_suffix(".metadata.json").write_text(json.dumps({
@@ -79,7 +86,8 @@ def write_dataset(output: Path, *, pairs: int, window: int, gap: int) -> None:
         "pairs": pairs,
         "working_memory_size": window,
         "fact_to_answer_gap": gap,
-        "comparison": "Within each pair, only the evicted answer token differs.",
+        "fact_visible_in_kv": gap <= window,
+        "comparison": "Within each pair, only the answer token differs.",
     }, indent=2) + "\n")
 
 
@@ -89,8 +97,12 @@ def main() -> None:
     parser.add_argument("--pairs", type=int, default=8)
     parser.add_argument("--window", type=int, default=128)
     parser.add_argument("--gap", type=int, default=192)
+    parser.add_argument("--allow-visible", action="store_true")
     args = parser.parse_args()
-    write_dataset(args.output, pairs=args.pairs, window=args.window, gap=args.gap)
+    write_dataset(
+        args.output, pairs=args.pairs, window=args.window, gap=args.gap,
+        allow_visible=args.allow_visible,
+    )
 
 
 if __name__ == "__main__":

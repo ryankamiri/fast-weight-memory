@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from data.dataloader import create_dataloader
 from data.taal_conflict_control import build_examples
+from evaluation.taal.prepare_conflict_distance import prepare
 from evaluation.taal.read_path_diagnostic import relocate_fact
 from training.config import BridgeMemoryDataConfig, BridgeMemoryLossConfig, BridgeMemoryRecordRange
 
@@ -29,6 +30,33 @@ class TaalDiagnosticSetupsTests(unittest.TestCase):
         )
         self.assertEqual(rows[0]["target_token_id"], 1000)
         self.assertEqual(rows[1]["target_token_id"], 1001)
+
+    def test_visible_distance_preserves_matched_pair_and_records_gap(self):
+        with patch("data.taal_conflict_control.single_token_labels") as labels:
+            labels.return_value = [("one", 1000), ("two", 1001), ("three", 1002), ("four", 1003)]
+            rows = build_examples(
+                CharacterTokenizer(), pairs=2, window=128, gap=128,
+                allow_visible=True,
+            )
+        self.assertEqual(rows[0]["final_answer_position"] - rows[0]["fact_position"], 128)
+        self.assertEqual(rows[0]["final_query_position"], rows[1]["final_query_position"])
+        self.assertEqual(
+            sum(left != right for left, right in zip(rows[0]["input_ids"], rows[1]["input_ids"])),
+            1,
+        )
+
+    def test_distance_preparation_keeps_matched_swap_and_traces(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with patch("evaluation.taal.prepare_conflict_distance.write_dataset") as write:
+                dataset, config_path = prepare(gap=512, output_dir=Path(folder))
+            write.assert_called_once_with(
+                dataset, pairs=8, window=128, gap=512, allow_visible=False,
+            )
+            import yaml
+            settings = yaml.safe_load(config_path.read_text())
+            self.assertEqual(settings["dataset"]["path"], str(dataset))
+            self.assertEqual(settings["swap_group_field"], "record_name")
+            self.assertTrue(settings["save_traces"])
 
     def test_relocation_preserves_length_query_and_target(self):
         with patch("data.taal_conflict_control.single_token_labels") as labels:

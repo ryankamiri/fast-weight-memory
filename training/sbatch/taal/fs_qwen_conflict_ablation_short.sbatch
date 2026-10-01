@@ -26,7 +26,7 @@ export http_proxy="${http_proxy:-http://10.99.0.130:3128}"
 export https_proxy="${https_proxy:-http://10.99.0.130:3128}"
 
 if (( $# != 1 )); then
-    echo "Usage: sbatch $0 low-forget|gate-start" >&2
+    echo "Usage: sbatch $0 low-forget|gate-start|gate-start-low-forget" >&2
     exit 2
 fi
 case "$1" in
@@ -35,6 +35,9 @@ case "$1" in
         ;;
     gate-start)
         CONFIG=training/configs/taal/qwen3_0_6b_conflict_gate_start.yaml
+        ;;
+    gate-start-low-forget)
+        CONFIG=training/configs/taal/qwen3_0_6b_conflict_gate_start_low_forget.yaml
         ;;
     *)
         echo "Unknown conflict ablation: $1" >&2
