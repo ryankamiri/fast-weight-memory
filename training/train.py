@@ -143,11 +143,12 @@ def main():
     seed_everything(config.training.seed)
 
     # This pilot pins both revisions; only absent revisions need Hub lookups.
-    if config.model.revision is None or config.data.revision is None:
+    local_dataset = config.data.dataset_id.endswith(".jsonl")
+    if config.model.revision is None or (config.data.revision is None and not local_dataset):
         api = HfApi()
         if config.model.revision is None:
             config.model.revision = api.model_info(config.model.model_id).sha
-        if config.data.revision is None:
+        if config.data.revision is None and not local_dataset:
             config.data.revision = api.dataset_info(config.data.dataset_id).sha
     model = load_model(config).to(device)
     trainable_parameters = configure_trainable_parameters(

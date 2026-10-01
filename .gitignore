@@ -7,6 +7,8 @@
 __pycache__/
 *.py[cod]
 /datasets/
+/data/taal_conflict_control.jsonl
+/data/taal_conflict_control.metadata.json
 /wandb/
 /fs-qwen-*.out
 /fs-qwen-*.err

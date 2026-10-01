@@ -1,6 +1,7 @@
 """Single-GPU loading of pre-tokenized, independent training records."""
 
 from functools import partial
+from pathlib import Path
 import random
 from typing import overload
 
@@ -163,13 +164,24 @@ def create_dataloader(
         filters.append((index_field, ">=", start))
     if end is not None:
         filters.append((index_field, "<", end))
-    if filters:
+    local_dataset = config.dataset_id.endswith(".jsonl")
+    if local_dataset and not Path(config.dataset_id).is_file():
+        raise FileNotFoundError(config.dataset_id)
+    if filters and not local_dataset:
         load_options["filters"] = filters
-    load_args = [config.dataset_id]
-    if isinstance(config, BridgeMemoryDataConfig):
-        load_args.append(config.dataset_config)
-    dataset = load_dataset(*load_args, split=records.split, streaming=True, **load_options)
-    if filters:
+    if local_dataset:
+        if not isinstance(config, BridgeMemoryDataConfig):
+            raise ValueError("Local JSONL is supported only for bridge-memory records")
+        dataset = load_dataset(
+            "json", data_files={"train": config.dataset_id},
+            split="train", streaming=True,
+        )
+    else:
+        load_args = [config.dataset_id]
+        if isinstance(config, BridgeMemoryDataConfig):
+            load_args.append(config.dataset_config)
+        dataset = load_dataset(*load_args, split=records.split, streaming=True, **load_options)
+    if filters or local_dataset:
         # Keep the semantic guard even when a custom dataset builder ignores
         # Parquet pushdown; normally the predicate was already applied cheaply.
         dataset = dataset.filter(partial(

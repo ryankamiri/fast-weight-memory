@@ -2,6 +2,7 @@ import argparse
 from contextlib import nullcontext
 import copy
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -305,22 +306,29 @@ def main():
     if save_traces and state_bank_batch_size != 1:
         parser.error("save_traces requires state_bank_batch_size=1")
     dataset_settings = settings["dataset"]
-    revision = dataset_settings.get("revision")
-    if revision is None:
-        revision = HfApi().dataset_info(dataset_settings["repo_id"]).sha
-    metadata_file = hf_hub_download(
-        dataset_settings["repo_id"],
-        f"{dataset_settings['variant']}/metadata.json",
-        repo_type="dataset",
-        revision=revision,
-    )
-    metadata = json.loads(Path(metadata_file).read_text())
-    dataset = load_dataset(
-        dataset_settings["repo_id"],
-        dataset_settings["variant"],
-        split=dataset_settings.get("split", "test"),
-        revision=revision,
-    )
+    local_path = dataset_settings.get("path")
+    if local_path is not None:
+        local_path = Path(local_path)
+        metadata = json.loads(local_path.with_suffix(".metadata.json").read_text())
+        revision = hashlib.sha256(local_path.read_bytes()).hexdigest()
+        dataset = load_dataset("json", data_files=str(local_path), split="train")
+    else:
+        revision = dataset_settings.get("revision")
+        if revision is None:
+            revision = HfApi().dataset_info(dataset_settings["repo_id"]).sha
+        metadata_file = hf_hub_download(
+            dataset_settings["repo_id"],
+            f"{dataset_settings['variant']}/metadata.json",
+            repo_type="dataset",
+            revision=revision,
+        )
+        metadata = json.loads(Path(metadata_file).read_text())
+        dataset = load_dataset(
+            dataset_settings["repo_id"],
+            dataset_settings["variant"],
+            split=dataset_settings.get("split", "test"),
+            revision=revision,
+        )
     examples = select_examples(dataset, dataset_settings)
     if len(examples) < 2:
         raise ValueError("Swapped-state evaluation requires at least two episodes")

@@ -1,0 +1,14 @@
+dataset:
+  repo_id: ryankamiri/ttcd-bridge-memory
+  variant: t4096-s2048-c1024
+  revision: 591fcef98e1f837ad3cbe7765af5cfaa55469c63
+  split: test
+  start: 0
+  end: 4
+  conditions: [no_bridge]
+  query_variants: [exact]
+
+fact_distances: [512, 1536, 2304, null]
+execution_block_size: 2048
+seed: 42
+save_traces: true

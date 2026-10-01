@@ -40,14 +40,34 @@ def main():
             cache_dir=os.environ["TRANSFORMERS_CACHE"], local_files_only=True,
         )
         repo, variant, revision, split = (
-            data["dataset_id"], data["dataset_config"], data["revision"], data["train"]["split"]
+            data["dataset_id"], data["dataset_config"], data.get("revision"), data["train"]["split"]
         )
     else:
         for filename in ("config.json", "model.safetensors", "training_metadata.json"):
             if not (args.checkpoint / filename).is_file():
                 raise FileNotFoundError(args.checkpoint / filename)
         data = settings["dataset"]
-        repo, variant, revision, split = data["repo_id"], data["variant"], data["revision"], data["split"]
+        if "path" in data:
+            repo, variant, revision, split = data["path"], None, None, "train"
+        else:
+            repo, variant, revision, split = data["repo_id"], data["variant"], data["revision"], data["split"]
+    if repo.endswith(".jsonl"):
+        if not Path(repo).is_file():
+            raise FileNotFoundError(repo)
+        metadata = Path(repo).with_suffix(".metadata.json")
+        json.loads(metadata.read_text())
+        dataset = load_dataset("json", data_files=str(repo), split="train", streaming=True)
+        first = next(iter(dataset))
+        if not first.get("input_ids"):
+            raise ValueError("Local bridge-memory record has no input_ids")
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        print("EXPLORER_PREFLIGHT " + json.dumps({
+            "status": "pass", "commit": commit,
+            "gpu": torch.cuda.get_device_name(0), "dataset_path": repo,
+            "first_record_tokens": len(first["input_ids"]), "config": str(args.config),
+            "checkpoint": str(args.checkpoint) if args.checkpoint is not None else None,
+        }), flush=True)
+        return
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("Dataset revision must be an immutable commit")
     metadata = hf_hub_download(
