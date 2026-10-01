@@ -129,12 +129,21 @@ class TaalTraceExportTests(unittest.TestCase):
         keys = torch.randn(1, 4, memory.config.dim)
         values = torch.randn_like(keys)
         strength = torch.rand(1, 4)
-        combined, by_token = memory._chunk_gradient(
+        untraced = memory._chunk_gradient(weights, keys, values, strength)
+        result = memory._chunk_gradient(
             weights, keys, values, strength, trace_tokens=True
         )
-        for name in combined:
+        self.assertIsNone(untraced.token_gradients)
+        self.assertIsNotNone(result.token_gradients)
+        for name in result.chunk_gradients:
             torch.testing.assert_close(
-                by_token[name].sum(dim=1), combined[name], atol=1e-6, rtol=1e-5
+                untraced.chunk_gradients[name], result.chunk_gradients[name]
+            )
+            torch.testing.assert_close(
+                result.token_gradients[name].sum(dim=1),
+                result.chunk_gradients[name],
+                atol=1e-6,
+                rtol=1e-5,
             )
 
     def test_export_round_trip_and_contract_rejects_unaligned_event(self):

@@ -22,6 +22,12 @@ class MemoryMLPResult:
     values_before_silu: list[Float[torch.Tensor, "*B D"]] | None = None
 
 
+@dataclass
+class ChunkGradientResult:
+    chunk_gradients: dict[str, Float32[torch.Tensor, "B D D"]]
+    token_gradients: dict[str, Float32[torch.Tensor, "B C D D"]] | None = None
+
+
 class MemoryMLP(nn.Module):
     """Same-width, bias-free MLP whose parameters form the fast memory state."""
 
@@ -209,13 +215,7 @@ class NeuralMemory(nn.Module):
         write_strength: Float32[torch.Tensor, "B C"],
         *,
         trace_tokens: bool = False,
-    ) -> (
-        dict[str, Float32[torch.Tensor, "B D D"]]
-        | tuple[
-            dict[str, Float32[torch.Tensor, "B D D"]],
-            dict[str, Float32[torch.Tensor, "B C D D"]],
-        ]
-    ):
+    ) -> ChunkGradientResult:
         B, C, D = keys.shape
         with torch.inference_mode(False), torch.set_grad_enabled(self.training):
             timer = self.timing_observer
@@ -308,9 +308,10 @@ class NeuralMemory(nn.Module):
                 timer("gradient_calculation", perf_counter() - tic)
             if timer is not None:
                 timer("gradient_execution", perf_counter() - execution_started)
-            if trace_tokens:
-                return weight_gradients, token_gradients
-            return weight_gradients
+            return ChunkGradientResult(
+                chunk_gradients=weight_gradients,
+                token_gradients=token_gradients if trace_tokens else None,
+            )
 
     def _update(
         self,
@@ -340,15 +341,15 @@ class NeuralMemory(nn.Module):
         if timer is not None:
             timer("write_strength_and_mask", perf_counter() - tic)
         tic = perf_counter() if timer is not None else 0.0
-        if self.trace_observer is None:
-            chunk_gradient = self._chunk_gradient(
-                state.weights, keys, values, write_strength
-            )
-            token_gradients = None
-        else:
-            chunk_gradient, token_gradients = self._chunk_gradient(
-                state.weights, keys, values, write_strength, trace_tokens=True
-            )
+        gradient_result = self._chunk_gradient(
+            state.weights,
+            keys,
+            values,
+            write_strength,
+            trace_tokens=self.trace_observer is not None,
+        )
+        chunk_gradient = gradient_result.chunk_gradients
+        token_gradients = gradient_result.token_gradients
         if timer is not None:
             timer("gradient_call_total", perf_counter() - tic)
         tic = perf_counter() if timer is not None else 0.0

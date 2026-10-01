@@ -74,30 +74,6 @@ uv run --frozen --no-dev torchrun --standalone --nproc-per-node=1 \
   --config training/configs/ttcd/qwen3_0_6b.yaml
 ```
 
-### Delayed-recall pilot
-
-The bridge-memory dataset places a fact before the working-memory boundary and
-asks for it after its original K/V vectors have been evicted. This provides a
-controlled test of whether the added memory pathway can carry information across
-windows.
-
-```bash
-uv run --frozen --no-dev torchrun --standalone --nproc-per-node=1 \
-  -m training.train \
-  --config training/configs/taal/qwen3_0_6b_delayed_recall_overfit_chunk1.yaml
-```
-
-The initial TaaL recipe is intentionally a small overfitting test. It verifies
-that the memory pathway can learn delayed recall before scaling to held-out facts,
-paraphrases, and natural conversations.
-
-Explicit `..._chunk1.yaml`, `..._chunk4.yaml`, and `..._chunk8.yaml` recipes
-compare memory-update cadences. The unsuffixed recipe currently selects chunk 8
-for the eight-hour H200 run. Pilot 1B evaluates each checkpoint at its own
-memory-update cadence and saves traces by default. For chunk sizes above one,
-per-token proposed gradients are recorded, while the actual weight change is
-attributed to the chunk boundary rather than any single token.
-
 ### Configuration
 
 Architecture-specific recipes live in:
@@ -173,23 +149,12 @@ sbatch evaluation/sbatch/ttcd/fs_qwen_eval_fw_swa.sbatch checkpoints/TTCD_RUN/be
 Predictions and judgments are written under `output/longmemeval/`. Saved
 predictions can be graded again without rerunning generation.
 
-The TaaL delayed-recall state audit saves complete pre-query snapshots and optional
-prefix traces under `OUTPUT_DIR/prefix_states/`. Each prefix is computed once,
-then restored for the six query conditions. Episodes are scored as soon as their
-own and swap-donor snapshots are ready, without waiting for the full state bank.
-Resume with the same checkpoint,
-config, and output directory to reuse completed snapshots and scores. Changed
-checkpoint contents or settings require a new output directory. Snapshots include
-bounded K/V, neural weights, momentum, convolution history, and position metadata;
-they are evaluation artifacts, not training checkpoints.
-
 ## Research status
 
 This repository is an active research prototype, not a production memory system.
 TTCD established useful memory-dependent computation in some settings, but did
-not reliably recover completely evicted evidence. TaaL is the next architecture
-under evaluation, beginning with a controlled delayed-recall pilot before larger
-continual-training runs.
+not reliably recover completely evicted evidence. TaaL is under evaluation for
+online memory updates in bounded-context models.
 
 The central evaluation standard is stricter than aggregate language-model loss:
 a memory architecture should improve later predictions over the same checkpoint

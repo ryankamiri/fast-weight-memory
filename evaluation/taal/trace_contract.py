@@ -26,8 +26,6 @@ class WriteEvent:
     net_weight_change_norm: float
     other_movement_norm: float | None
     write_to_net_alignment: float | None
-    # For chunked memory, the proposed write belongs to this token but the
-    # actual state moves only when the entire chunk commits.
     chunk_size: int = 1
     chunk_boundary: bool = True
 

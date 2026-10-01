@@ -8,7 +8,7 @@ from torch.func import functional_call, grad, vmap
 from torch.nn import functional as F
 
 from architectures.titans.configuration import NeuralMemoryConfig
-from architectures.titans.neural_memory import MemoryMLPResult, NeuralMemory
+from architectures.titans.neural_memory import ChunkGradientResult, MemoryMLPResult, NeuralMemory
 
 
 def always_vmap_gradient(memory, weights, keys, values, write_strength):
@@ -31,6 +31,16 @@ def always_vmap_gradient(memory, weights, keys, values, write_strength):
         return vmap(grad(chunk_loss), in_dims=(0, 0, 0, 0))(
             weights, keys, values, write_strength
         )
+
+
+def always_vmap_chunk_gradient(
+    memory, weights, keys, values, write_strength, *, trace_tokens=False
+):
+    return ChunkGradientResult(
+        chunk_gradients=always_vmap_gradient(
+            memory, weights, keys, values, write_strength
+        )
+    )
 
 
 def always_vmap_read(memory, weights, queries):
@@ -123,7 +133,7 @@ class NeuralMemoryTests(unittest.TestCase):
                     )).train()
                     memory.memory_mlp.requires_grad_(False)
                     reference = copy.deepcopy(memory)
-                    reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
+                    reference._chunk_gradient = MethodType(always_vmap_chunk_gradient, reference)
                     S = 2 * C + 3  # Includes a trailing incomplete chunk.
                     inputs = torch.randn(B, S, 4, requires_grad=True)
                     reference_inputs = inputs.detach().clone().requires_grad_(True)
@@ -244,7 +254,7 @@ class NeuralMemoryTests(unittest.TestCase):
                 values = torch.randn(B, C, D, requires_grad=True)
                 strength = torch.rand(B, C, requires_grad=True)
                 with patch("torch.func.vmap", wraps=vmap) as mapped:
-                    actual = memory._chunk_gradient(weights, keys, values, strength)
+                    actual = memory._chunk_gradient(weights, keys, values, strength).chunk_gradients
                 self.assertEqual(mapped.call_count, 0)
                 reference = always_vmap_gradient(memory, weights, keys, values, strength)
                 for name in weights:
@@ -279,7 +289,7 @@ class NeuralMemoryTests(unittest.TestCase):
                 config = NeuralMemoryConfig(dim=4, chunk_size=C, conv_kernel_size=2)
                 memory = NeuralMemory(config).train()
                 reference = copy.deepcopy(memory)
-                reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
+                reference._chunk_gradient = MethodType(always_vmap_chunk_gradient, reference)
                 inputs = torch.randn(B, 7, 4, requires_grad=True)
                 reference_inputs = inputs.detach().clone().requires_grad_(True)
                 write_mask = torch.ones(B, 7, dtype=torch.bool)
@@ -325,7 +335,7 @@ class NeuralMemoryTests(unittest.TestCase):
                     patch("torch.func.grad", side_effect=AssertionError("No inner func.grad")),
                     patch("torch.func.vmap", side_effect=AssertionError("No write vmap")),
                 ):
-                    gradients = memory._chunk_gradient(weights, keys, values, strength)
+                    gradients = memory._chunk_gradient(weights, keys, values, strength).chunk_gradients
                 for gradient in gradients.values():
                     self.assertEqual(gradient.shape, (B, 4, 4))
 
@@ -356,7 +366,7 @@ class NeuralMemoryTests(unittest.TestCase):
                             elif write_pattern == "fully_masked":
                                 write_strength.zero_()
 
-                            actual = memory._chunk_gradient(weights, keys, values, write_strength)
+                            actual = memory._chunk_gradient(weights, keys, values, write_strength).chunk_gradients
 
                             # Independent reference: ordinary Linear + SiLU and
                             # autograd, with neither the manual derivative nor vmap.
@@ -402,7 +412,7 @@ class NeuralMemoryTests(unittest.TestCase):
                 memory = NeuralMemory(NeuralMemoryConfig(dim=4, depth=depth, chunk_size=C)).train()
                 memory.memory_mlp.requires_grad_(False)
                 reference = copy.deepcopy(memory)
-                reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
+                reference._chunk_gradient = MethodType(always_vmap_chunk_gradient, reference)
                 inputs = torch.randn(B, 7, 4, requires_grad=True)
                 reference_inputs = inputs.detach().clone().requires_grad_(True)
                 initial_weights = memory.initial_state(B).weights
@@ -432,7 +442,7 @@ class NeuralMemoryTests(unittest.TestCase):
     def test_explicit_eval_writes_under_no_grad(self):
         memory = NeuralMemory(NeuralMemoryConfig(dim=4, chunk_size=1)).eval()
         reference = copy.deepcopy(memory)
-        reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
+        reference._chunk_gradient = MethodType(always_vmap_chunk_gradient, reference)
         inputs = torch.randn(1, 7, 4)
         with torch.no_grad():
             initial_state = memory.initial_state(1)
@@ -459,7 +469,7 @@ class NeuralMemoryTests(unittest.TestCase):
                     expected = always_vmap_gradient(memory, weights, keys, values, strength)
                     # Eval must not retain an inner write graph even if its caller
                     # has gradient recording enabled.
-                    actual = memory._chunk_gradient(weights, keys, values, strength)
+                    actual = memory._chunk_gradient(weights, keys, values, strength).chunk_gradients
                     for name in weights:
                         torch.testing.assert_close(actual[name], expected[name])
                         self.assertFalse(actual[name].requires_grad)
@@ -488,7 +498,7 @@ class NeuralMemoryTests(unittest.TestCase):
                         "forward",
                         wraps=memory.memory_mlp.forward,
                     ) as mlp_forward:
-                        actual = memory._chunk_gradient(weights, keys, values, strength)
+                        actual = memory._chunk_gradient(weights, keys, values, strength).chunk_gradients
                         actual_reads = memory.memory_mlp(keys.float(), weights=weights).predicted_values
                     self.assertEqual(mlp_forward.call_count, 2)
                     write_call, read_call = mlp_forward.call_args_list
@@ -557,7 +567,7 @@ class NeuralMemoryTests(unittest.TestCase):
             with self.subTest(B=B, C=C):
                 memory = NeuralMemory(NeuralMemoryConfig(dim=4, chunk_size=C)).eval()
                 reference = copy.deepcopy(memory)
-                reference._chunk_gradient = MethodType(always_vmap_gradient, reference)
+                reference._chunk_gradient = MethodType(always_vmap_chunk_gradient, reference)
                 inputs = torch.randn(B, 7, 4)
                 with torch.inference_mode():
                     output, state = memory(inputs)
