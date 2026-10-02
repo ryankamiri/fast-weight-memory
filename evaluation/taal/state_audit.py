@@ -22,8 +22,10 @@ from architectures.titans.state import NeuralMemoryState
 from evaluation.scoring import grouped_score_summary, score_logits
 from evaluation.storage import append_result, ensure_manifest, read_results
 from evaluation.taal.prefix_store import PrefixStore, PrefixTrace, checkpoint_fingerprint
+from evaluation.taal.lifecycle import lifecycle_boundaries, lifecycle_stores, save_lifecycle_prefixes
 from evaluation.taal.interventions import (
     AUDIT_CONDITIONS,
+    MemoryComponentSources,
     audit_conditions,
     compose_memory_states,
     donor_label_scores,
@@ -312,6 +314,48 @@ def summarize(rows, conditions=AUDIT_CONDITIONS):
                     for group, shifts in group_shifts.items()
                 },
             }
+        summary["matched_memory_contrasts"] = {}
+        for own_condition in conditions:
+            if own_condition.memory_source != "correct":
+                continue
+            own_policy = asdict(own_condition)
+            own_policy.pop("name")
+            own_policy["memory_source"] = "swapped"
+            donor_condition = next((condition for condition in conditions if {
+                key: value for key, value in asdict(condition).items() if key != "name"
+            } == own_policy), None)
+            if donor_condition is None:
+                continue
+            pairs = [
+                (variants[own_condition.name], variants[donor_condition.name])
+                for variants in by_example.values()
+                if own_condition.name in variants and donor_condition.name in variants
+            ]
+            if not pairs:
+                continue
+            group_shifts = {}
+            for own, donor in pairs:
+                group_shifts.setdefault(own["record_group"], []).append(
+                    own["own_minus_donor_label_log_probability"]
+                    - donor["own_minus_donor_label_log_probability"]
+                )
+            summary["matched_memory_contrasts"][own_condition.name] = {
+                "donor_condition": donor_condition.name,
+                "examples": len(pairs),
+                "mean_own_minus_donor_target_log_probability": sum(
+                    own["target_log_probability"] - donor["target_log_probability"]
+                    for own, donor in pairs
+                ) / len(pairs),
+                "mean_label_margin_shift": sum(
+                    own["own_minus_donor_label_log_probability"]
+                    - donor["own_minus_donor_label_log_probability"]
+                    for own, donor in pairs
+                ) / len(pairs),
+                "record_group_label_margin_shifts": {
+                    str(group): sum(shifts) / len(shifts)
+                    for group, shifts in group_shifts.items()
+                },
+            }
     return summary
 
 
@@ -488,7 +532,7 @@ def main():
         "execution_block_size",
         model.config.working_memory_size,
     )
-    prefix_store = PrefixStore(args.output_dir / "prefix_states", {
+    prefix_identity = {
         "checkpoint": checkpoint,
         "checkpoint_sha256": checkpoint_sha256,
         "model_config": model.config.to_dict(),
@@ -496,12 +540,35 @@ def main():
         "dataset_revision": revision,
         "tokenizer": metadata["tokenizer"],
         "tokenizer_revision": metadata["tokenizer_revision"],
-    })
+    }
+    prefix_store = PrefixStore(args.output_dir / "prefix_states", prefix_identity)
+    lifecycle = settings.get("audit_suite") in ("encoding", "retention")
+    stage_stores = lifecycle_stores(args.output_dir / "lifecycle_states", prefix_identity) if lifecycle else {}
+    if lifecycle and (not save_traces or state_bank_batch_size != 1):
+        raise ValueError("Lifecycle audits require save_traces=true and state_bank_batch_size=1")
 
     built = 0
 
     def ensure_prefixes(required_examples):
         nonlocal built
+        if lifecycle:
+            required_stages = {condition.snapshot_stage for condition in conditions} - {"final"}
+            for example in required_examples:
+                if prefix_store.contains(example) and all(
+                    stage_stores[stage].contains(example) for stage in required_stages
+                ):
+                    continue
+                with timings.phase("lifecycle_snapshot_prefill"):
+                    save_lifecycle_prefixes(
+                        model, tokenizer, example, prefix_store, stage_stores,
+                        device=device, layers=trace_layers,
+                        execution_block_size=execution_block_size,
+                        persistent_writes_enabled=persistent_writes_enabled,
+                        capture_gap_frozen="gap_frozen" in required_stages,
+                    )
+                built += 1
+                print(f"Saved lifecycle snapshots: {example['example_id']}", flush=True)
+            return
         # Prepare only this episode and its swap donor. A two-hour run can
         # produce scores without first completing the whole 64-prefix bank.
         missing = [example for example in required_examples if not prefix_store.contains(example)]
@@ -580,14 +647,40 @@ def main():
         }
 
         for condition in pending:
+            updates_enabled = query_updates_enabled and condition.updates_enabled
             with timings.phase("fork_kv_and_memory"):
                 if condition.components is not None:
                     memory = compose_memory_states(base_state.memory_states, swapped, condition.components)
+                elif condition.snapshot_stage != "final":
+                    source_example = swapped_example if condition.uses_donor else example
+                    memory = stage_stores[condition.snapshot_stage].load_memory(source_example, device)
                 else:
                     memory = sources[condition.memory_source]
-                if not query_updates_enabled:
+                if condition.recipient_convolution:
+                    # Compare saved weights/momentum using identical final
+                    # addressing history, not an old/donor convolution suffix.
+                    memory = compose_memory_states(
+                        base_state.memory_states, memory,
+                        MemoryComponentSources(weights="donor", momentum="donor"),
+                    )
+                if not updates_enabled:
                     validate_component_boundary(memory)
                 state = fork_session_state(base_state, memory)
+            if condition.recipient_convolution:
+                component_sources = {
+                    "weights": "donor" if condition.uses_donor else "own",
+                    "momentum": "donor" if condition.uses_donor else "own",
+                    "convolution": "own_final",
+                }
+            elif condition.components is not None:
+                component_sources = asdict(condition.components)
+            else:
+                source_name = {"correct": "own", "swapped": "donor"}.get(
+                    condition.memory_source, condition.memory_source,
+                )
+                component_sources = {
+                    name: source_name for name in ("weights", "momentum", "convolution")
+                }
             start = time.perf_counter()
             query_trace = (
                 TaalTraceRecorder(
@@ -599,7 +692,11 @@ def main():
                 if save_traces else None
             )
             with (
-                memory_execution_controls(model, updates_enabled=query_updates_enabled),
+                memory_execution_controls(
+                    model, updates_enabled=updates_enabled,
+                    momentum_enabled=condition.momentum_enabled,
+                    forgetting_enabled=condition.forgetting_enabled,
+                ),
                 timings.phase(f"query/{condition.name}", tokens=len(query_ids), detailed=example_index == 0),
                 query_trace if query_trace is not None else nullcontext(),
             ):
@@ -611,6 +708,10 @@ def main():
                     ),
                     execution_block_size=execution_block_size,
                     state=state,
+                    write_mask=torch.full(
+                        (1, len(query_ids)), condition.fresh_writes_enabled,
+                        dtype=torch.bool, device=device,
+                    ) if not condition.fresh_writes_enabled else None,
                     memory_read_scale=condition.read_scale,
                     prepend_memory_tokens=False,
                 )
@@ -635,15 +736,21 @@ def main():
                 "memory_source": condition.memory_source,
                 "memory_read_scale": condition.read_scale,
                 "persistent_writes_enabled": persistent_writes_enabled,
-                "query_updates_enabled": query_updates_enabled,
-                "component_sources": (
-                    asdict(condition.components) if condition.components is not None else {
-                        name: {"correct": "own", "swapped": "donor"}.get(
-                            condition.memory_source, condition.memory_source
-                        )
-                        for name in ("weights", "momentum", "convolution")
-                    }
+                "query_updates_enabled": updates_enabled,
+                "query_fresh_writes_enabled": condition.fresh_writes_enabled,
+                "query_momentum_enabled": condition.momentum_enabled,
+                "query_forgetting_enabled": condition.forgetting_enabled,
+                "snapshot_stage": condition.snapshot_stage,
+                "recipient_convolution": condition.recipient_convolution,
+                "last_update_text_boundary": (
+                    lifecycle_boundaries(example, tokenizer)["fact"]
+                    if condition.snapshot_stage == "gap_frozen" else None
                 ),
+                "snapshot_text_boundary": (
+                    lifecycle_boundaries(example, tokenizer).get(condition.snapshot_stage, len(prefix_ids))
+                    if lifecycle else len(prefix_ids)
+                ),
+                "component_sources": component_sources,
                 "record_group": example.get(swap_group_field) if swap_group_field else None,
                 "prefix_tokens": len(prefix_ids),
                 "query_tokens": len(query_ids),
@@ -680,7 +787,11 @@ def main():
                 assert prefix_trace is not None and query_trace is not None
                 assert trace_exporter is not None
                 with (
-                    memory_execution_controls(model, updates_enabled=query_updates_enabled),
+                    memory_execution_controls(
+                        model, updates_enabled=updates_enabled,
+                        momentum_enabled=condition.momentum_enabled,
+                        forgetting_enabled=condition.forgetting_enabled,
+                    ),
                     timings.phase("trace_generated_token"),
                 ):
                     prediction_trace = trace_greedy_prediction(
@@ -691,6 +802,7 @@ def main():
                         state=output.state,
                         layers=trace_layers,
                         memory_read_scale=condition.read_scale,
+                        fresh_writes_enabled=condition.fresh_writes_enabled,
                     )
                 with timings.phase("trace_export"):
                     trace_exporter.export(TraceEpisode(
@@ -728,7 +840,16 @@ def main():
                             "memory_source_at_query": condition.memory_source,
                             "read_scale_at_query": condition.read_scale,
                             "persistent_writes_enabled": persistent_writes_enabled,
-                            "query_updates_enabled": query_updates_enabled,
+                            "query_updates_enabled": updates_enabled,
+                            "query_fresh_writes_enabled": condition.fresh_writes_enabled,
+                            "query_momentum_enabled": condition.momentum_enabled,
+                            "query_forgetting_enabled": condition.forgetting_enabled,
+                            "snapshot_stage": condition.snapshot_stage,
+                            "recipient_convolution": condition.recipient_convolution,
+                            "last_update_text_boundary": result["last_update_text_boundary"],
+                            "snapshot_text_boundary": result["snapshot_text_boundary"],
+                            "prefix_trace_role": "recipient reference before state intervention",
+                            "memory_intervention_at_position": len(prefix_ids),
                             "component_sources": result["component_sources"],
                             "record_group": result["record_group"],
                             "swapped_from_example_id": (
@@ -762,12 +883,15 @@ def main():
                     variant_condition=condition.name,
                     intervention=(
                         "read_scale"
-                        if condition.memory_source == "correct" else "memory_state"
+                        if condition.memory_source == "correct" and condition.read_scale != 1.0
+                        else "memory_state"
                     ),
                     scope="whole_query",
                     identical_text_prefix=True,
                     same_starting_kv=True,
-                    same_starting_memory=condition.memory_source == "correct",
+                    same_starting_memory=(
+                        condition.memory_source == "correct" and condition.snapshot_stage == "final"
+                    ),
                     scored_position=len(example["input_ids"]) - 1,
                     scored_token_id=int(example["target_token_id"]),
                     baseline_log_probability=baseline_logp,

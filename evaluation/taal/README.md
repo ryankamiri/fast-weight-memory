@@ -51,3 +51,47 @@ loading, and final score/trace counts separately. A submitted job is not a resul
 Partial swaps can produce incompatible states. A coherent bidirectional shift
 toward the donor's label is more informative than nonspecific degradation. These
 controls identify causal dependencies, not uniquely decoded memory contents.
+
+## Acquisition, retention, and query-transition audits
+
+Three additional suites reuse the same state-audit runner and compact trace format:
+
+- `encoding`: snapshots immediately after the label, after the complete fact,
+  and before the question. Fixed-query own/donor contrasts test whether an
+  episode-dependent label preference is already accessible. An initial-memory
+  control and evolving-query early-state controls distinguish shared task bias
+  from state-dependent behavior.
+- `retention`: compare after-fact, mid-gap, and pre-query snapshots, plus a
+  trajectory that freezes weights and momentum through the neutral gap. Read
+  each snapshot under both own/donor controls; query updates are fixed for the
+  main time-course comparison. The frozen-gap snapshot is also tested with
+  normal query updates.
+- `query_transitions`: all eight enabled/disabled combinations of fresh query
+  writes, carried momentum, and forgetting, each with own and matched donor
+  state, plus reads-off and fully fixed-state controls. Fresh-write masking
+  zeros the write loss; disabling momentum removes only `eta * S_previous`;
+  disabling forgetting sets `alpha = 0`. New gradients still form momentum when
+  carried momentum is disabled. The checkpoint parameters are never changed.
+
+All staged-memory comparisons retain the normal recipient's final KV, absolute
+positions, final convolution histories, and exact question. Only weights and
+momentum come from the earlier/donor snapshot. This avoids visible-fact KV and
+old convolution-history confounds. The normal/full-swap endpoints remain full
+state controls. Lifecycle prefix execution splits at recorded boundaries, so
+check their normal endpoints against the prior baseline for numerical drift.
+Persistent inputs are prepended once, not once per snapshot.
+
+The exported prefix is the normal recipient reference trajectory. At the query
+boundary it may be replaced by an earlier, donor, or frozen-gap state; metadata
+explicitly records that discontinuity. No earlier state is falsely presented as
+the uninterrupted result of the reference prefix. Scalar proposed writes still
+do not establish faithful semantic storage. Negative early-state retrieval does
+not exclude information that this checkpoint's reader cannot access. Retention
+contrasts identify changes in accessible signal, not a unique storage capacity.
+
+Use `fs_qwen_conflict_lifecycle_short.sbatch` with one of
+`conflict_encoding.yaml`, `conflict_retention.yaml`, or
+`conflict_query_transitions.yaml`. The launcher requests one gpu-short H200 and
+the live two-hour partition maximum, checks the submitted commit, and runs the
+allocated-node preflight. All three configurations save every example's traces.
+No retraining is required for these interventions.

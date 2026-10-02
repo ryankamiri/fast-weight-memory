@@ -321,6 +321,7 @@ def trace_greedy_prediction(
     state: TaalModelState,
     layers: list[int],
     memory_read_scale: float,
+    fresh_writes_enabled: bool = True,
 ) -> TracedPrediction:
     """Feed back the already-scored greedy token and trace its later update/read.
 
@@ -334,6 +335,11 @@ def trace_greedy_prediction(
     with recorder:
         model(
             torch.tensor([[token_id]], dtype=torch.long, device=model.device),
+            write_mask=(
+                None if fresh_writes_enabled else torch.zeros(
+                    (1, 1), dtype=torch.bool, device=model.device,
+                )
+            ),
             state=state,
             use_cache=True,
             logits_to_keep=1,

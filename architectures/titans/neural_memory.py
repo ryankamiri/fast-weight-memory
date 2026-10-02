@@ -113,6 +113,8 @@ class NeuralMemory(nn.Module):
         self.trace_observer = None
         # Scoped evaluation ablations can freeze weights/momentum while preserving reads.
         self.updates_enabled = True
+        self.momentum_enabled = True
+        self.forgetting_enabled = True
         # Set only for an explicitly timed microbatch; no training-state effect.
         self.timing_observer = None
         self.reset_update_controls()
@@ -324,6 +326,8 @@ class NeuralMemory(nn.Module):
         write_mask: Bool[torch.Tensor, "B C"],
     ) -> NeuralMemoryState:
         B, C, _ = keys.shape
+        if self.training and (not self.momentum_enabled or not self.forgetting_enabled):
+            raise ValueError("Memory transition ablations require evaluation mode")
         if not self.updates_enabled:
             if (
                 self.training
@@ -420,6 +424,12 @@ class NeuralMemory(nn.Module):
         momentum_retention: Float32[torch.Tensor, "B 1 1"] = (
             self.momentum_projection(chunk_input).sigmoid().reshape(B, 1, 1).float()
         )
+        # Evaluation interventions remove one term of the recurrence, not its
+        # learned parameters. Fresh gradients and other transitions remain on.
+        if not self.forgetting_enabled:
+            forget = torch.zeros_like(forget)
+        if not self.momentum_enabled:
+            momentum_retention = torch.zeros_like(momentum_retention)
         if timer is not None:
             timer("forget_and_momentum_controls", perf_counter() - tic)
         tic = perf_counter() if timer is not None else 0.0

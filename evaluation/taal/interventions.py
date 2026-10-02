@@ -26,6 +26,12 @@ class AuditCondition:
     memory_source: str
     read_scale: float
     components: MemoryComponentSources | None = None
+    snapshot_stage: str = "final"
+    recipient_convolution: bool = False
+    fresh_writes_enabled: bool = True
+    momentum_enabled: bool = True
+    forgetting_enabled: bool = True
+    updates_enabled: bool = True
 
     @property
     def uses_donor(self) -> bool:
@@ -46,6 +52,58 @@ def audit_conditions(suite: str) -> tuple[AuditCondition, ...]:
     if suite == "standard":
         return AUDIT_CONDITIONS
     baseline = (AUDIT_CONDITIONS[0], AUDIT_CONDITIONS[2])
+    if suite == "encoding":
+        conditions = list(baseline) + [AUDIT_CONDITIONS[-1]]
+        conditions.append(AuditCondition("initial_fixed", "reset", 1.0, updates_enabled=False))
+        for stage in ("label", "fact", "final"):
+            for source in ("correct", "swapped"):
+                conditions.append(AuditCondition(
+                    f"{stage}_{source}_fixed", source, 1.0,
+                    snapshot_stage=stage, updates_enabled=False, recipient_convolution=True,
+                ))
+        for source in ("correct", "swapped"):
+            conditions.append(AuditCondition(
+                f"fact_{source}_evolving", source, 1.0, snapshot_stage="fact",
+                recipient_convolution=True,
+            ))
+        return tuple(conditions)
+    if suite == "retention":
+        conditions = list(baseline) + [AUDIT_CONDITIONS[-1]]
+        for stage in ("fact", "middle", "final", "gap_frozen"):
+            for source in ("correct", "swapped"):
+                conditions.append(AuditCondition(
+                    f"{stage}_{source}_fixed", source, 1.0,
+                    snapshot_stage=stage, updates_enabled=False, recipient_convolution=True,
+                ))
+        for source in ("correct", "swapped"):
+            conditions.append(AuditCondition(
+                f"gap_frozen_{source}_evolving", source, 1.0,
+                snapshot_stage="gap_frozen",
+                recipient_convolution=True,
+            ))
+        return tuple(conditions)
+    if suite == "query_transitions":
+        conditions = list(baseline) + [AUDIT_CONDITIONS[-1]]
+        # A 2^3 factorial separates fresh writes, carried momentum, forgetting,
+        # and their interactions. It is distinct from freezing the entire state.
+        for fresh, momentum, forgetting in product((True, False), repeat=3):
+            if fresh and momentum and forgetting:
+                continue
+            disabled = [name for name, enabled in (
+                ("fresh", fresh), ("momentum", momentum), ("forget", forgetting),
+            ) if not enabled]
+            policy = "no_" + "_".join(disabled)
+            for source in ("correct", "swapped"):
+                conditions.append(AuditCondition(
+                    f"{policy}_{source}", source, 1.0,
+                    fresh_writes_enabled=fresh, momentum_enabled=momentum,
+                    forgetting_enabled=forgetting,
+                ))
+        for source in ("correct", "swapped"):
+            conditions.append(AuditCondition(
+                f"fixed_{source}", source, 1.0, updates_enabled=False,
+            ))
+        return tuple(conditions)
     if suite == "weights_vs_rest":
         return baseline + (
             AuditCondition(
@@ -144,28 +202,38 @@ def compose_memory_states(
 @contextmanager
 def memory_execution_controls(
     model, *, persistent_writes_enabled: bool = True, updates_enabled: bool = True,
+    momentum_enabled: bool = True, forgetting_enabled: bool = True,
 ):
     """Restore runtime controls even on errors; never mutate checkpoint parameters."""
     if model.training:
         raise ValueError("Memory execution controls require model.eval()")
-    if type(persistent_writes_enabled) is not bool or type(updates_enabled) is not bool:
+    if any(type(value) is not bool for value in (
+        persistent_writes_enabled, updates_enabled, momentum_enabled, forgetting_enabled,
+    )):
         raise ValueError("Memory execution controls must be boolean")
     layers = [layer.taal for layer in model.model.layers]
-    if not updates_enabled and any(layer.neural_memory.config.chunk_size != 1 for layer in layers):
-        raise ValueError("Fixed memory requires memory_chunk_size=1")
+    if (not updates_enabled or not momentum_enabled or not forgetting_enabled) and any(
+        layer.neural_memory.config.chunk_size != 1 for layer in layers
+    ):
+        raise ValueError("Transition controls require memory_chunk_size=1")
     previous = [
-        (layer.persistent_writes_enabled, layer.neural_memory.updates_enabled)
+        (layer.persistent_writes_enabled, layer.neural_memory.updates_enabled,
+         layer.neural_memory.momentum_enabled, layer.neural_memory.forgetting_enabled)
         for layer in layers
     ]
     try:
         for layer in layers:
             layer.persistent_writes_enabled = persistent_writes_enabled
             layer.neural_memory.updates_enabled = updates_enabled
+            layer.neural_memory.momentum_enabled = momentum_enabled
+            layer.neural_memory.forgetting_enabled = forgetting_enabled
         yield
     finally:
-        for layer, (persistent, updates) in zip(layers, previous):
+        for layer, (persistent, updates, momentum, forgetting) in zip(layers, previous):
             layer.persistent_writes_enabled = persistent
             layer.neural_memory.updates_enabled = updates
+            layer.neural_memory.momentum_enabled = momentum
+            layer.neural_memory.forgetting_enabled = forgetting
 
 
 def donor_label_scores(logits: torch.Tensor, target: int, donor_target: int) -> dict:
