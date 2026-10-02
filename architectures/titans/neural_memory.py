@@ -111,6 +111,8 @@ class NeuralMemory(nn.Module):
         self.momentum_projection = nn.Linear(dim, 1)
         self.write_strength_projection = nn.Linear(dim, 1)
         self.trace_observer = None
+        # Scoped evaluation ablations can freeze weights/momentum while preserving reads.
+        self.updates_enabled = True
         # Set only for an explicitly timed microbatch; no training-state effect.
         self.timing_observer = None
         self.reset_update_controls()
@@ -322,6 +324,17 @@ class NeuralMemory(nn.Module):
         write_mask: Bool[torch.Tensor, "B C"],
     ) -> NeuralMemoryState:
         B, C, _ = keys.shape
+        if not self.updates_enabled:
+            if (
+                self.training
+                or self.config.chunk_size != 1
+                or state.pending_count
+                or state.pending_gradient is not None
+                or state.pending_input_sum is not None
+            ):
+                raise ValueError("Fixed memory requires eval mode and complete one-token chunks")
+            if self.trace_observer is None:
+                return state
         timer = self.timing_observer
         tic = perf_counter() if timer is not None else 0.0
         pending_count = state.pending_count + C
@@ -352,6 +365,15 @@ class NeuralMemory(nn.Module):
         token_gradients = gradient_result.token_gradients
         if timer is not None:
             timer("gradient_call_total", perf_counter() - tic)
+        if not self.updates_enabled:
+            # Record the proposed write, but commit nothing: no forgetting,
+            # old momentum, fresh gradient, or pending-write accumulation.
+            assert token_gradients is not None
+            self.trace_observer(
+                state, token_gradients, state, write_mask, write_strength,
+                updates_enabled=False,
+            )
+            return state
         tic = perf_counter() if timer is not None else 0.0
         input_sum: Float32[torch.Tensor, "B D"] = inputs.float().sum(dim=1)
 

@@ -28,6 +28,7 @@ class WriteEvent:
     write_to_net_alignment: float | None
     chunk_size: int = 1
     chunk_boundary: bool = True
+    updates_enabled: bool = True
 
 
 @dataclass(frozen=True)

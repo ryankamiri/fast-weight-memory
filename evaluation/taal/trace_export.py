@@ -48,6 +48,7 @@ class _LayerRecorder:
         self._prefix_start: dict[str, torch.Tensor] | None = None
         self._pending_writes: list[torch.Tensor] = []
         self._pending_boundaries: list[bool] = []
+        self._updates_enabled = True
         self._pending_prefix_change: torch.Tensor | None = None
 
     def begin_call(self, *, text_length: int, persistent_count: int) -> None:
@@ -74,9 +75,12 @@ class _LayerRecorder:
         after: NeuralMemoryState,
         write_mask: torch.Tensor,
         write_strength: torch.Tensor,
+        *,
+        updates_enabled: bool = True,
     ) -> None:
         if not self._active:
             raise RuntimeError("TaaL write arrived outside a trace call")
+        self._updates_enabled = updates_enabled
         B, C = write_mask.shape
         if B != 1:
             raise ValueError("TaaL trace export currently requires one session per batch")
@@ -88,7 +92,7 @@ class _LayerRecorder:
         for token_index in range(C):
             index = self._write_index
             internal = index < self._persistent_count
-            boundary = committed and token_index == C - 1
+            boundary = updates_enabled and committed and token_index == C - 1
             grad = {
                 name: value[0, token_index].detach()
                 for name, value in token_gradients.items()
@@ -174,6 +178,7 @@ class _LayerRecorder:
                 write_to_net_alignment=alignment,
                 chunk_size=self.chunk_size,
                 chunk_boundary=self._pending_boundaries[index],
+                updates_enabled=self._updates_enabled,
             ))
         if self._persistent_count:
             assert self._pending_prefix_change is not None

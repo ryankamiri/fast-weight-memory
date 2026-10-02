@@ -1,7 +1,7 @@
 import argparse
 from contextlib import nullcontext
 import copy
-from dataclasses import dataclass
+from dataclasses import asdict
 import hashlib
 import json
 import os
@@ -22,6 +22,14 @@ from architectures.titans.state import NeuralMemoryState
 from evaluation.scoring import grouped_score_summary, score_logits
 from evaluation.storage import append_result, ensure_manifest, read_results
 from evaluation.taal.prefix_store import PrefixStore, PrefixTrace, checkpoint_fingerprint
+from evaluation.taal.interventions import (
+    AUDIT_CONDITIONS,
+    audit_conditions,
+    compose_memory_states,
+    donor_label_scores,
+    memory_execution_controls,
+    validate_component_boundary,
+)
 from evaluation.taal.trace_contract import TraceComparison, TraceEpisode
 from evaluation.taal.trace_export import (
     TaalTraceExporter,
@@ -31,13 +39,6 @@ from evaluation.taal.trace_export import (
 )
 from utils.seed import seed_everything
 from training.taal_timing import TaalEvaluationTimings, TaalKernelSampler
-
-
-@dataclass(frozen=True)
-class AuditCondition:
-    name: str
-    memory_source: str
-    read_scale: float
 
 
 class StateAuditExample(TypedDict):
@@ -50,16 +51,6 @@ class StateAuditExample(TypedDict):
     final_query_position: int
     target_token_id: int
     candidate_token_ids: list[int]
-
-
-AUDIT_CONDITIONS = (
-    AuditCondition("correct_full", "correct", 1.0),
-    AuditCondition("correct_half", "correct", 0.5),
-    AuditCondition("reads_disabled", "correct", 0.0),
-    AuditCondition("reset_initial", "reset", 1.0),
-    AuditCondition("zeroed", "zeroed", 1.0),
-    AuditCondition("swapped", "swapped", 1.0),
-)
 
 
 def _map_optional(value, transform):
@@ -225,14 +216,14 @@ def example_batches_by_prefix_length(examples, batch_size):
             yield group[start:start + batch_size]
 
 
-def paired_differences(rows):
+def paired_differences(rows, conditions=AUDIT_CONDITIONS):
     by_example = {}
     for row in rows:
         by_example.setdefault(row["example_id"], {})[
             row["audit_condition"]
         ] = row
     comparisons = {}
-    for condition in AUDIT_CONDITIONS:
+    for condition in conditions:
         if condition.name == "correct_full":
             continue
         pairs = [
@@ -260,11 +251,11 @@ def paired_differences(rows):
     return comparisons
 
 
-def summarize(rows):
+def summarize(rows, conditions=AUDIT_CONDITIONS):
     rows = list(rows)
     summary = {
         "metrics": grouped_score_summary(rows, ("audit_condition",)),
-        "paired_vs_correct_full": paired_differences(rows),
+        "paired_vs_correct_full": paired_differences(rows, conditions),
     }
     swapped = [row for row in rows if row["audit_condition"] == "swapped"]
     if swapped:
@@ -291,6 +282,36 @@ def summarize(rows):
             )
             / len(swapped),
         }
+    if rows and all("own_minus_donor_label_log_probability" in row for row in rows):
+        summary["label_preferences"] = {}
+        by_example = {}
+        for row in rows:
+            by_example.setdefault(row["example_id"], {})[row["audit_condition"]] = row
+        for condition in conditions:
+            selected = [row for row in rows if row["audit_condition"] == condition.name]
+            if not selected:
+                continue
+            group_shifts = {}
+            for row in selected:
+                baseline = by_example[row["example_id"]].get("correct_full")
+                if baseline is not None:
+                    group_shifts.setdefault(row["record_group"], []).append(
+                        baseline["own_minus_donor_label_log_probability"]
+                        - row["own_minus_donor_label_log_probability"]
+                    )
+            summary["label_preferences"][condition.name] = {
+                "examples": len(selected),
+                "mean_own_minus_donor_label_log_probability": sum(
+                    row["own_minus_donor_label_log_probability"] for row in selected
+                ) / len(selected),
+                "donor_vocabulary_top_1_rate": sum(
+                    row["donor_target_vocabulary_top_1"] for row in selected
+                ) / len(selected),
+                "record_group_baseline_minus_variant_label_margin": {
+                    str(group): sum(shifts) / len(shifts)
+                    for group, shifts in group_shifts.items()
+                },
+            }
     return summary
 
 
@@ -330,6 +351,13 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     settings = yaml.safe_load(args.config.read_text())
+    conditions = audit_conditions(settings.get("audit_suite", "standard"))
+    persistent_writes_enabled = settings.get("persistent_writes_enabled", True)
+    query_updates_enabled = settings.get("query_updates_enabled", True)
+    for name, value in (("persistent_writes_enabled", persistent_writes_enabled),
+                        ("query_updates_enabled", query_updates_enabled)):
+        if type(value) is not bool:
+            parser.error(f"{name} must be true or false")
     save_traces = settings.get("save_traces", True)
     if type(save_traces) is not bool:
         parser.error("save_traces must be true or false")
@@ -373,7 +401,7 @@ def main():
     expected_result_ids = {
         f"{example_id}/{condition.name}"
         for example_id in example_ids
-        for condition in AUDIT_CONDITIONS
+        for condition in conditions
     }
     checkpoint = str(args.checkpoint.resolve())
     checkpoint_sha256 = checkpoint_fingerprint(args.checkpoint.resolve())
@@ -383,7 +411,11 @@ def main():
         "config": settings,
         "dataset_revision": revision,
         "dataset_metadata": metadata,
-        "conditions": [vars(condition) for condition in AUDIT_CONDITIONS],
+        "conditions": [
+            {key: value for key, value in asdict(condition).items()
+             if key != "components" or value is not None}
+            for condition in conditions
+        ],
         # Pilot 1A treated each record as one segment. The resumed query must
         # therefore continue that segment rather than insert TaaL tokens again.
         "query_prepends_memory_tokens": False,
@@ -410,7 +442,7 @@ def main():
                 "directory or resume the original run without tracing"
             )
     if set(results) == expected_result_ids:
-        output = summarize(results.values())
+        output = summarize(results.values(), conditions)
         (args.output_dir / "summary.json").write_text(
             json.dumps(output, indent=2) + "\n"
         )
@@ -426,7 +458,10 @@ def main():
         revision=metadata["tokenizer_revision"],
     )
     model = load_model(args.checkpoint).to(device).eval()
-    print(f"Evaluating on {torch.cuda.get_device_name(device)}: {len(examples)} episodes, {len(AUDIT_CONDITIONS)} conditions each.", flush=True)
+    if (settings.get("audit_suite", "standard") != "standard" or not query_updates_enabled):
+        if model.config.memory_chunk_size != 1:
+            raise ValueError("Component/fixed-weight audits require memory_chunk_size=1")
+    print(f"Evaluating on {torch.cuda.get_device_name(device)}: {len(examples)} episodes, {len(conditions)} conditions each.", flush=True)
     timings = TaalEvaluationTimings(
         model, device, os.environ.get("TAAL_TIMING_FIRST_BATCH") == "1"
     )
@@ -441,6 +476,10 @@ def main():
                 "tokenizer_revision": metadata["tokenizer_revision"],
                 "layers": trace_layers,
                 "capture": "all_examples_all_layers_compact_scalars",
+                **({
+                    "evaluation_config": settings,
+                    "checkpoint_sha256": checkpoint_sha256,
+                } if "audit_suite" in settings else {}),
             },
         )
         if save_traces else None
@@ -478,6 +517,7 @@ def main():
                 if save_traces else None
             )
             with (
+                memory_execution_controls(model, persistent_writes_enabled=persistent_writes_enabled),
                 timings.phase("state_bank_prefill", tokens=len(batch[0][1]), detailed=built == 0),
                 sampler if sampler is not None else nullcontext(),
                 prefix_trace if prefix_trace is not None else nullcontext(),
@@ -507,14 +547,14 @@ def main():
     for example_index, example in enumerate(examples):
         pending = [
             condition
-            for condition in AUDIT_CONDITIONS
+            for condition in conditions
             if f"{example['example_id']}/{condition.name}" not in results
         ]
         if not pending:
             continue
         swapped_example = swapped_sources[example["example_id"]]
         required_examples = [example]
-        if any(condition.memory_source == "swapped" for condition in pending):
+        if any(condition.uses_donor for condition in pending):
             required_examples.append(swapped_example)
         ensure_prefixes(required_examples)
         prefix_ids, query_ids = split_episode(example)
@@ -529,7 +569,7 @@ def main():
             zeroed = model.model.zero_memory_states(batch_size=1)
             swapped = (
                 prefix_store.load_memory(swapped_example, device)
-                if any(condition.memory_source == "swapped" for condition in pending)
+                if any(condition.uses_donor for condition in pending)
                 else None
             )
         sources = {
@@ -541,7 +581,13 @@ def main():
 
         for condition in pending:
             with timings.phase("fork_kv_and_memory"):
-                state = fork_session_state(base_state, sources[condition.memory_source])
+                if condition.components is not None:
+                    memory = compose_memory_states(base_state.memory_states, swapped, condition.components)
+                else:
+                    memory = sources[condition.memory_source]
+                if not query_updates_enabled:
+                    validate_component_boundary(memory)
+                state = fork_session_state(base_state, memory)
             start = time.perf_counter()
             query_trace = (
                 TaalTraceRecorder(
@@ -553,6 +599,7 @@ def main():
                 if save_traces else None
             )
             with (
+                memory_execution_controls(model, updates_enabled=query_updates_enabled),
                 timings.phase(f"query/{condition.name}", tokens=len(query_ids), detailed=example_index == 0),
                 query_trace if query_trace is not None else nullcontext(),
             ):
@@ -576,6 +623,7 @@ def main():
                         - torch.logsumexp(logits, dim=0)
                     ).item()
                 )
+                donor_scores = donor_label_scores(logits, int(example["target_token_id"]), swapped_target)
                 scores = score_logits(logits, example, tokenizer)
             result = {
                 "evaluation_id": f"{example['example_id']}/{condition.name}",
@@ -586,40 +634,55 @@ def main():
                 "audit_condition": condition.name,
                 "memory_source": condition.memory_source,
                 "memory_read_scale": condition.read_scale,
+                "persistent_writes_enabled": persistent_writes_enabled,
+                "query_updates_enabled": query_updates_enabled,
+                "component_sources": (
+                    asdict(condition.components) if condition.components is not None else {
+                        name: {"correct": "own", "swapped": "donor"}.get(
+                            condition.memory_source, condition.memory_source
+                        )
+                        for name in ("weights", "momentum", "convolution")
+                    }
+                ),
+                "record_group": example.get(swap_group_field) if swap_group_field else None,
                 "prefix_tokens": len(prefix_ids),
                 "query_tokens": len(query_ids),
                 "seconds": time.perf_counter() - start,
                 "swapped_from_example_id": (
                     swapped_example["example_id"]
-                    if condition.memory_source == "swapped"
+                    if condition.uses_donor
                     else None
                 ),
                 "swapped_target_token_id": (
                     swapped_target
-                    if condition.memory_source == "swapped"
+                    if condition.uses_donor
                     else None
                 ),
                 "swapped_target_in_candidates": (
                     swapped_target in example["candidate_token_ids"]
-                    if condition.memory_source == "swapped"
+                    if condition.uses_donor
                     else None
                 ),
                 "swapped_target_log_probability": (
                     swapped_log_probability
-                    if condition.memory_source == "swapped"
+                    if condition.uses_donor
                     else None
                 ),
                 "swapped_target_vocabulary_top_1": (
                     int(logits.argmax().item()) == swapped_target
-                    if condition.memory_source == "swapped"
+                    if condition.uses_donor
                     else None
                 ),
                 **scores,
+                **donor_scores,
             }
             if save_traces:
                 assert prefix_trace is not None and query_trace is not None
                 assert trace_exporter is not None
-                with timings.phase("trace_generated_token"):
+                with (
+                    memory_execution_controls(model, updates_enabled=query_updates_enabled),
+                    timings.phase("trace_generated_token"),
+                ):
                     prediction_trace = trace_greedy_prediction(
                         model,
                         tokenizer,
@@ -664,9 +727,13 @@ def main():
                             "expected_token_id": int(example["target_token_id"]),
                             "memory_source_at_query": condition.memory_source,
                             "read_scale_at_query": condition.read_scale,
+                            "persistent_writes_enabled": persistent_writes_enabled,
+                            "query_updates_enabled": query_updates_enabled,
+                            "component_sources": result["component_sources"],
+                            "record_group": result["record_group"],
                             "swapped_from_example_id": (
                                 swapped_example["example_id"]
-                                if condition.memory_source == "swapped" else None
+                                if condition.uses_donor else None
                             ),
                         },
                     ))
@@ -682,7 +749,7 @@ def main():
         if save_traces:
             assert trace_exporter is not None
             baseline = results[f"{example['example_id']}/correct_full"]
-            for condition in AUDIT_CONDITIONS:
+            for condition in conditions:
                 if condition.name == "correct_full":
                     continue
                 variant = results[f"{example['example_id']}/{condition.name}"]
@@ -709,7 +776,7 @@ def main():
                 ))
         del saved_prefix, base_state, sources, reset, zeroed, swapped
 
-    output = summarize(results.values())
+    output = summarize(results.values(), conditions)
     (args.output_dir / "summary.json").write_text(
         json.dumps(output, indent=2) + "\n"
     )

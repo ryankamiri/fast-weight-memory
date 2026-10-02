@@ -42,6 +42,8 @@ class TaalLayer(nn.Module):
         self.residual_gate = nn.Parameter(torch.zeros(()))
         self.trace_observer = None
         self.timing_observer = None
+        # Runtime evaluation control, not a learned parameter or checkpoint setting.
+        self.persistent_writes_enabled = True
 
     @jaxtyped(typechecker=beartype)
     def forward(
@@ -81,15 +83,21 @@ class TaalLayer(nn.Module):
             )
 
         memory_write_mask: Bool[torch.Tensor, "B N_memory"] | None = None
-        if write_mask is not None and prepend_memory_tokens:
+        if prepend_memory_tokens and (
+            write_mask is not None or not self.persistent_writes_enabled
+        ):
             persistent_write_mask: Bool[
                 torch.Tensor, "B N_persistent"
-            ] = torch.ones(
-                B,
-                self.config.num_persistent_tokens,
+            ] = torch.full(
+                (B, self.config.num_persistent_tokens),
+                self.persistent_writes_enabled,
                 dtype=torch.bool,
                 device=hidden_states.device,
             )
+            if write_mask is None:
+                write_mask = torch.ones(
+                    (B, S), dtype=torch.bool, device=hidden_states.device
+                )
             memory_write_mask = torch.cat(
                 (persistent_write_mask, write_mask),
                 dim=1,
