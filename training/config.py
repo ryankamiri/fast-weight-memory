@@ -101,6 +101,7 @@ class CausalLMDataConfig(DataConfig):
 class BridgeMemoryDataConfig(DataConfig):
     dataset_id: str = "ryankamiri/ttcd-bridge-memory"
     dataset_config: str = ""
+    query_fresh_writes_enabled: bool = True
     train: BridgeMemoryRecordRange = field(default_factory=BridgeMemoryRecordRange)
     val: BridgeMemoryRecordRange = field(default_factory=BridgeMemoryRecordRange)
 
@@ -297,6 +298,12 @@ class TrainingConfig:
         if isinstance(self.loss, CausalLMLossConfig) and self.loss.all_tokens_weight == 0:
             raise ValueError("Causal-LM all_tokens_weight must be positive")
         if isinstance(self.data, BridgeMemoryDataConfig):
+            if type(self.data.query_fresh_writes_enabled) is not bool:
+                raise ValueError("query_fresh_writes_enabled must be a boolean")
+            if not self.data.query_fresh_writes_enabled and (
+                not isinstance(self.model, TaalModelConfig) or self.model.memory_chunk_size != 1
+            ):
+                raise ValueError("No-fresh query training requires TaaL memory_chunk_size=1")
             if not self.data.dataset_config.strip():
                 raise ValueError("bridge_memory data requires data.dataset_config")
             if self.loss.delayed_answer_weight == 0:

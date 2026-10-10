@@ -32,6 +32,7 @@ class AuditCondition:
     momentum_enabled: bool = True
     forgetting_enabled: bool = True
     updates_enabled: bool = True
+    read_layers: tuple[int, ...] | None = None
 
     @property
     def uses_donor(self) -> bool:
@@ -48,10 +49,40 @@ AUDIT_CONDITIONS = (
 )
 
 
-def audit_conditions(suite: str) -> tuple[AuditCondition, ...]:
+def audit_conditions(
+    suite: str, *, layer_groups: dict[str, list[int]] | None = None,
+) -> tuple[AuditCondition, ...]:
     if suite == "standard":
         return AUDIT_CONDITIONS
+    if suite == "no_fresh_query":
+        native = tuple(replace(condition, fresh_writes_enabled=False) for condition in AUDIT_CONDITIONS)
+        return native + tuple(replace(condition, name=f"fresh_{condition.name}") for condition in (
+            AUDIT_CONDITIONS[0], AUDIT_CONDITIONS[2], AUDIT_CONDITIONS[-1],
+        ))
     baseline = (AUDIT_CONDITIONS[0], AUDIT_CONDITIONS[2])
+    if suite == "layer_access":
+        if not layer_groups or set(layer_groups) != {"lower", "middle", "upper"}:
+            raise ValueError("layer_access requires lower/middle/upper layer groups")
+        flattened = [index for group in layer_groups.values() for index in group]
+        if (any(type(index) is not int or index < 0 for index in flattened)
+                or len(set(flattened)) != len(flattened)
+                or any(not group for group in layer_groups.values())):
+            raise ValueError("Layer groups must be nonempty, disjoint integer lists")
+        all_layers = tuple(sorted(flattened))
+        masks = {"all": None, "none": ()}
+        for name, group in layer_groups.items():
+            masks[name] = tuple(sorted(group))
+            masks[f"without_{name}"] = tuple(index for index in all_layers if index not in group)
+        conditions = list(baseline) + [AUDIT_CONDITIONS[-1]]
+        for stage in ("label", "fact", "final"):
+            for mask, read_layers in masks.items():
+                for source in ("correct", "swapped"):
+                    conditions.append(AuditCondition(
+                        f"{stage}_{mask}_{source}_fixed", source, 1.0,
+                        snapshot_stage=stage, updates_enabled=False,
+                        recipient_convolution=True, read_layers=read_layers,
+                    ))
+        return tuple(conditions)
     if suite == "encoding":
         conditions = list(baseline) + [AUDIT_CONDITIONS[-1]]
         conditions.append(AuditCondition("initial_fixed", "reset", 1.0, updates_enabled=False))
@@ -203,6 +234,7 @@ def compose_memory_states(
 def memory_execution_controls(
     model, *, persistent_writes_enabled: bool = True, updates_enabled: bool = True,
     momentum_enabled: bool = True, forgetting_enabled: bool = True,
+    read_layers: tuple[int, ...] | None = None,
 ):
     """Restore runtime controls even on errors; never mutate checkpoint parameters."""
     if model.training:
@@ -212,28 +244,36 @@ def memory_execution_controls(
     )):
         raise ValueError("Memory execution controls must be boolean")
     layers = [layer.taal for layer in model.model.layers]
+    if read_layers is not None and (
+        any(type(index) is not int or not 0 <= index < len(layers) for index in read_layers)
+        or len(set(read_layers)) != len(read_layers)
+    ):
+        raise ValueError("read_layers must contain unique, valid layer indices")
     if (not updates_enabled or not momentum_enabled or not forgetting_enabled) and any(
         layer.neural_memory.config.chunk_size != 1 for layer in layers
     ):
         raise ValueError("Transition controls require memory_chunk_size=1")
     previous = [
         (layer.persistent_writes_enabled, layer.neural_memory.updates_enabled,
-         layer.neural_memory.momentum_enabled, layer.neural_memory.forgetting_enabled)
+         layer.neural_memory.momentum_enabled, layer.neural_memory.forgetting_enabled,
+         layer.reads_enabled)
         for layer in layers
     ]
     try:
-        for layer in layers:
+        for index, layer in enumerate(layers):
             layer.persistent_writes_enabled = persistent_writes_enabled
             layer.neural_memory.updates_enabled = updates_enabled
             layer.neural_memory.momentum_enabled = momentum_enabled
             layer.neural_memory.forgetting_enabled = forgetting_enabled
+            layer.reads_enabled = read_layers is None or index in read_layers
         yield
     finally:
-        for layer, (persistent, updates, momentum, forgetting) in zip(layers, previous):
+        for layer, (persistent, updates, momentum, forgetting, reads) in zip(layers, previous):
             layer.persistent_writes_enabled = persistent
             layer.neural_memory.updates_enabled = updates
             layer.neural_memory.momentum_enabled = momentum
             layer.neural_memory.forgetting_enabled = forgetting
+            layer.reads_enabled = reads
 
 
 def donor_label_scores(logits: torch.Tensor, target: int, donor_target: int) -> dict:

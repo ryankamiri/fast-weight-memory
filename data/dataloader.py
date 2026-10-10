@@ -59,9 +59,15 @@ class CausalLMCollator:
 
 
 class BridgeMemoryCollator:
-    def __init__(self, all_tokens_weight: float, delayed_answer_weight: float):
+    def __init__(
+        self, all_tokens_weight: float, delayed_answer_weight: float,
+        query_fresh_writes_enabled: bool = True,
+    ):
         self.all_tokens_weight = all_tokens_weight
         self.delayed_answer_weight = delayed_answer_weight
+        if type(query_fresh_writes_enabled) is not bool:
+            raise ValueError("query_fresh_writes_enabled must be boolean")
+        self.query_fresh_writes_enabled = query_fresh_writes_enabled
 
     def __call__(self, examples) -> dict[str, torch.Tensor | list[str]]:
         rows = [
@@ -95,6 +101,16 @@ class BridgeMemoryCollator:
             "conditions": [example["condition"] for example in examples],
             "query_variants": [example["query_variant"] for example in examples],
         }
+        if not self.query_fresh_writes_enabled:
+            write_mask = torch.ones_like(input_ids, dtype=torch.bool)
+            for B_index, example in enumerate(examples):
+                boundary = example.get("final_query_position")
+                if type(boundary) is not int or not 0 < boundary < len(example["input_ids"]):
+                    raise ValueError("No-fresh query training requires a valid final_query_position")
+                # Suppress only the fresh inner key-to-value gradient. Carried
+                # momentum, forgetting and the outer answer-loss graph remain.
+                write_mask[B_index, boundary:] = False
+            batch["write_mask"] = write_mask
         if self.all_tokens_weight > 0:
             batch["labels"] = input_ids.clone()
         if self.delayed_answer_weight > 0:
@@ -198,13 +214,17 @@ def create_dataloader(
             conditions=records.conditions,
             query_variants=records.query_variants,
         ))
-        dataset = dataset.select_columns([
+        columns = [
             "input_ids", "target_token_id", "candidate_token_ids",
             "condition", "query_variant",
-        ])
+        ]
+        if not config.query_fresh_writes_enabled:
+            columns.append("final_query_position")
+        dataset = dataset.select_columns(columns)
         collator = BridgeMemoryCollator(
             all_tokens_weight=loss.all_tokens_weight,
             delayed_answer_weight=loss.delayed_answer_weight,
+            query_fresh_writes_enabled=config.query_fresh_writes_enabled,
         )
     if shuffle:
         dataset = dataset.shuffle(seed=seed, buffer_size=config.shuffle_buffer_size)

@@ -395,7 +395,9 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     settings = yaml.safe_load(args.config.read_text())
-    conditions = audit_conditions(settings.get("audit_suite", "standard"))
+    conditions = audit_conditions(
+        settings.get("audit_suite", "standard"), layer_groups=settings.get("layer_groups"),
+    )
     persistent_writes_enabled = settings.get("persistent_writes_enabled", True)
     query_updates_enabled = settings.get("query_updates_enabled", True)
     for name, value in (("persistent_writes_enabled", persistent_writes_enabled),
@@ -456,8 +458,9 @@ def main():
         "dataset_revision": revision,
         "dataset_metadata": metadata,
         "conditions": [
-            {key: value for key, value in asdict(condition).items()
-             if key != "components" or value is not None}
+            {key: list(value) if key == "read_layers" and value is not None else value
+             for key, value in asdict(condition).items()
+             if key not in ("components", "read_layers") or value is not None}
             for condition in conditions
         ],
         # Pilot 1A treated each record as one segment. The resumed query must
@@ -502,6 +505,10 @@ def main():
         revision=metadata["tokenizer_revision"],
     )
     model = load_model(args.checkpoint).to(device).eval()
+    if settings.get("audit_suite") == "layer_access":
+        configured_layers = sorted(index for group in settings["layer_groups"].values() for index in group)
+        if configured_layers != list(range(len(model.model.layers))):
+            raise ValueError("layer_groups must partition every checkpoint memory layer")
     if (settings.get("audit_suite", "standard") != "standard" or not query_updates_enabled):
         if model.config.memory_chunk_size != 1:
             raise ValueError("Component/fixed-weight audits require memory_chunk_size=1")
@@ -542,7 +549,7 @@ def main():
         "tokenizer_revision": metadata["tokenizer_revision"],
     }
     prefix_store = PrefixStore(args.output_dir / "prefix_states", prefix_identity)
-    lifecycle = settings.get("audit_suite") in ("encoding", "retention")
+    lifecycle = settings.get("audit_suite") in ("encoding", "retention", "layer_access")
     stage_stores = lifecycle_stores(args.output_dir / "lifecycle_states", prefix_identity) if lifecycle else {}
     if lifecycle and (not save_traces or state_bank_batch_size != 1):
         raise ValueError("Lifecycle audits require save_traces=true and state_bank_batch_size=1")
@@ -696,6 +703,7 @@ def main():
                     model, updates_enabled=updates_enabled,
                     momentum_enabled=condition.momentum_enabled,
                     forgetting_enabled=condition.forgetting_enabled,
+                    read_layers=condition.read_layers,
                 ),
                 timings.phase(f"query/{condition.name}", tokens=len(query_ids), detailed=example_index == 0),
                 query_trace if query_trace is not None else nullcontext(),
@@ -742,6 +750,7 @@ def main():
                 "query_forgetting_enabled": condition.forgetting_enabled,
                 "snapshot_stage": condition.snapshot_stage,
                 "recipient_convolution": condition.recipient_convolution,
+                "query_read_layers": condition.read_layers,
                 "last_update_text_boundary": (
                     lifecycle_boundaries(example, tokenizer)["fact"]
                     if condition.snapshot_stage == "gap_frozen" else None
@@ -791,6 +800,7 @@ def main():
                         model, updates_enabled=updates_enabled,
                         momentum_enabled=condition.momentum_enabled,
                         forgetting_enabled=condition.forgetting_enabled,
+                        read_layers=condition.read_layers,
                     ),
                     timings.phase("trace_generated_token"),
                 ):
@@ -846,6 +856,7 @@ def main():
                             "query_forgetting_enabled": condition.forgetting_enabled,
                             "snapshot_stage": condition.snapshot_stage,
                             "recipient_convolution": condition.recipient_convolution,
+                            "query_read_layers": condition.read_layers,
                             "last_update_text_boundary": result["last_update_text_boundary"],
                             "snapshot_text_boundary": result["snapshot_text_boundary"],
                             "prefix_trace_role": "recipient reference before state intervention",

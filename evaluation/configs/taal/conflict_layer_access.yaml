@@ -1,0 +1,18 @@
+dataset:
+  path: data/taal_conflict_control.jsonl
+  start: 0
+  end: 16
+  conditions: [micro_conflict]
+  query_variants: [exact]
+execution_block_size: 128
+state_bank_batch_size: 1
+seed: 42
+save_traces: true
+swap_group_field: record_name
+audit_suite: layer_access
+persistent_writes_enabled: true
+query_updates_enabled: true
+layer_groups:
+  lower: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+  middle: [14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  upper: [24, 25, 26, 27]

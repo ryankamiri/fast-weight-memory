@@ -44,6 +44,7 @@ class TaalLayer(nn.Module):
         self.timing_observer = None
         # Runtime evaluation control, not a learned parameter or checkpoint setting.
         self.persistent_writes_enabled = True
+        self.reads_enabled = True
 
     @jaxtyped(typechecker=beartype)
     def forward(
@@ -132,7 +133,8 @@ class TaalLayer(nn.Module):
             timer("adapter_projection_out", perf_counter() - tic)
         tic = perf_counter() if timer is not None else 0.0
         gate = torch.tanh(self.residual_gate)
-        injection = memory_read_scale * gate * correction
+        effective_read_scale = memory_read_scale if self.reads_enabled else 0.0
+        injection = effective_read_scale * gate * correction
         output: Float[torch.Tensor, "B S D_model"] = hidden_states + injection
         if timer is not None:
             timer("residual_gate_and_injection", perf_counter() - tic)
@@ -141,7 +143,7 @@ class TaalLayer(nn.Module):
             self.trace_observer.record_reads(
                 hidden_states,
                 injection,
-                read_scale=memory_read_scale,
+                read_scale=effective_read_scale,
                 residual_gate=gate,
             )
             if timer is not None:

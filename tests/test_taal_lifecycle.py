@@ -155,13 +155,13 @@ class TaalLifecycleTests(unittest.TestCase):
                     state=fork_session_state(prefix.state, prefix.state.memory_states), memory_read_scale=0.0, prepend_memory_tokens=False)
             torch.testing.assert_close(baseline.logits, output.logits, atol=0, rtol=0)
 
-    def test_full_runner_traces_scoring_and_resume_for_all_three_suites(self):
+    def test_full_runner_traces_scoring_and_resume_for_all_suites(self):
         cpu_torch = SimpleNamespace(
             cuda=SimpleNamespace(is_available=lambda: True, get_device_name=lambda _: "CPU fixture"),
             device=lambda *args: torch.device("cpu"), tensor=torch.tensor,
             long=torch.long, bool=torch.bool, full=torch.full, logsumexp=torch.logsumexp,
         )
-        for suite in ("encoding", "retention", "query_transitions"):
+        for suite in ("encoding", "retention", "query_transitions", "no_fresh_query", "layer_access"):
             with self.subTest(suite=suite), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 dataset = root / "data.jsonl"
@@ -172,6 +172,14 @@ class TaalLifecycleTests(unittest.TestCase):
                     "seed": 42, "execution_block_size": 3, "save_traces": True,
                     "swap_group_field": "record_name", "audit_suite": suite,
                 }
+                if suite == "layer_access":
+                    config_values = self.model.config.to_dict()
+                    config_values["num_hidden_layers"] = 3
+                    config_values["layer_types"] = ["full_attention"] * 3
+                    self.model = type(self.model)(type(self.model.config)(**config_values)).eval()
+                    for layer in self.model.model.layers:
+                        layer.taal.residual_gate.data.fill_(0.25)
+                    settings["layer_groups"] = {"lower": [0], "middle": [1], "upper": [2]}
                 config = root / "config.yaml"
                 config.write_text(yaml.safe_dump(settings))
                 output = root / "out"
@@ -191,7 +199,8 @@ class TaalLifecycleTests(unittest.TestCase):
                     state_audit.main()
                     state_audit.main()
                 rows = [json.loads(row) for row in rows_path.read_text().splitlines()]
-                self.assertEqual(len(rows), 2 * len(audit_conditions(suite)))
+                conditions = audit_conditions(suite, layer_groups=settings.get("layer_groups"))
+                self.assertEqual(len(rows), 2 * len(conditions))
                 self.assertEqual(len({row["evaluation_id"] for row in rows}), len(rows))
                 manifest = json.loads((output / "memory_traces/manifest.json").read_text())
                 self.assertEqual(len(manifest["episodes"]), len(rows))
@@ -205,7 +214,11 @@ class TaalLifecycleTests(unittest.TestCase):
                     self.assertEqual(episode["tokens"][-1]["phase"], "generated")
                     self.assertEqual(episode["metadata"]["memory_intervention_at_position"], 11)
                     events = [event for event in episode["writes"] if event["position"] is not None and event["position"] >= 11]
-                    self.assertEqual(len(events), 6)
+                    self.assertEqual(len(events), 3 * len(self.model.model.layers))
+                    if episode["metadata"].get("query_read_layers") is not None:
+                        enabled_layers = episode["metadata"]["query_read_layers"]
+                        reads = [event for event in episode["reads"] if event["position"] >= 11]
+                        self.assertTrue(all(event["enabled"] == (event["layer"] in enabled_layers) for event in reads))
                     if not episode["metadata"]["query_updates_enabled"]:
                         self.assertTrue(all(event["net_weight_change_norm"] == 0 for event in events))
                     if not episode["metadata"]["query_fresh_writes_enabled"]:

@@ -9,6 +9,8 @@ __pycache__/
 /datasets/
 /data/taal_conflict_control.jsonl
 /data/taal_conflict_control.metadata.json
+/data/taal_state_probe.jsonl
+/data/taal_state_probe.metadata.json
 /wandb/
 /fs-qwen-*.out
 /fs-qwen-*.err

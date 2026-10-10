@@ -1,0 +1,13 @@
+dataset:
+  path: data/taal_state_probe.jsonl
+seed: 73
+execution_block_size: 128
+save_traces: true
+save_memory_states: true
+projection_dim: 32
+ridge_strengths: [0.1, 1.0, 10.0, 100.0]
+shuffled_controls: 20
+layer_groups:
+  lower: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+  middle: [14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+  upper: [24, 25, 26, 27]
