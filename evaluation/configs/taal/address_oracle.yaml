@@ -1,0 +1,7 @@
+dataset:
+  path: data/taal_state_probe.jsonl
+  probe_split: test
+mode: oracle
+seed: 73
+execution_block_size: 128
+save_traces: true
