@@ -1,0 +1,9 @@
+dataset:
+  path: data/taal_state_probe.jsonl
+seed: 73
+execution_block_size: 128
+save_traces: true
+projection_dim: 32
+ridge_strengths: [0.1, 1.0, 10.0, 100.0]
+shuffled_controls: 5
+policies: [normal, no_fresh, no_forget, no_momentum, frozen]

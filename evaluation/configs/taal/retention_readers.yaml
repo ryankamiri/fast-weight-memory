@@ -1,0 +1,9 @@
+dataset:
+  path: data/taal_state_probe.jsonl
+seed: 73
+save_traces: true
+projection_dim: 128
+ridge_strengths: [0.1, 1.0, 10.0, 100.0]
+weight_decays: [0.01, 0.1]
+reader_epochs: 200
+shuffled_controls: 5
