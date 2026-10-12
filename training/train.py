@@ -19,6 +19,7 @@ from utils.seed import seed_everything
 from .config import TaalModelConfig, TrainingConfig, TTCDModelConfig, load_config
 from .engine import Progress, build_scheduler, train
 from .checkpoints import ModelCheckpoints
+from .stopping import reached_validation_target
 
 
 def verify_loading(model, loading_info):
@@ -213,21 +214,38 @@ def main():
         print(f"Checkpoint directory: {checkpoints.directory}", flush=True)
         progress = Progress()
         reason = "exception"
+        converged = False
+
+        def on_validation(model, progress, metrics):
+            nonlocal converged
+            checkpoints.on_validation(model, progress, metrics)
+            if reached_validation_target(metrics, config.training):
+                converged = True
+                print(f"Validation target reached at optimizer step {progress.step}.", flush=True)
+                stop.set()
+
         try:
             train(
                 model, train_loader, val_loader, optimizer, scheduler, config, device, log,
-                stop.is_set, on_validation=checkpoints.on_validation, progress=progress,
+                stop.is_set, on_validation=on_validation, progress=progress,
             )
             reason = "signal" if stop.is_set() else "completed"
         finally:
-            if stop.is_set():
+            if converged:
+                reason = "target_reached"
+            elif stop.is_set():
                 reason = "signal"
+            final_saved = False
             try:
                 checkpoints.save_final(model, progress, reason)
+                final_saved = config.checkpoints.save_final
             except Exception as error:
                 if reason != "exception" and not stop.is_set():
                     raise
                 print(f"Final model save failed: {error}", flush=True)
+            if config.training.save_traces and final_saved and progress.step > 0 and reason != "exception":
+                from evaluation.taal.training_trace import export_training_traces
+                export_training_traces(model, config, checkpoints.directory, progress)
 
 
 if __name__ == "__main__":

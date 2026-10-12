@@ -1,0 +1,11 @@
+dataset:
+  path: data/taal_conflict_control.jsonl
+  start: 0
+  end: 16
+  conditions: [micro_conflict]
+  query_variants: [exact]
+
+execution_block_size: 128
+seed: 42
+save_traces: true
+fresh_training_config: training/configs/taal/qwen3_0_6b_conflict_gate_start.yaml

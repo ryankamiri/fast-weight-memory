@@ -13,6 +13,8 @@ __pycache__/
 /data/taal_state_probe.metadata.json
 /data/taal_interference.jsonl
 /data/taal_interference.metadata.json
+/data/taal_min_capacity.jsonl
+/data/taal_min_capacity.metadata.json
 /wandb/
 /fs-qwen-*.out
 /fs-qwen-*.err

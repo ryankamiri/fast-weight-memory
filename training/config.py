@@ -164,6 +164,9 @@ class LoopConfig:
     log_every_steps: int = 10
     trainable_parameters: str = "all"
     initial_taal_gate: float | None = None
+    early_stop_val_loss: float | None = None
+    early_stop_accuracy_metric: str | None = None
+    save_traces: bool = False
 
 
 @dataclass
@@ -228,6 +231,23 @@ class TrainingConfig:
         return values
 
     def validate(self):
+        threshold = self.training.early_stop_val_loss
+        accuracy = self.training.early_stop_accuracy_metric
+        if (threshold is None) != (accuracy is None):
+            raise ValueError("Early stopping requires both a loss threshold and accuracy metric")
+        if threshold is not None and (
+            type(threshold) not in (int, float) or not math.isfinite(threshold)
+            or threshold <= 0 or not isinstance(accuracy, str) or not accuracy.startswith("val/")
+        ):
+            raise ValueError("Early stopping requires a positive finite loss and val/ accuracy metric")
+        if self.training.save_traces and (
+            not isinstance(self.model, TaalModelConfig)
+            or not isinstance(self.data, BridgeMemoryDataConfig)
+            or not self.data.dataset_id.endswith(".jsonl")
+        ):
+            raise ValueError("Training traces currently require local TaaL bridge-memory data")
+        if self.training.save_traces and not self.checkpoints.save_final:
+            raise ValueError("Training traces require a final checkpoint")
         if isinstance(self.data, CausalLMDataConfig) != isinstance(self.loss, CausalLMLossConfig):
             raise ValueError("Causal-LM data requires a causal-LM loss config")
         if isinstance(self.data, BridgeMemoryDataConfig) != isinstance(self.loss, BridgeMemoryLossConfig):
@@ -331,6 +351,7 @@ class TrainingConfig:
             ("allow_train_val_overlap", self.data.allow_train_val_overlap),
             ("gradient_checkpointing", self.training.gradient_checkpointing),
             ("eval_at_end", self.training.eval_at_end),
+            ("save_traces", self.training.save_traces),
             ("save_best", self.checkpoints.save_best),
             ("save_final", self.checkpoints.save_final),
         ):
