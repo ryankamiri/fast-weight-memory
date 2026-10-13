@@ -200,6 +200,7 @@ class CheckpointConfig:
     output_dir: str = "checkpoints"
     save_best: bool = True
     save_final: bool = True
+    save_steps: list[int] = field(default_factory=list)
     selection_metric: str = "val/loss"
     selection_mode: str = "min"
 
@@ -370,6 +371,15 @@ class TrainingConfig:
         for name, value in positive_integers.items():
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
+        save_steps = self.checkpoints.save_steps
+        if not isinstance(save_steps, list):
+            raise ValueError("checkpoints.save_steps must be a list")
+        if any(type(step) is not int or not 1 <= step <= self.training.max_steps for step in save_steps):
+            raise ValueError("checkpoints.save_steps must contain positive steps within max_steps")
+        if len(save_steps) != len(set(save_steps)):
+            raise ValueError("checkpoints.save_steps must contain unique steps")
+        if any(step % self.training.eval_every_steps != 0 for step in save_steps):
+            raise ValueError("checkpoints.save_steps must coincide with full validation steps")
         if self.data.seq_len < 2:
             raise ValueError("seq_len must allow at least one next-token prediction")
         for name, value in (("num_workers", self.data.num_workers),

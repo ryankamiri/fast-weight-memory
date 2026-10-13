@@ -1,4 +1,4 @@
-"""Keep one best and one final HF model snapshot per run, without optimizer state."""
+"""Keep best, final and explicitly selected validation snapshots, without optimizer state."""
 
 from dataclasses import asdict
 import json
@@ -13,6 +13,7 @@ class ModelCheckpoints:
         self.config = config
         self.directory = Path(config.checkpoints.output_dir) / run_id
         self.best_metric_value: float | None = None
+        self.saved_steps: set[int] = set()
 
     def save(self, model, progress, name, *, val_loss=None, selection_value=None, reason=None):
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -66,6 +67,23 @@ class ModelCheckpoints:
                 reason=f"best {metric} ({mode})",
             )
             self.best_metric_value = value
+
+        # A fixed-step snapshot lets accumulation runs be compared both at
+        # equal optimizer updates and at equal supervised-example budgets.
+        # Save only after complete validation, never from a partial pass.
+        should_save_step = (
+            progress.step in self.config.checkpoints.save_steps
+            and progress.step not in self.saved_steps
+            and math.isfinite(value)
+            and math.isfinite(metrics.get("val/loss", value))
+        )
+        if should_save_step:
+            self.save(
+                model, progress, f"step-{progress.step}",
+                val_loss=metrics.get("val/loss"), selection_value=value,
+                reason="matched optimizer-step snapshot",
+            )
+            self.saved_steps.add(progress.step)
 
     def save_final(self, model, progress, reason):
         if self.config.checkpoints.save_final:
