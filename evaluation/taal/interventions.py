@@ -33,6 +33,7 @@ class AuditCondition:
     forgetting_enabled: bool = True
     updates_enabled: bool = True
     read_layers: tuple[int, ...] | None = None
+    replay_query_writes: bool = False
 
     @property
     def uses_donor(self) -> bool:
@@ -51,9 +52,31 @@ AUDIT_CONDITIONS = (
 
 def audit_conditions(
     suite: str, *, layer_groups: dict[str, list[int]] | None = None,
+    read_layers_off: list[int] | None = None, num_layers: int | None = None,
 ) -> tuple[AuditCondition, ...]:
     if suite == "standard":
         return AUDIT_CONDITIONS
+    if suite == "query_layer_reads":
+        if type(num_layers) is not int or num_layers < 1:
+            raise ValueError("query_layer_reads requires the checkpoint layer count")
+        if (
+            not isinstance(read_layers_off, list)
+            or not read_layers_off
+            or any(type(index) is not int or not 0 <= index < num_layers
+                   for index in read_layers_off)
+            or len(set(read_layers_off)) != len(read_layers_off)
+        ):
+            raise ValueError("query_read_layers_off must be a nonempty list of unique checkpoint layer indices")
+        enabled_layers = tuple(index for index in range(num_layers)
+                               if index not in read_layers_off)
+        # Prefix reads are untouched. Native query writes evolve normally, then
+        # replay under the mask so downstream write changes cannot confound it.
+        return AUDIT_CONDITIONS + (
+            AuditCondition("query_layers_off", "correct", 1.0,
+                           read_layers=enabled_layers, replay_query_writes=True),
+            AuditCondition("query_layers_off_swapped", "swapped", 1.0,
+                           read_layers=enabled_layers, replay_query_writes=True),
+        )
     if suite == "no_fresh_query":
         native = tuple(replace(condition, fresh_writes_enabled=False) for condition in AUDIT_CONDITIONS)
         return native + tuple(replace(condition, name=f"fresh_{condition.name}") for condition in (

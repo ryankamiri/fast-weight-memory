@@ -23,6 +23,7 @@ from evaluation.scoring import grouped_score_summary, score_logits
 from evaluation.storage import append_result, ensure_manifest, read_results
 from evaluation.taal.prefix_store import PrefixStore, PrefixTrace, checkpoint_fingerprint
 from evaluation.taal.lifecycle import lifecycle_boundaries, lifecycle_stores, save_lifecycle_prefixes
+from evaluation.taal.query_write_replay import QueryWriteReplay
 from evaluation.taal.interventions import (
     AUDIT_CONDITIONS,
     MemoryComponentSources,
@@ -395,8 +396,14 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     settings = yaml.safe_load(args.config.read_text())
+    suite = settings.get("audit_suite", "standard")
+    checkpoint_layers = None
+    if suite == "query_layer_reads":
+        checkpoint_layers = TaalQwen3Config.from_pretrained(args.checkpoint).num_hidden_layers
     conditions = audit_conditions(
-        settings.get("audit_suite", "standard"), layer_groups=settings.get("layer_groups"),
+        suite, layer_groups=settings.get("layer_groups"),
+        read_layers_off=settings.get("query_read_layers_off"),
+        num_layers=checkpoint_layers,
     )
     persistent_writes_enabled = settings.get("persistent_writes_enabled", True)
     query_updates_enabled = settings.get("query_updates_enabled", True)
@@ -404,6 +411,10 @@ def main():
                         ("query_updates_enabled", query_updates_enabled)):
         if type(value) is not bool:
             parser.error(f"{name} must be true or false")
+    if suite == "query_layer_reads" and (
+        not persistent_writes_enabled or not query_updates_enabled
+    ):
+        parser.error("Query-layer read ablations require normal prefix and query write rules")
     save_traces = settings.get("save_traces", True)
     if type(save_traces) is not bool:
         parser.error("save_traces must be true or false")
@@ -460,7 +471,8 @@ def main():
         "conditions": [
             {key: list(value) if key == "read_layers" and value is not None else value
              for key, value in asdict(condition).items()
-             if key not in ("components", "read_layers") or value is not None}
+             if (key not in ("components", "read_layers") or value is not None)
+             and (key != "replay_query_writes" or value)}
             for condition in conditions
         ],
         # Pilot 1A treated each record as one segment. The resumed query must
@@ -653,6 +665,24 @@ def main():
             "swapped": swapped,
         }
 
+        query_references = {}
+        reference_logits = {}
+        for source in ("correct", "swapped"):
+            if not any(condition.replay_query_writes and condition.memory_source == source
+                       for condition in pending):
+                continue
+            reference = QueryWriteReplay(model, len(query_ids))
+            with memory_execution_controls(model), reference, timings.phase(f"query_write_reference/{source}"):
+                native = model.prefill(
+                    torch.tensor([query_ids], dtype=torch.long, device=device),
+                    execution_block_size=execution_block_size,
+                    state=fork_session_state(base_state, sources[source]),
+                    memory_read_scale=1.0, prepend_memory_tokens=False,
+                )
+            query_references[source] = reference
+            reference_logits[source] = native.logits.detach().clone()
+            del native
+
         for condition in pending:
             updates_enabled = query_updates_enabled and condition.updates_enabled
             with timings.phase("fork_kv_and_memory"):
@@ -698,6 +728,10 @@ def main():
                 )
                 if save_traces else None
             )
+            query_replay = (
+                QueryWriteReplay(model, len(query_ids), query_references[condition.memory_source])
+                if condition.replay_query_writes else None
+            )
             with (
                 memory_execution_controls(
                     model, updates_enabled=updates_enabled,
@@ -707,6 +741,7 @@ def main():
                 ),
                 timings.phase(f"query/{condition.name}", tokens=len(query_ids), detailed=example_index == 0),
                 query_trace if query_trace is not None else nullcontext(),
+                query_replay if query_replay is not None else nullcontext(),
             ):
                 output = model.prefill(
                     torch.tensor(
@@ -723,6 +758,9 @@ def main():
                     memory_read_scale=condition.read_scale,
                     prepend_memory_tokens=False,
                 )
+            if condition.name in ("correct_full", "swapped") and condition.memory_source in reference_logits:
+                if not torch.equal(output.logits, reference_logits[condition.memory_source]):
+                    raise ValueError("Native query write capture changed the full-read control")
             with timings.phase("scoring"):
                 logits = output.logits[0, -1].float()
                 swapped_target = int(swapped_example["target_token_id"])
@@ -751,6 +789,9 @@ def main():
                 "snapshot_stage": condition.snapshot_stage,
                 "recipient_convolution": condition.recipient_convolution,
                 "query_read_layers": condition.read_layers,
+                "query_write_replay": condition.replay_query_writes,
+                "query_write_replay_scope": "prompt_query_only" if condition.replay_query_writes else None,
+                "query_write_replay_verified": condition.replay_query_writes,
                 "last_update_text_boundary": (
                     lifecycle_boundaries(example, tokenizer)["fact"]
                     if condition.snapshot_stage == "gap_frozen" else None
@@ -857,6 +898,10 @@ def main():
                             "snapshot_stage": condition.snapshot_stage,
                             "recipient_convolution": condition.recipient_convolution,
                             "query_read_layers": condition.read_layers,
+                            "query_write_replay": condition.replay_query_writes,
+                            "query_write_replay_scope": result["query_write_replay_scope"],
+                            "query_write_replay_verified": result["query_write_replay_verified"],
+                            "generated_token_write_policy": "normal",
                             "last_update_text_boundary": result["last_update_text_boundary"],
                             "snapshot_text_boundary": result["snapshot_text_boundary"],
                             "prefix_trace_role": "recipient reference before state intervention",
@@ -894,7 +939,9 @@ def main():
                     variant_condition=condition.name,
                     intervention=(
                         "read_scale"
-                        if condition.memory_source == "correct" and condition.read_scale != 1.0
+                        if condition.memory_source == "correct" and (
+                            condition.read_scale != 1.0 or condition.read_layers is not None
+                        )
                         else "memory_state"
                     ),
                     scope="whole_query",
@@ -909,7 +956,7 @@ def main():
                     variant_log_probability=variant_logp,
                     difference_log_probability=baseline_logp - variant_logp,
                 ))
-        del saved_prefix, base_state, sources, reset, zeroed, swapped
+        del saved_prefix, base_state, sources, reset, zeroed, swapped, query_references, reference_logits
 
     output = summarize(results.values(), conditions)
     (args.output_dir / "summary.json").write_text(
