@@ -15,6 +15,8 @@ __pycache__/
 /data/taal_interference.metadata.json
 /data/taal_min_capacity.jsonl
 /data/taal_min_capacity.metadata.json
+/data/taal_capacity_*.jsonl
+/data/taal_capacity_*.metadata.json
 /wandb/
 /fs-qwen-*.out
 /fs-qwen-*.err
