@@ -14,6 +14,21 @@ StateSource = Literal["own", "donor"]
 
 
 @dataclass(frozen=True)
+class LayerStateSources:
+    target_layer: int
+    other_layers: StateSource
+    target: StateSource
+
+
+@dataclass(frozen=True)
+class ReadCrossPolicy:
+    layer: int
+    weights: StateSource
+    query: StateSource
+    scope: Literal["whole_query", "prediction_token"]
+
+
+@dataclass(frozen=True)
 class MemoryComponentSources:
     weights: StateSource = "own"
     momentum: StateSource = "own"
@@ -34,9 +49,15 @@ class AuditCondition:
     updates_enabled: bool = True
     read_layers: tuple[int, ...] | None = None
     replay_query_writes: bool = False
+    layer_sources: LayerStateSources | None = None
+    read_cross: ReadCrossPolicy | None = None
 
     @property
     def uses_donor(self) -> bool:
+        if self.layer_sources is not None:
+            return "donor" in (self.layer_sources.other_layers, self.layer_sources.target)
+        if self.read_cross is not None and "donor" in (self.read_cross.weights, self.read_cross.query):
+            return True
         return self.memory_source in ("swapped", "components")
 
 
@@ -53,9 +74,35 @@ AUDIT_CONDITIONS = (
 def audit_conditions(
     suite: str, *, layer_groups: dict[str, list[int]] | None = None,
     read_layers_off: list[int] | None = None, num_layers: int | None = None,
+    target_layer: int | None = None,
 ) -> tuple[AuditCondition, ...]:
     if suite == "standard":
         return AUDIT_CONDITIONS
+    if suite in ("layer_sources", "read_cross"):
+        if (type(num_layers) is not int or num_layers < 1
+                or type(target_layer) is not int or target_layer != num_layers - 1):
+            raise ValueError("Layer attribution requires the last checkpoint layer as target_layer")
+        conditions = list(AUDIT_CONDITIONS)
+        if suite == "layer_sources":
+            for other, target in product(("own", "donor"), repeat=2):
+                conditions.append(AuditCondition(
+                    f"layers_{other}_last_{target}",
+                    "correct" if other == "own" else "swapped", 1.0,
+                    replay_query_writes=True,
+                    layer_sources=LayerStateSources(target_layer, other, target),
+                ))
+        else:
+            for background, scope, weights, query in product(
+                ("own", "donor"), ("whole_query", "prediction_token"),
+                ("own", "donor"), ("own", "donor"),
+            ):
+                conditions.append(AuditCondition(
+                    f"read_{scope}_context_{background}_weights_{weights}_query_{query}",
+                    "correct" if background == "own" else "swapped", 1.0,
+                    replay_query_writes=True,
+                    read_cross=ReadCrossPolicy(target_layer, weights, query, scope),
+                ))
+        return tuple(conditions)
     if suite == "query_layer_reads":
         if type(num_layers) is not int or num_layers < 1:
             raise ValueError("query_layer_reads requires the checkpoint layer count")

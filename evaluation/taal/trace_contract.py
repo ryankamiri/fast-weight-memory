@@ -60,8 +60,8 @@ class TraceComparison:
     example_id: str
     baseline_condition: str
     variant_condition: str
-    intervention: Literal["read_scale", "memory_state"]
-    scope: Literal["whole_query"]
+    intervention: Literal["read_scale", "memory_state", "memory_read"]
+    scope: Literal["whole_query", "prediction_token"]
     identical_text_prefix: bool
     same_starting_kv: bool
     same_starting_memory: bool

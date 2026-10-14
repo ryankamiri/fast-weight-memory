@@ -16,6 +16,7 @@ from architectures.titans.state import NeuralMemoryState
 
 @dataclass
 class QueryWriteInputs:
+    queries: Float[torch.Tensor, "B C D"]
     keys: Float32[torch.Tensor, "B C D"]
     values: Float32[torch.Tensor, "B C D"]
     inputs: Float[torch.Tensor, "B C D"]
@@ -25,25 +26,33 @@ class QueryWriteInputs:
 
 
 class QueryWriteReplay:
-    def __init__(self, model, token_count: int, reference: "QueryWriteReplay | None" = None):
+    def __init__(
+        self, model, token_count: int, reference: "QueryWriteReplay | None" = None,
+        *, references_by_layer: dict[int, "QueryWriteReplay"] | None = None,
+    ):
         if model.training or model.config.memory_chunk_size != 1:
             raise ValueError("Query write replay requires eval and memory_chunk_size=1")
         if type(token_count) is not int or token_count < 1:
             raise ValueError("Query write replay requires a positive token count")
         self.model = model
         self.token_count = token_count
-        self.reference = reference
         self.events: dict[int, list[QueryWriteInputs]] = {
             layer: [] for layer in range(len(model.model.layers))
         }
         self.counts = {layer: 0 for layer in self.events}
         self.originals = {}
-        if reference is not None and (
-            reference.token_count != token_count
-            or set(reference.events) != set(self.events)
-            or any(len(events) != token_count for events in reference.events.values())
-        ):
-            raise ValueError("Reference query writes must cover every token and memory layer")
+        if reference is not None and references_by_layer is not None:
+            raise ValueError("Choose a shared reference or per-layer references")
+        self.references = references_by_layer
+        if reference is not None:
+            self.references = {layer: reference for layer in self.events}
+        if self.references is not None:
+            if set(self.references) != set(self.events):
+                raise ValueError("Reference query writes must cover every token and memory layer")
+            for layer, source in self.references.items():
+                if (source.token_count != token_count or layer not in source.events
+                        or len(source.events[layer]) != token_count):
+                    raise ValueError("Reference query writes must cover every token and memory layer")
 
     def _wrap(self, layer, original):
         def process(memory, state: NeuralMemoryState, queries, keys, values, inputs, write_mask, output_dtype):
@@ -52,8 +61,8 @@ class QueryWriteReplay:
             if (B, C) != (1, 1) or index >= self.token_count:
                 raise ValueError("Query write replay requires exactly B=C=1 per recorded token")
             native = None
-            if self.reference is not None:
-                native = self.reference.events[layer][index]
+            if self.references is not None:
+                native = self.references[layer].events[layer][index]
                 keys = native.keys
                 values = native.values
                 inputs = native.inputs
@@ -69,6 +78,7 @@ class QueryWriteReplay:
                         raise ValueError(f"Layer {layer}, query token {index}: replayed momentum differs")
             else:
                 self.events[layer].append(QueryWriteInputs(
+                    queries=queries.detach().clone(),
                     keys=keys.detach().clone(), values=values.detach().clone(),
                     inputs=inputs.detach().clone(), write_mask=write_mask.detach().clone(),
                     weights_after={name: value.detach().clone() for name, value in after.weights.items()},

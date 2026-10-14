@@ -66,8 +66,8 @@ export interface Comparison {
   example_id: string;
   baseline_condition: string;
   variant_condition: string;
-  intervention: 'read_scale' | 'memory_state';
-  scope: 'whole_query';
+  intervention: 'read_scale' | 'memory_state' | 'memory_read';
+  scope: 'whole_query' | 'prediction_token';
   identical_text_prefix: boolean;
   same_starting_kv: boolean;
   same_starting_memory: boolean;

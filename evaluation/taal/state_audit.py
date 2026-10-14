@@ -24,6 +24,7 @@ from evaluation.storage import append_result, ensure_manifest, read_results
 from evaluation.taal.prefix_store import PrefixStore, PrefixTrace, checkpoint_fingerprint
 from evaluation.taal.lifecycle import lifecycle_boundaries, lifecycle_stores, save_lifecycle_prefixes
 from evaluation.taal.query_write_replay import QueryWriteReplay
+from evaluation.taal.read_cross import ReadCrossReplay
 from evaluation.taal.interventions import (
     AUDIT_CONDITIONS,
     MemoryComponentSources,
@@ -398,12 +399,13 @@ def main():
     settings = yaml.safe_load(args.config.read_text())
     suite = settings.get("audit_suite", "standard")
     checkpoint_layers = None
-    if suite == "query_layer_reads":
+    if suite in ("query_layer_reads", "layer_sources", "read_cross"):
         checkpoint_layers = TaalQwen3Config.from_pretrained(args.checkpoint).num_hidden_layers
     conditions = audit_conditions(
         suite, layer_groups=settings.get("layer_groups"),
         read_layers_off=settings.get("query_read_layers_off"),
         num_layers=checkpoint_layers,
+        target_layer=settings.get("target_layer"),
     )
     persistent_writes_enabled = settings.get("persistent_writes_enabled", True)
     query_updates_enabled = settings.get("query_updates_enabled", True)
@@ -411,7 +413,7 @@ def main():
                         ("query_updates_enabled", query_updates_enabled)):
         if type(value) is not bool:
             parser.error(f"{name} must be true or false")
-    if suite == "query_layer_reads" and (
+    if suite in ("query_layer_reads", "layer_sources", "read_cross") and (
         not persistent_writes_enabled or not query_updates_enabled
     ):
         parser.error("Query-layer read ablations require normal prefix and query write rules")
@@ -471,7 +473,7 @@ def main():
         "conditions": [
             {key: list(value) if key == "read_layers" and value is not None else value
              for key, value in asdict(condition).items()
-             if (key not in ("components", "read_layers") or value is not None)
+             if (key not in ("components", "read_layers", "layer_sources", "read_cross") or value is not None)
              and (key != "replay_query_writes" or value)}
             for condition in conditions
         ],
@@ -638,9 +640,10 @@ def main():
         ]
         if not pending:
             continue
+        attribution = any(c.layer_sources is not None or c.read_cross is not None for c in pending)
         swapped_example = swapped_sources[example["example_id"]]
         required_examples = [example]
-        if any(condition.uses_donor for condition in pending):
+        if attribution or any(condition.uses_donor for condition in pending):
             required_examples.append(swapped_example)
         ensure_prefixes(required_examples)
         prefix_ids, query_ids = split_episode(example)
@@ -655,7 +658,7 @@ def main():
             zeroed = model.model.zero_memory_states(batch_size=1)
             swapped = (
                 prefix_store.load_memory(swapped_example, device)
-                if any(condition.uses_donor for condition in pending)
+                if attribution or any(condition.uses_donor for condition in pending)
                 else None
             )
         sources = {
@@ -668,8 +671,10 @@ def main():
         query_references = {}
         reference_logits = {}
         for source in ("correct", "swapped"):
-            if not any(condition.replay_query_writes and condition.memory_source == source
-                       for condition in pending):
+            if not attribution and not any(
+                condition.replay_query_writes and condition.memory_source == source
+                for condition in pending
+            ):
                 continue
             reference = QueryWriteReplay(model, len(query_ids))
             with memory_execution_controls(model), reference, timings.phase(f"query_write_reference/{source}"):
@@ -685,8 +690,17 @@ def main():
 
         for condition in pending:
             updates_enabled = query_updates_enabled and condition.updates_enabled
+            layer_write_sources = None
             with timings.phase("fork_kv_and_memory"):
-                if condition.components is not None:
+                if condition.layer_sources is not None:
+                    policy = condition.layer_sources
+                    layer_write_sources = {
+                        layer: policy.target if layer == policy.target_layer else policy.other_layers
+                        for layer in base_state.memory_states
+                    }
+                    bank = {"own": sources["correct"], "donor": sources["swapped"]}
+                    memory = {layer: bank[source][layer] for layer, source in layer_write_sources.items()}
+                elif condition.components is not None:
                     memory = compose_memory_states(base_state.memory_states, swapped, condition.components)
                 elif condition.snapshot_stage != "final":
                     source_example = swapped_example if condition.uses_donor else example
@@ -703,7 +717,10 @@ def main():
                 if not updates_enabled:
                     validate_component_boundary(memory)
                 state = fork_session_state(base_state, memory)
-            if condition.recipient_convolution:
+            if condition.layer_sources is not None:
+                component_sources = {str(layer): {name: source for name in ("weights", "momentum", "convolution")}
+                                     for layer, source in layer_write_sources.items()}
+            elif condition.recipient_convolution:
                 component_sources = {
                     "weights": "donor" if condition.uses_donor else "own",
                     "momentum": "donor" if condition.uses_donor else "own",
@@ -728,10 +745,21 @@ def main():
                 )
                 if save_traces else None
             )
-            query_replay = (
-                QueryWriteReplay(model, len(query_ids), query_references[condition.memory_source])
-                if condition.replay_query_writes else None
-            )
+            query_replay = None
+            if layer_write_sources is not None:
+                bank = {"own": query_references["correct"], "donor": query_references["swapped"]}
+                query_replay = QueryWriteReplay(
+                    model, len(query_ids),
+                    references_by_layer={layer: bank[source] for layer, source in layer_write_sources.items()},
+                )
+            elif condition.replay_query_writes:
+                query_replay = QueryWriteReplay(model, len(query_ids), query_references[condition.memory_source])
+            crossed_read = None
+            if condition.read_cross is not None:
+                crossed_read = ReadCrossReplay(
+                    model, len(query_ids), condition.read_cross,
+                    {"own": query_references["correct"], "donor": query_references["swapped"]},
+                )
             with (
                 memory_execution_controls(
                     model, updates_enabled=updates_enabled,
@@ -742,6 +770,7 @@ def main():
                 timings.phase(f"query/{condition.name}", tokens=len(query_ids), detailed=example_index == 0),
                 query_trace if query_trace is not None else nullcontext(),
                 query_replay if query_replay is not None else nullcontext(),
+                crossed_read if crossed_read is not None else nullcontext(),
             ):
                 output = model.prefill(
                     torch.tensor(
@@ -761,8 +790,34 @@ def main():
             if condition.name in ("correct_full", "swapped") and condition.memory_source in reference_logits:
                 if not torch.equal(output.logits, reference_logits[condition.memory_source]):
                     raise ValueError("Native query write capture changed the full-read control")
+            endpoint_source = None
+            if condition.layer_sources is not None:
+                policy = condition.layer_sources
+                if policy.target == policy.other_layers:
+                    endpoint_source = condition.memory_source
+            if condition.read_cross is not None:
+                background = "own" if condition.memory_source == "correct" else "donor"
+                if condition.read_cross.weights == condition.read_cross.query == background:
+                    endpoint_source = condition.memory_source
+            if endpoint_source is not None and not torch.equal(output.logits, reference_logits[endpoint_source]):
+                raise ValueError("Attribution reference endpoint changed native logits")
+            attribution_metadata = {}
+            if condition.layer_sources is not None or condition.read_cross is not None:
+                attribution_metadata = {
+                    "layer_state_sources": asdict(condition.layer_sources) if condition.layer_sources else None,
+                    "query_write_sources_by_layer": layer_write_sources,
+                    "read_cross": asdict(condition.read_cross) if condition.read_cross else None,
+                    "read_cross_events": crossed_read.events if crossed_read else [],
+                    "read_cross_weights_timing": "post_write" if crossed_read else None,
+                    "read_cross_query_stage": "post_convolution_silu_normalization" if crossed_read else None,
+                    "read_cross_changes_recurrent_weights": False,
+                    "native_endpoint_verified": endpoint_source is not None,
+                    "generated_read_policy": "normal_unpatched",
+                }
             with timings.phase("scoring"):
                 logits = output.logits[0, -1].float()
+                if not logits.isfinite().all().item():
+                    raise ValueError(f"Nonfinite logits: {example['example_id']}/{condition.name}")
                 swapped_target = int(swapped_example["target_token_id"])
                 swapped_log_probability = float(
                     (
@@ -832,6 +887,7 @@ def main():
                 ),
                 **scores,
                 **donor_scores,
+                **attribution_metadata,
             }
             if save_traces:
                 assert prefix_trace is not None and query_trace is not None
@@ -912,6 +968,7 @@ def main():
                                 swapped_example["example_id"]
                                 if condition.uses_donor else None
                             ),
+                            **attribution_metadata,
                         },
                     ))
             with timings.phase("result_append"):
@@ -925,30 +982,37 @@ def main():
             del output, state
         if save_traces:
             assert trace_exporter is not None
-            baseline = results[f"{example['example_id']}/correct_full"]
             for condition in conditions:
                 if condition.name == "correct_full":
                     continue
                 variant = results[f"{example['example_id']}/{condition.name}"]
+                baseline_condition = "correct_full"
+                if condition.read_cross is not None and condition.memory_source == "swapped":
+                    baseline_condition = "swapped"
+                baseline = results[f"{example['example_id']}/{baseline_condition}"]
                 baseline_logp = baseline["target_log_probability"]
                 variant_logp = variant["target_log_probability"]
+                intervention = "memory_state"
+                if condition.read_cross is not None:
+                    intervention = "memory_read"
+                elif condition.memory_source == "correct" and (
+                    condition.read_scale != 1.0 or condition.read_layers is not None
+                ):
+                    intervention = "read_scale"
                 trace_exporter.export_comparison(TraceComparison(
                     run_id=args.output_dir.name,
                     example_id=example["example_id"],
-                    baseline_condition="correct_full",
+                    baseline_condition=baseline_condition,
                     variant_condition=condition.name,
-                    intervention=(
-                        "read_scale"
-                        if condition.memory_source == "correct" and (
-                            condition.read_scale != 1.0 or condition.read_layers is not None
-                        )
-                        else "memory_state"
-                    ),
-                    scope="whole_query",
+                    intervention=intervention,
+                    scope=condition.read_cross.scope if condition.read_cross else "whole_query",
                     identical_text_prefix=True,
                     same_starting_kv=True,
                     same_starting_memory=(
-                        condition.memory_source == "correct" and condition.snapshot_stage == "final"
+                        condition.read_cross is not None or (
+                            condition.layer_sources is None and
+                            condition.memory_source == "correct" and condition.snapshot_stage == "final"
+                        )
                     ),
                     scored_position=len(example["input_ids"]) - 1,
                     scored_token_id=int(example["target_token_id"]),
