@@ -1,5 +1,50 @@
 # TaaL state attribution audits
 
+## Last-layer acquisition timing and writer inputs
+
+`d_read_snapshots.yaml` supplies saved L27 weights to the same final prediction
+read. It tests after-label, after-complete-fact, pre-question and every successive
+post-update question snapshot, from both matched episodes in both background
+trajectories. Only the final read changes: its normalized query is asserted
+identical, native background W/momentum replay exactly, and substituted W never
+enters recurrent state. The 20-token question gives98 conditions/example,
+1,568 scores/traces and1,552 comparisons for the selected16 examples.
+
+`d_writer_cross.yaml` evolves a separate L27 shadow writer over the question.
+It crosses complete starting state (weights, momentum, all convolution histories)
+with incoming memory representations, selected independently from own/donor
+references. Inputs are captured after the adapter input projection but BEFORE
+key/value projection and convolution. The branch recomputes these projections,
+convolutions, gradients and controls; it does not replay donor k/v or gradients.
+Both same-source endpoints must reproduce native W/momentum/convolution exactly.
+Its final W is tested at the same fixed final read, in both backgrounds.
+Four writer cells x two backgrounds plus six standard controls give14 conditions,
+224 scores/traces and208 comparisons. No model parameters are trained or changed.
+
+Both suites use the original D final449 checkpoint and the guarded
+`fs_qwen_d_attribution_short.sbatch` launcher. They require C=1, one query execution
+block, traces enabled in the supplied configs, all selected examples/layers, and
+same-source final logits equal to the native controls. Each includes the six
+ordinary audit controls. Query length/counts derive from the dataset, not an
+expected-example setting. Snapshot prefix construction has explicit lifecycle
+boundaries; compare its ordinary controls with the prior D audit before drawing
+conclusions about early states.
+
+Trace read colors describe the actual substituted injection. Write colors remain
+the UNCHANGED BACKGROUND, not the saved/shadow W used for that final read. Writer
+cross rows/trace metadata additionally contain `shadow_writer_writes` with actual
+per-token gradient/movement norms, initial/input provenance and endpoint checks.
+Shadow read outputs are discarded, never falsely labeled injected reads. The
+generated token is processed normally after leaving the diagnostic context.
+
+Interpretation: early snapshots succeeding establish information usable by the
+fixed reader, while failure does not establish absence. Writer crossing tests
+starting-state versus incoming-representation dependence DURING THE QUESTION,
+not which earlier layer originally encoded the fact. Both mixed failure and
+interactions are possible. Same-question tests do not establish multi-fact
+addressing. These are evaluation interventions, not changes to write-before-read
+architecture or the training recipe.
+
 ## Layer access and independent state readouts
 
 `conflict_layer_access.yaml` tests after-label, after-fact and final weights and

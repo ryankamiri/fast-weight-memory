@@ -29,6 +29,21 @@ class ReadCrossPolicy:
 
 
 @dataclass(frozen=True)
+class ReadSnapshotPolicy:
+    layer: int
+    source: StateSource
+    stage: Literal["label", "fact", "pre_query", "query"]
+    query_index: int | None = None
+
+
+@dataclass(frozen=True)
+class WriterCrossPolicy:
+    layer: int
+    initial: StateSource
+    inputs: StateSource
+
+
+@dataclass(frozen=True)
 class MemoryComponentSources:
     weights: StateSource = "own"
     momentum: StateSource = "own"
@@ -51,9 +66,15 @@ class AuditCondition:
     replay_query_writes: bool = False
     layer_sources: LayerStateSources | None = None
     read_cross: ReadCrossPolicy | None = None
+    read_snapshot: ReadSnapshotPolicy | None = None
+    writer_cross: WriterCrossPolicy | None = None
 
     @property
     def uses_donor(self) -> bool:
+        if self.read_snapshot is not None and self.read_snapshot.source == "donor":
+            return True
+        if self.writer_cross is not None and "donor" in (self.writer_cross.initial, self.writer_cross.inputs):
+            return True
         if self.layer_sources is not None:
             return "donor" in (self.layer_sources.other_layers, self.layer_sources.target)
         if self.read_cross is not None and "donor" in (self.read_cross.weights, self.read_cross.query):
@@ -75,15 +96,37 @@ def audit_conditions(
     suite: str, *, layer_groups: dict[str, list[int]] | None = None,
     read_layers_off: list[int] | None = None, num_layers: int | None = None,
     target_layer: int | None = None,
+    query_token_count: int | None = None,
 ) -> tuple[AuditCondition, ...]:
     if suite == "standard":
         return AUDIT_CONDITIONS
-    if suite in ("layer_sources", "read_cross"):
+    if suite in ("layer_sources", "read_cross", "read_snapshots", "writer_cross"):
         if (type(num_layers) is not int or num_layers < 1
                 or type(target_layer) is not int or target_layer != num_layers - 1):
             raise ValueError("Layer attribution requires the last checkpoint layer as target_layer")
         conditions = list(AUDIT_CONDITIONS)
-        if suite == "layer_sources":
+        if suite == "read_snapshots":
+            if type(query_token_count) is not int or query_token_count < 1:
+                raise ValueError("Read snapshots require the selected query token count")
+            snapshots = [(stage, None) for stage in ("label", "fact", "pre_query")]
+            snapshots.extend(("query", index) for index in range(query_token_count))
+            for background, source, (stage, index) in product(("own", "donor"), ("own", "donor"), snapshots):
+                suffix = stage if index is None else f"query_{index:02d}"
+                conditions.append(AuditCondition(
+                    f"snapshot_context_{background}_weights_{source}_{suffix}",
+                    "correct" if background == "own" else "swapped", 1.0,
+                    replay_query_writes=True,
+                    read_snapshot=ReadSnapshotPolicy(target_layer, source, stage, index),
+                ))
+        elif suite == "writer_cross":
+            for background, initial, inputs in product(("own", "donor"), repeat=3):
+                conditions.append(AuditCondition(
+                    f"writer_context_{background}_initial_{initial}_inputs_{inputs}",
+                    "correct" if background == "own" else "swapped", 1.0,
+                    replay_query_writes=True,
+                    writer_cross=WriterCrossPolicy(target_layer, initial, inputs),
+                ))
+        elif suite == "layer_sources":
             for other, target in product(("own", "donor"), repeat=2):
                 conditions.append(AuditCondition(
                     f"layers_{other}_last_{target}",

@@ -35,8 +35,14 @@ export interface ReadEvent {
   injected_norm: number;
   incoming_norm: number;
   relative_injection: number | null;
-  state_timing: 'pre-write' | 'post-write';
+  state_timing: 'pre-write' | 'post-write' | 'substituted';
 }
+
+export const readTimingNotes: Record<ReadEvent['state_timing'], string> = {
+  'pre-write': 'Read uses the previous completed chunk state',
+  'post-write': 'Read uses the newly committed state',
+  substituted: 'Read uses separately saved or shadow weights. Displayed writes belong to the unchanged background state.',
+};
 
 export interface InternalPrefix {
   layer: number;

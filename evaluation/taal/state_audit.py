@@ -1,7 +1,7 @@
 import argparse
 from contextlib import nullcontext
 import copy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import os
@@ -25,6 +25,7 @@ from evaluation.taal.prefix_store import PrefixStore, PrefixTrace, checkpoint_fi
 from evaluation.taal.lifecycle import lifecycle_boundaries, lifecycle_stores, save_lifecycle_prefixes
 from evaluation.taal.query_write_replay import QueryWriteReplay
 from evaluation.taal.read_cross import ReadCrossReplay
+from evaluation.taal.read_acquisition import FinalReadReplay, assert_same_state, evolve_shadow_writer
 from evaluation.taal.interventions import (
     AUDIT_CONDITIONS,
     MemoryComponentSources,
@@ -399,21 +400,16 @@ def main():
     settings = yaml.safe_load(args.config.read_text())
     suite = settings.get("audit_suite", "standard")
     checkpoint_layers = None
-    if suite in ("query_layer_reads", "layer_sources", "read_cross"):
+    acquisition = suite in ("read_snapshots", "writer_cross")
+    if suite in ("query_layer_reads", "layer_sources", "read_cross") or acquisition:
         checkpoint_layers = TaalQwen3Config.from_pretrained(args.checkpoint).num_hidden_layers
-    conditions = audit_conditions(
-        suite, layer_groups=settings.get("layer_groups"),
-        read_layers_off=settings.get("query_read_layers_off"),
-        num_layers=checkpoint_layers,
-        target_layer=settings.get("target_layer"),
-    )
     persistent_writes_enabled = settings.get("persistent_writes_enabled", True)
     query_updates_enabled = settings.get("query_updates_enabled", True)
     for name, value in (("persistent_writes_enabled", persistent_writes_enabled),
                         ("query_updates_enabled", query_updates_enabled)):
         if type(value) is not bool:
             parser.error(f"{name} must be true or false")
-    if suite in ("query_layer_reads", "layer_sources", "read_cross") and (
+    if (suite in ("query_layer_reads", "layer_sources", "read_cross") or acquisition) and (
         not persistent_writes_enabled or not query_updates_enabled
     ):
         parser.error("Query-layer read ablations require normal prefix and query write rules")
@@ -450,6 +446,16 @@ def main():
             revision=revision,
         )
     examples = select_examples(dataset, dataset_settings)
+    query_lengths = {len(split_episode(example)[1]) for example in examples}
+    if acquisition and (len(query_lengths) != 1 or max(query_lengths) > settings.get("execution_block_size", 0)):
+        raise ValueError("Read acquisition requires equal query lengths in one execution block")
+    conditions = audit_conditions(
+        suite, layer_groups=settings.get("layer_groups"),
+        read_layers_off=settings.get("query_read_layers_off"),
+        num_layers=checkpoint_layers,
+        target_layer=settings.get("target_layer"),
+        query_token_count=next(iter(query_lengths)),
+    )
     if len(examples) < 2:
         raise ValueError("Swapped-state evaluation requires at least two episodes")
     swap_group_field = settings.get("swap_group_field")
@@ -473,7 +479,7 @@ def main():
         "conditions": [
             {key: list(value) if key == "read_layers" and value is not None else value
              for key, value in asdict(condition).items()
-             if (key not in ("components", "read_layers", "layer_sources", "read_cross") or value is not None)
+             if (key not in ("components", "read_layers", "layer_sources", "read_cross", "read_snapshot", "writer_cross") or value is not None)
              and (key != "replay_query_writes" or value)}
             for condition in conditions
         ],
@@ -563,7 +569,7 @@ def main():
         "tokenizer_revision": metadata["tokenizer_revision"],
     }
     prefix_store = PrefixStore(args.output_dir / "prefix_states", prefix_identity)
-    lifecycle = settings.get("audit_suite") in ("encoding", "retention", "layer_access")
+    lifecycle = settings.get("audit_suite") in ("encoding", "retention", "layer_access", "read_snapshots")
     stage_stores = lifecycle_stores(args.output_dir / "lifecycle_states", prefix_identity) if lifecycle else {}
     if lifecycle and (not save_traces or state_bank_batch_size != 1):
         raise ValueError("Lifecycle audits require save_traces=true and state_bank_batch_size=1")
@@ -574,6 +580,8 @@ def main():
         nonlocal built
         if lifecycle:
             required_stages = {condition.snapshot_stage for condition in conditions} - {"final"}
+            if suite == "read_snapshots":
+                required_stages.update(("label", "fact"))
             for example in required_examples:
                 if prefix_store.contains(example) and all(
                     stage_stores[stage].contains(example) for stage in required_stages
@@ -640,7 +648,7 @@ def main():
         ]
         if not pending:
             continue
-        attribution = any(c.layer_sources is not None or c.read_cross is not None for c in pending)
+        attribution = acquisition or any(c.layer_sources is not None or c.read_cross is not None for c in pending)
         swapped_example = swapped_sources[example["example_id"]]
         required_examples = [example]
         if attribution or any(condition.uses_donor for condition in pending):
@@ -670,6 +678,7 @@ def main():
 
         query_references = {}
         reference_logits = {}
+        reference_last_states = {}
         for source in ("correct", "swapped"):
             if not attribution and not any(
                 condition.replay_query_writes and condition.memory_source == source
@@ -686,7 +695,27 @@ def main():
                 )
             query_references[source] = reference
             reference_logits[source] = native.logits.detach().clone()
+            if acquisition:
+                reference_last_states[source] = clone_memory_states({
+                    settings["target_layer"]: native.state.memory_states[settings["target_layer"]],
+                })[settings["target_layer"]]
             del native
+
+        shadow_writers = {}
+        if suite == "writer_cross":
+            target = settings["target_layer"]
+            memory_module = model.model.layers[target].taal.neural_memory
+            for initial_source in ("correct", "swapped"):
+                for input_source in ("correct", "swapped"):
+                    initial = clone_memory_states({target: sources[initial_source][target]})[target]
+                    with memory_execution_controls(model), timings.phase("shadow_writer_evolution"):
+                        shadow = evolve_shadow_writer(
+                            memory_module, initial, query_references[input_source], target,
+                            position_offset=len(prefix_ids),
+                        )
+                    if initial_source == input_source:
+                        assert_same_state(shadow.state, reference_last_states[input_source])
+                    shadow_writers[initial_source, input_source] = shadow
 
         for condition in pending:
             updates_enabled = query_updates_enabled and condition.updates_enabled
@@ -755,11 +784,49 @@ def main():
             elif condition.replay_query_writes:
                 query_replay = QueryWriteReplay(model, len(query_ids), query_references[condition.memory_source])
             crossed_read = None
+            saved_weight_read = None
+            acquisition_metadata = {}
             if condition.read_cross is not None:
                 crossed_read = ReadCrossReplay(
                     model, len(query_ids), condition.read_cross,
                     {"own": query_references["correct"], "donor": query_references["swapped"]},
                 )
+            if condition.read_snapshot is not None or condition.writer_cross is not None:
+                target = settings["target_layer"]
+                background_reference = query_references[condition.memory_source]
+                read_query = background_reference.events[target][-1].queries
+                if condition.read_snapshot is not None:
+                    policy = condition.read_snapshot
+                    source = "correct" if policy.source == "own" else "swapped"
+                    source_example = example if policy.source == "own" else swapped_example
+                    if policy.stage == "query":
+                        weights = query_references[source].events[target][policy.query_index].weights_after
+                        boundary = len(prefix_ids) + policy.query_index + 1
+                    elif policy.stage == "pre_query":
+                        weights = sources[source][target].weights
+                        boundary = len(prefix_ids)
+                    else:
+                        weights = stage_stores[policy.stage].load_memory(source_example, device)[target].weights
+                        boundary = lifecycle_boundaries(source_example, tokenizer)[policy.stage]
+                    acquisition_metadata = {
+                        "read_snapshot": asdict(policy), "read_weight_text_boundary": boundary,
+                    }
+                else:
+                    policy = condition.writer_cross
+                    initial_source = "correct" if policy.initial == "own" else "swapped"
+                    input_source = "correct" if policy.inputs == "own" else "swapped"
+                    shadow = shadow_writers[initial_source, input_source]
+                    weights = shadow.state.weights
+                    acquisition_metadata = {
+                        "writer_cross": asdict(policy),
+                        "writer_input_stage": "memory_input_before_key_value_projection_and_convolution",
+                        "writer_initial_components": "weights_momentum_all_convolution_histories",
+                        "shadow_writer_native_endpoint_verified": initial_source == input_source,
+                        "shadow_writer_writes": shadow.writes,
+                        "shadow_writer_reads": "discarded_not_injected",
+                        "read_weight_text_boundary": len(example["input_ids"]),
+                    }
+                saved_weight_read = FinalReadReplay(model, target, len(query_ids), weights, read_query)
             with (
                 memory_execution_controls(
                     model, updates_enabled=updates_enabled,
@@ -771,6 +838,7 @@ def main():
                 query_trace if query_trace is not None else nullcontext(),
                 query_replay if query_replay is not None else nullcontext(),
                 crossed_read if crossed_read is not None else nullcontext(),
+                saved_weight_read if saved_weight_read is not None else nullcontext(),
             ):
                 output = model.prefill(
                     torch.tensor(
@@ -799,9 +867,29 @@ def main():
                 background = "own" if condition.memory_source == "correct" else "donor"
                 if condition.read_cross.weights == condition.read_cross.query == background:
                     endpoint_source = condition.memory_source
+            if condition.read_snapshot is not None:
+                policy = condition.read_snapshot
+                background = "own" if condition.memory_source == "correct" else "donor"
+                if policy.source == background and policy.stage == "query" and policy.query_index == len(query_ids) - 1:
+                    endpoint_source = condition.memory_source
+            if condition.writer_cross is not None:
+                policy = condition.writer_cross
+                background = "own" if condition.memory_source == "correct" else "donor"
+                if policy.initial == policy.inputs == background:
+                    endpoint_source = condition.memory_source
             if endpoint_source is not None and not torch.equal(output.logits, reference_logits[endpoint_source]):
                 raise ValueError("Attribution reference endpoint changed native logits")
             attribution_metadata = {}
+            if saved_weight_read is not None:
+                attribution_metadata = {
+                    **acquisition_metadata,
+                    "saved_weight_read_events": saved_weight_read.events,
+                    "read_intervention_scope": "prediction_token",
+                    "read_intervention_changes_recurrent_weights": False,
+                    "trace_write_role": "unchanged_background_not_saved_or_shadow_weights",
+                    "native_endpoint_verified": endpoint_source is not None,
+                    "generated_read_policy": "normal_unpatched",
+                }
             if condition.layer_sources is not None or condition.read_cross is not None:
                 attribution_metadata = {
                     "layer_state_sources": asdict(condition.layer_sources) if condition.layer_sources else None,
@@ -912,6 +1000,14 @@ def main():
                         fresh_writes_enabled=condition.fresh_writes_enabled,
                     )
                 with timings.phase("trace_export"):
+                    query_reads = query_trace.reads
+                    if saved_weight_read is not None:
+                        query_reads = [
+                            replace(event, state_timing="substituted")
+                            if event.layer == settings["target_layer"] and event.position == len(example["input_ids"]) - 1
+                            else event
+                            for event in query_reads
+                        ]
                     trace_exporter.export(TraceEpisode(
                         run_id=args.output_dir.name,
                         example_id=example["example_id"],
@@ -927,7 +1023,7 @@ def main():
                             + prediction_trace.writes
                         ),
                         reads=(
-                            prefix_trace.reads + query_trace.reads
+                            prefix_trace.reads + query_reads
                             + prediction_trace.reads
                         ),
                         internal_prefixes=(
@@ -987,13 +1083,14 @@ def main():
                     continue
                 variant = results[f"{example['example_id']}/{condition.name}"]
                 baseline_condition = "correct_full"
-                if condition.read_cross is not None and condition.memory_source == "swapped":
+                saved_read = condition.read_snapshot is not None or condition.writer_cross is not None
+                if (condition.read_cross is not None or saved_read) and condition.memory_source == "swapped":
                     baseline_condition = "swapped"
                 baseline = results[f"{example['example_id']}/{baseline_condition}"]
                 baseline_logp = baseline["target_log_probability"]
                 variant_logp = variant["target_log_probability"]
                 intervention = "memory_state"
-                if condition.read_cross is not None:
+                if condition.read_cross is not None or saved_read:
                     intervention = "memory_read"
                 elif condition.memory_source == "correct" and (
                     condition.read_scale != 1.0 or condition.read_layers is not None
@@ -1005,11 +1102,12 @@ def main():
                     baseline_condition=baseline_condition,
                     variant_condition=condition.name,
                     intervention=intervention,
-                    scope=condition.read_cross.scope if condition.read_cross else "whole_query",
+                    scope=("prediction_token" if saved_read else
+                           condition.read_cross.scope if condition.read_cross else "whole_query"),
                     identical_text_prefix=True,
                     same_starting_kv=True,
                     same_starting_memory=(
-                        condition.read_cross is not None or (
+                        condition.read_cross is not None or saved_read or (
                             condition.layer_sources is None and
                             condition.memory_source == "correct" and condition.snapshot_stage == "final"
                         )
@@ -1021,6 +1119,7 @@ def main():
                     difference_log_probability=baseline_logp - variant_logp,
                 ))
         del saved_prefix, base_state, sources, reset, zeroed, swapped, query_references, reference_logits
+        del reference_last_states, shadow_writers
 
     output = summarize(results.values(), conditions)
     (args.output_dir / "summary.json").write_text(

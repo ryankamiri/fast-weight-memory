@@ -42,7 +42,7 @@ class ReadEvent:
     injected_norm: float
     incoming_norm: float
     relative_injection: float | None
-    state_timing: Literal["pre-write", "post-write"] = "post-write"
+    state_timing: Literal["pre-write", "post-write", "substituted"] = "post-write"
 
 
 @dataclass(frozen=True)

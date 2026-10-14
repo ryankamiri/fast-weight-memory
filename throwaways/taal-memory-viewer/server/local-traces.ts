@@ -47,7 +47,7 @@ function validateEvents(payload: Record<string, unknown>) {
   });
   for (const event of payload.reads as unknown[]) {
     checkFields(event, { layer: 'number', position: 'number', segment_index: 'number', enabled: 'boolean', read_scale: 'number', residual_gate: 'number', injected_norm: 'number', incoming_norm: 'number', relative_injection: 'nullable' });
-    if (!['pre-write', 'post-write'].includes((event as { state_timing: string }).state_timing)) throw new Error('Unsupported read timing');
+    if (!['pre-write', 'post-write', 'substituted'].includes((event as { state_timing: string }).state_timing)) throw new Error('Unsupported read timing');
   }
   for (const event of payload.internal_prefixes as unknown[]) checkFields(event, { layer: 'number', segment_index: 'number', before_position: 'number', count: 'number', net_weight_change_norm: 'number' });
 }
@@ -85,7 +85,8 @@ export async function scanTraces(root: string): Promise<TraceIndex> {
                 validateEvents(payload);
                 validated.set(fingerprint, expectedAnswer(payload as Episode));
               } else {
-                if (payload.scope !== 'whole_query' || !['read_scale', 'memory_state'].includes(payload.intervention)) throw new Error(`Invalid comparison: ${key}`);
+                if (!['whole_query', 'prediction_token'].includes(payload.scope)
+                    || !['read_scale', 'memory_state', 'memory_read'].includes(payload.intervention)) throw new Error(`Invalid comparison: ${key}`);
                 checkFields(payload, { example_id: 'string', baseline_condition: 'string', variant_condition: 'string', identical_text_prefix: 'boolean', same_starting_kv: 'boolean', same_starting_memory: 'boolean', scored_position: 'number', scored_token_id: 'number', baseline_log_probability: 'number', variant_log_probability: 'number', difference_log_probability: 'number' });
                 if (`${payload.example_id}/${payload.baseline_condition}/${payload.variant_condition}` !== key) throw new Error(`Comparison identity mismatch: ${key}`);
                 validated.set(fingerprint, null);

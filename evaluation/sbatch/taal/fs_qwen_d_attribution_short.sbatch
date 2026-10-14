@@ -25,11 +25,11 @@ export http_proxy="${http_proxy:-http://10.99.0.130:3128}"
 export https_proxy="${https_proxy:-http://10.99.0.130:3128}"
 
 if (( $# != 4 )) || [[ "$(git rev-parse HEAD)" != "$4" ]]; then
-    echo "Usage: sbatch $0 {layer_sources|read_cross} D_FINAL_CHECKPOINT OUTPUT_DIR EXPECTED_COMMIT" >&2
+    echo "Usage: sbatch $0 {layer_sources|read_cross|read_snapshots|writer_cross} D_FINAL_CHECKPOINT OUTPUT_DIR EXPECTED_COMMIT" >&2
     exit 2
 fi
 case "$1" in
-    layer_sources|read_cross) config="evaluation/configs/taal/d_${1}.yaml" ;;
+    layer_sources|read_cross|read_snapshots|writer_cross) config="evaluation/configs/taal/d_${1}.yaml" ;;
     *) echo "Unknown D attribution experiment: $1" >&2; exit 2 ;;
 esac
 
