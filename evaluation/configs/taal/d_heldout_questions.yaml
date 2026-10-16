@@ -1,0 +1,13 @@
+dataset:
+  path: data/taal_d_heldout_questions.jsonl
+  start: 0
+  end: 64
+
+execution_block_size: 32
+state_bank_batch_size: 1
+seed: 42
+save_traces: true
+swap_group_field: pair_group
+audit_suite: standard
+persistent_writes_enabled: true
+query_updates_enabled: true
