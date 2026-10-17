@@ -1,0 +1,20 @@
+mode: taal
+model:
+  memory_read_scale: 1.0
+  retain_task_prefix: false
+dataset:
+  repo_id: ryankamiri/longmemeval-qwen
+  revision: bdb33409edba22c15721d57cb0b5a76d1620e6ba
+  variant: oracle
+  split: test
+  start: 0
+  end: null
+seed: 42
+save_traces: true
+generation:
+  execution_block_size: 256
+  max_new_tokens: 256
+  do_sample: false
+judge:
+  model: gpt-5.6-terra
+  concurrency: 32

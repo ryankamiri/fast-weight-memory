@@ -16,16 +16,40 @@ import torch
 from transformers import AutoTokenizer, Qwen3Config
 import yaml
 
+from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
+from architectures.taal.qwen.configuration import TaalQwen3Config
 from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from evaluation.data import PROMPT_VERSION, prepare_example
 from evaluation.diagnostic_judge import diagnose_all
 from evaluation.judge import BackgroundJudge, judge_all, judge_backend
 from evaluation.storage import append_result, ensure_manifest, read_results
+from evaluation.taal.longmemeval import create_trace_exporter, generate_taal_example, select_dataset
+from evaluation.taal.prefix_store import checkpoint_fingerprint
 from utils.seed import seed_everything
 
 
 def configure_model(config, mode, settings=None):
+    if mode == "taal":
+        if not isinstance(config, TaalQwen3Config):
+            raise ValueError("taal mode requires a TaaL checkpoint")
+
+        settings = settings or {}
+        unsupported = set(settings) - {"memory_read_scale", "retain_task_prefix"}
+        if unsupported:
+            raise ValueError(f"TaaL evaluation preserves checkpoint architecture; unsupported settings: {sorted(unsupported)}")
+
+        scale = settings.get("memory_read_scale", 1.0)
+        if type(scale) not in (int, float) or not math.isfinite(scale) or scale < 0:
+            raise ValueError("memory_read_scale must be finite and nonnegative")
+
+        if type(settings.get("retain_task_prefix", False)) is not bool:
+            raise ValueError("retain_task_prefix must be boolean")
+
+        return config
+    if isinstance(config, TaalQwen3Config):
+        raise ValueError("TaaL checkpoints require taal mode")
+
     if mode not in {"full", "swa", "fw_swa"}:
         raise ValueError("mode must be full, swa, or fw_swa")
     if bool(config.fast_weight_layers) != (mode == "fw_swa"):
@@ -43,8 +67,13 @@ def configure_model(config, mode, settings=None):
 def load_model(source, config, fast_weight_read_scale=1.0):
     if type(fast_weight_read_scale) not in (int, float) or not math.isfinite(fast_weight_read_scale) or fast_weight_read_scale < 0:
         raise ValueError("fast_weight_read_scale must be a finite nonnegative number")
-    config.fast_weight_read_scale = float(fast_weight_read_scale)
-    model, loading = TTCDQwen3ForCausalLM.from_pretrained(
+
+    model_class = TTCDQwen3ForCausalLM
+    if isinstance(config, TaalQwen3Config):
+        model_class = TaalQwen3ForCausalLM
+    else:
+        config.fast_weight_read_scale = float(fast_weight_read_scale)
+    model, loading = model_class.from_pretrained(
         source, config=config, dtype=torch.bfloat16,
         attn_implementation="sdpa", output_loading_info=True,
     )
@@ -54,7 +83,10 @@ def load_model(source, config, fast_weight_read_scale=1.0):
 
 
 @torch.inference_mode()
-def generate_example(model, tokenizer, example, config, device):
+def generate_example(model, tokenizer, example, config, device, trace_exporter=None):
+    if isinstance(model.config, TaalQwen3Config):
+        return generate_taal_example(model, tokenizer, example, config, device, trace_exporter)
+
     input_ids: Int[torch.Tensor, "1 S"] = torch.tensor(
         [example["input_ids"]], dtype=torch.long, device=device,
     )
@@ -77,7 +109,7 @@ def generate_example(model, tokenizer, example, config, device):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("evaluation/configs/ttcd/longmemeval_fw_swa.yaml"))
-    parser.add_argument("--mode", choices=("full", "swa", "fw_swa"), help="Override the YAML mode")
+    parser.add_argument("--mode", choices=("full", "swa", "fw_swa", "taal"), help="Override the YAML mode")
     parser.add_argument("--checkpoint", type=Path, help="Saved checkpoint; omit when YAML supplies model_id")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--judge-only", action="store_true")
@@ -113,6 +145,9 @@ def main():
     ids = dataset["question_id"]
     if len(ids) != len(set(ids)) or len(ids) != metadata["records"]:
         raise ValueError("Prepared dataset has duplicate IDs or inconsistent record count")
+
+    dataset = select_dataset(dataset, dataset_config)
+    ids = dataset["question_id"]
     if args.diagnostics_only:
         asyncio.run(diagnose_all(list(dataset), output, config["judge"], revision))
         return
@@ -127,18 +162,38 @@ def main():
         parser.error("prompt_format must be completion or chat")
     args.mode = args.mode or config["mode"]
     config["mode"] = args.mode
-    if args.checkpoint is not None:
+    if args.mode == "taal":
+        if args.checkpoint is None:
+            parser.error("taal mode requires --checkpoint")
+
+        checkpoint_config, _ = TaalQwen3Config.get_config_dict(model_source)
+        if checkpoint_config.get("model_type") != TaalQwen3Config.model_type:
+            raise ValueError("taal mode requires a saved taal_qwen3 checkpoint")
+
+        model_config = TaalQwen3Config.from_pretrained(model_source)
+    elif args.checkpoint is not None:
         model_config = TTCDQwen3Config.from_pretrained(model_source)
     else:
         # Untouched Qwen weights: wrap the architecture with no added TTCD layers.
         base_config = Qwen3Config.from_pretrained(model_source)
         model_config = TTCDQwen3Config(**base_config.to_dict(), fast_weight_layers=[])
     model_config = configure_model(model_config, args.mode, model_settings)
+    if args.mode == "taal":
+        config["save_traces"] = config.get("save_traces", True)
+        config["checkpoint_fingerprint"] = checkpoint_fingerprint(Path(model_source))
+        geometry = {
+            "working_memory_size": model_config.working_memory_size,
+            "memory_chunk_size": model_config.memory_chunk_size,
+        }
+    else:
+        geometry = {"teacher_window_size": model_config.teacher_window_size}
+
     ensure_manifest(manifest_path, {
         "config": {key: value for key, value in config.items() if key != "judge"},
         "mode": args.mode, "checkpoint": model_source,
         "dataset_revision": revision,
-        "metadata": metadata, "teacher_window_size": model_config.teacher_window_size,
+        "metadata": metadata,
+        **geometry,
     })
 
     predictions = read_results(output / "predictions.jsonl")
@@ -152,6 +207,9 @@ def main():
         return
 
     def generate_remaining(judge=None):
+        trace_exporter = None
+        if args.mode == "taal":
+            trace_exporter = create_trace_exporter(output, model_source, model_config, metadata, config, predictions)
         if len(predictions) == len(dataset):
             return
         if not torch.cuda.is_available():
@@ -165,26 +223,36 @@ def main():
             tokenizer = AutoTokenizer.from_pretrained(metadata["tokenizer"], revision=metadata["tokenizer_revision"])
         examples = [prepare_example(example, tokenizer, prompt_format) for example in dataset]
         maximum = max(example["prompt_length"] for example in examples)
-        if (
+        retain_prefix = args.mode != "taal" or model_settings.get("retain_task_prefix", False)
+        if retain_prefix and (
             max(example["persistent_prefix_length"] for example in examples)
             > model_config.max_persistent_kv_tokens
         ):
             raise ValueError("Prepared task prefix exceeds checkpoint persistent-token budget")
         model = load_model(model_source, model_config, model_settings.get("fast_weight_read_scale", 1.0))
         model.to(device).eval()
-        print(
-            f"Mode={args.mode}, prompt={prompt_format}, maximum prompt={maximum}, "
-            f"teacher={model_config.teacher_window_size}, student={model_config.student_window_size}, "
-            f"chunk={model_config.chunk_size}, TTCD read scale={model_settings.get('fast_weight_read_scale', 1.0)}",
-            flush=True,
-        )
+        if args.mode == "taal":
+            print(
+                f"Mode=taal, prompt={prompt_format}, maximum prompt={maximum}, "
+                f"KV={model_config.working_memory_size}, memory chunk={model_config.memory_chunk_size}, "
+                f"read scale={model_settings.get('memory_read_scale', 1.0)}, "
+                f"retain task prefix={retain_prefix}, save traces={trace_exporter is not None}",
+                flush=True,
+            )
+        else:
+            print(
+                f"Mode={args.mode}, prompt={prompt_format}, maximum prompt={maximum}, "
+                f"teacher={model_config.teacher_window_size}, student={model_config.student_window_size}, "
+                f"chunk={model_config.chunk_size}, TTCD read scale={model_settings.get('fast_weight_read_scale', 1.0)}",
+                flush=True,
+            )
 
         for example in examples:
             if example["question_id"] in predictions:
                 continue
 
             start = time.perf_counter()
-            result = generate_example(model, tokenizer, example, config, device)
+            result = generate_example(model, tokenizer, example, config, device, trace_exporter)
             result["seconds"] = time.perf_counter() - start
             append_result(output / "predictions.jsonl", result)
             predictions[result["question_id"]] = result
