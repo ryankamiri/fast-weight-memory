@@ -12,7 +12,88 @@ import yaml
 from utils import explorer_preflight
 
 
+class PreflightTokenizer:
+    def encode(self, text, add_special_tokens=False):
+        return list(text.encode())
+
+
 class ExplorerPreflightTests(unittest.TestCase):
+    def test_longmemeval_checkpoint_preflight_end_to_end(self):
+        root = Path(__file__).resolve().parents[1]
+        config = root / "evaluation/configs/taal/longmemeval.yaml"
+        row = {
+            "question_id": "first", "question": "Label?", "answer": "amber",
+            "question_date": "2026/01/02 (Fri) 12:00",
+            "haystack_dates": ["2026/01/01 (Thu) 12:00"],
+            "haystack_sessions": [[{"role": "user", "content": "amber"}]],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            for name in ("config.json", "model.safetensors", "training_metadata.json"):
+                (checkpoint / name).touch()
+            metadata = checkpoint / "metadata.json"
+            metadata.write_text(json.dumps({
+                "source": explorer_preflight.SOURCE, "prompt_version": explorer_preflight.PROMPT_VERSION,
+                "tokenizer": "test", "tokenizer_revision": "pinned",
+            }))
+            output = io.StringIO()
+            with (
+                patch.dict(os.environ, {name: directory for name in (
+                    "HF_HOME", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "http_proxy", "https_proxy",
+                )}),
+                patch("sys.argv", ["preflight", "--config", str(config), "--checkpoint", directory]),
+                patch.object(explorer_preflight.torch.cuda, "is_available", return_value=True),
+                patch.object(explorer_preflight.torch.cuda, "is_bf16_supported", return_value=True),
+                patch.object(explorer_preflight.torch.cuda, "get_device_name", return_value="test GPU"),
+                patch.object(explorer_preflight, "hf_hub_download", return_value=str(metadata)),
+                patch.object(explorer_preflight, "load_dataset", return_value=[row]),
+                patch.object(explorer_preflight.AutoTokenizer, "from_pretrained", return_value=PreflightTokenizer()),
+                patch.object(explorer_preflight.requests, "get"),
+                patch.object(explorer_preflight.subprocess, "check_output", return_value="commit\n"),
+                contextlib.redirect_stdout(output),
+            ):
+                explorer_preflight.main()
+            result = json.loads(output.getvalue().removeprefix("EXPLORER_PREFLIGHT "))
+            self.assertEqual(result["status"], "pass")
+            self.assertGreater(result["first_record_tokens"], 0)
+
+    def test_longmemeval_source_records_are_prepared_before_validation(self):
+        row = {
+            "question_id": "test", "question": "What is the label?", "answer": "amber",
+            "question_date": "2026/01/02 (Fri) 12:00",
+            "haystack_dates": ["2026/01/01 (Thu) 12:00"],
+            "haystack_sessions": [[{"role": "user", "content": "The label is amber."}]],
+            "history_ids": [1], "question_ids": [2],
+        }
+        metadata = {
+            "source": explorer_preflight.SOURCE,
+            "prompt_version": explorer_preflight.PROMPT_VERSION,
+            "tokenizer": "test-tokenizer", "tokenizer_revision": "pinned",
+        }
+        with patch.object(explorer_preflight.AutoTokenizer, "from_pretrained", return_value=PreflightTokenizer()) as loader:
+            prepared = explorer_preflight.prepare_preflight_record(row, metadata, {}, Path("checkpoint"))
+            self.assertGreater(len(prepared["input_ids"]), 2)
+            self.assertNotIn("input_ids", row)
+            loader.assert_called_once_with("test-tokenizer", revision="pinned")
+            with self.assertRaises(ValueError):
+                explorer_preflight.prepare_preflight_record(
+                    {**row, "haystack_dates": []}, metadata, {}, Path("checkpoint"),
+                )
+            with self.assertRaisesRegex(ValueError, "prompt version"):
+                explorer_preflight.prepare_preflight_record(
+                    row, {**metadata, "prompt_version": "wrong"}, {}, Path("checkpoint"),
+                )
+
+    def test_pretokenized_records_keep_existing_validation(self):
+        with patch.object(explorer_preflight.AutoTokenizer, "from_pretrained") as loader:
+            row = {"input_ids": [1, 2]}
+            self.assertIs(explorer_preflight.prepare_preflight_record(row, {}, {}, None), row)
+            self.assertIs(explorer_preflight.prepare_preflight_record(row, {}, {}, Path("checkpoint")), row)
+            for row in ({}, {"input_ids": []}):
+                with self.assertRaisesRegex(ValueError, "no input_ids"):
+                    explorer_preflight.prepare_preflight_record(row, {}, {}, None)
+            loader.assert_not_called()
+
     def test_training_uses_transformers_cache_and_pinned_data(self):
         root = Path(__file__).resolve().parents[1]
         config = root / "training/configs/taal/qwen3_0_6b_delayed_recall_overfit.yaml"

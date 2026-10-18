@@ -12,6 +12,29 @@ from huggingface_hub import hf_hub_download
 import requests
 import torch
 import yaml
+from transformers import AutoTokenizer
+
+from evaluation.data import PROMPT_VERSION, SOURCE, prepare_example
+
+
+def prepare_preflight_record(first, metadata, settings, checkpoint):
+    if checkpoint is not None and metadata.get("source") == SOURCE:
+        if metadata.get("prompt_version") != PROMPT_VERSION:
+            raise ValueError("Prepared prompt version does not match this evaluator")
+
+        prompt_format = settings.get("prompt_format", "completion")
+        if prompt_format == "chat":
+            tokenizer = AutoTokenizer.from_pretrained(str(checkpoint))
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(
+                metadata["tokenizer"], revision=metadata["tokenizer_revision"],
+            )
+        # LongMemEval stores source conversations; match the evaluator's preparation.
+        first = prepare_example(first, tokenizer, prompt_format)
+    if not first.get("input_ids"):
+        raise ValueError("Pinned dataset record has no input_ids")
+
+    return first
 
 
 def main():
@@ -73,14 +96,13 @@ def main():
     metadata = hf_hub_download(
         repo, f"{variant}/metadata.json", repo_type="dataset", revision=revision, local_files_only=True,
     )
-    json.loads(Path(metadata).read_text())
+    metadata = json.loads(Path(metadata).read_text())
     # Streaming can need the Hub even with cached weights. Prove the compute
     # node's exported proxy works before spending hours inside the model.
     requests.get("https://huggingface.co", timeout=30).raise_for_status()
     dataset = load_dataset(repo, variant, split=split, revision=revision, streaming=True)
     first = next(iter(dataset))
-    if not first.get("input_ids"):
-        raise ValueError("Pinned dataset record has no input_ids")
+    first = prepare_preflight_record(first, metadata, settings, args.checkpoint)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     print("EXPLORER_PREFLIGHT " + json.dumps({
         "status": "pass", "commit": commit,
