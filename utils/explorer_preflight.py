@@ -15,6 +15,7 @@ import yaml
 from transformers import AutoTokenizer
 
 from evaluation.data import PROMPT_VERSION, SOURCE, prepare_example
+from evaluation.taal.longmemeval import resolve_generation_settings
 
 
 def prepare_preflight_record(first, metadata, settings, checkpoint):
@@ -69,6 +70,12 @@ def main():
         for filename in ("config.json", "model.safetensors", "training_metadata.json"):
             if not (args.checkpoint / filename).is_file():
                 raise FileNotFoundError(args.checkpoint / filename)
+        if settings.get("mode") == "taal":
+            checkpoint_config = json.loads((args.checkpoint / "config.json").read_text())
+            if checkpoint_config.get("model_type") != "taal_qwen3":
+                raise ValueError("taal mode requires a TaaL checkpoint")
+
+            resolve_generation_settings(settings["generation"], checkpoint_config["working_memory_size"])
         data = settings["dataset"]
         if "path" in data:
             repo, variant, revision, split = data["path"], None, None, "train"

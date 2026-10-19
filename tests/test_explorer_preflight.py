@@ -31,6 +31,9 @@ class ExplorerPreflightTests(unittest.TestCase):
             checkpoint = Path(directory)
             for name in ("config.json", "model.safetensors", "training_metadata.json"):
                 (checkpoint / name).touch()
+            (checkpoint / "config.json").write_text(json.dumps({
+                "model_type": "taal_qwen3", "working_memory_size": 32,
+            }))
             metadata = checkpoint / "metadata.json"
             metadata.write_text(json.dumps({
                 "source": explorer_preflight.SOURCE, "prompt_version": explorer_preflight.PROMPT_VERSION,
@@ -46,7 +49,7 @@ class ExplorerPreflightTests(unittest.TestCase):
                 patch.object(explorer_preflight.torch.cuda, "is_bf16_supported", return_value=True),
                 patch.object(explorer_preflight.torch.cuda, "get_device_name", return_value="test GPU"),
                 patch.object(explorer_preflight, "hf_hub_download", return_value=str(metadata)),
-                patch.object(explorer_preflight, "load_dataset", return_value=[row]),
+                patch.object(explorer_preflight, "load_dataset", return_value=[row]) as dataset,
                 patch.object(explorer_preflight.AutoTokenizer, "from_pretrained", return_value=PreflightTokenizer()),
                 patch.object(explorer_preflight.requests, "get"),
                 patch.object(explorer_preflight.subprocess, "check_output", return_value="commit\n"),
@@ -56,6 +59,25 @@ class ExplorerPreflightTests(unittest.TestCase):
             result = json.loads(output.getvalue().removeprefix("EXPLORER_PREFLIGHT "))
             self.assertEqual(result["status"], "pass")
             self.assertGreater(result["first_record_tokens"], 0)
+
+            settings = yaml.safe_load(config.read_text())
+            settings["generation"]["execution_block_size"] = 256
+            bad_config = checkpoint / "bad.yaml"
+            bad_config.write_text(yaml.safe_dump(settings))
+            with (
+                patch.dict(os.environ, {name: directory for name in (
+                    "HF_HOME", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "http_proxy", "https_proxy",
+                )}),
+                patch("sys.argv", ["preflight", "--config", str(bad_config), "--checkpoint", directory]),
+                patch.object(explorer_preflight.torch.cuda, "is_available", return_value=True),
+                patch.object(explorer_preflight.torch.cuda, "is_bf16_supported", return_value=True),
+                patch.object(explorer_preflight, "load_dataset") as dataset,
+                patch.object(explorer_preflight.requests, "get") as request,
+            ):
+                with self.assertRaisesRegex(ValueError, "execution_block_size"):
+                    explorer_preflight.main()
+                dataset.assert_not_called()
+                request.assert_not_called()
 
     def test_longmemeval_source_records_are_prepared_before_validation(self):
         row = {

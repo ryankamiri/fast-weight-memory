@@ -12,7 +12,7 @@ dataset:
 seed: 42
 save_traces: true
 generation:
-  execution_block_size: 256
+  execution_block_size: null
   max_new_tokens: 256
   do_sample: false
 judge:

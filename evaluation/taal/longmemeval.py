@@ -12,6 +12,21 @@ from evaluation.taal.trace_contract import TraceEpisode
 from evaluation.taal.trace_export import TaalTraceExporter, TaalTraceRecorder, make_trace_tokens
 
 
+def resolve_generation_settings(settings, working_memory_size):
+    generation = dict(settings)
+    block_size = generation.get("execution_block_size")
+    if block_size is None:
+        block_size = working_memory_size
+    if type(block_size) is not int or not 1 <= block_size <= working_memory_size:
+        raise ValueError(
+            f"execution_block_size must be an integer in [1, {working_memory_size}], "
+            f"or null to use the checkpoint KV window; got {block_size!r}"
+        )
+
+    generation["execution_block_size"] = block_size
+    return generation
+
+
 def select_dataset(dataset, settings):
     start = settings.get("start", 0)
     end = settings.get("end")
@@ -67,7 +82,7 @@ def generate_taal_example(model, tokenizer, example, settings, device, exporter=
             raise ValueError("Prepared task prefix exceeds checkpoint persistent-token budget")
 
         persistent = torch.arange(S, device=device) < example["persistent_prefix_length"]
-    generation = dict(settings["generation"])
+    generation = resolve_generation_settings(settings["generation"], model.config.working_memory_size)
     if "state" in generation:
         raise ValueError("LongMemEval questions must start with fresh state")
 

@@ -24,7 +24,7 @@ from evaluation.data import PROMPT_VERSION, prepare_example
 from evaluation.diagnostic_judge import diagnose_all
 from evaluation.judge import BackgroundJudge, judge_all, judge_backend
 from evaluation.storage import append_result, ensure_manifest, read_results
-from evaluation.taal.longmemeval import create_trace_exporter, generate_taal_example, select_dataset
+from evaluation.taal.longmemeval import create_trace_exporter, generate_taal_example, resolve_generation_settings, select_dataset
 from evaluation.taal.prefix_store import checkpoint_fingerprint
 from utils.seed import seed_everything
 
@@ -179,6 +179,7 @@ def main():
         model_config = TTCDQwen3Config(**base_config.to_dict(), fast_weight_layers=[])
     model_config = configure_model(model_config, args.mode, model_settings)
     if args.mode == "taal":
+        config["generation"] = resolve_generation_settings(config["generation"], model_config.working_memory_size)
         config["save_traces"] = config.get("save_traces", True)
         config["checkpoint_fingerprint"] = checkpoint_fingerprint(Path(model_source))
         geometry = {

@@ -14,7 +14,7 @@ from architectures.taal.qwen.configuration import TaalQwen3Config
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from evaluation.data import PROMPT_VERSION
 from evaluation.run import configure_model, generate_example, load_model, main
-from evaluation.taal.longmemeval import create_trace_exporter, select_dataset
+from evaluation.taal.longmemeval import create_trace_exporter, resolve_generation_settings, select_dataset
 
 
 class Tokenizer:
@@ -23,6 +23,39 @@ class Tokenizer:
 
 
 class TaalLongMemEvalTests(unittest.TestCase):
+    def test_shipped_recipes_with_actual_d_checkpoint_config(self):
+        root = Path(__file__).resolve().parents[1]
+        config = TaalQwen3Config.from_json_file(root / "tests/fixtures/taal_d_final_config.json")
+        original = config.to_dict()
+        self.assertEqual(config.working_memory_size, 32)
+        self.assertEqual(config.memory_chunk_size, 1)
+        self.assertEqual(config.num_hidden_layers, 28)
+        for suffix in ("", "_half_reads", "_no_reads", "_smoke"):
+            with self.subTest(suffix=suffix):
+                recipe = yaml.safe_load((root / f"evaluation/configs/taal/longmemeval{suffix}.yaml").read_text())
+                configure_model(config, recipe["mode"], recipe["model"])
+                generation = resolve_generation_settings(recipe["generation"], config.working_memory_size)
+                self.assertEqual(generation["execution_block_size"], 32)
+                self.assertIsNone(recipe["generation"]["execution_block_size"])
+                self.assertTrue(recipe["save_traces"])
+        self.assertEqual(config.to_dict(), original)
+        for block in (256, 0, -1, 1.5, True):
+            with self.subTest(block=block), self.assertRaisesRegex(ValueError, "execution_block_size"):
+                resolve_generation_settings({"execution_block_size": block}, config.working_memory_size)
+        self.assertEqual(resolve_generation_settings({}, 32)["execution_block_size"], 32)
+        self.assertEqual(resolve_generation_settings({"execution_block_size": 16}, 32)["execution_block_size"], 16)
+
+    def test_automatic_block_size_generates_and_exports_without_changing_kv(self):
+        self.settings["generation"]["execution_block_size"] = None
+        with tempfile.TemporaryDirectory() as directory:
+            exporter = self.exporter(directory)
+            with patch.object(self.model, "prefill", wraps=self.model.prefill) as prefill:
+                actual = self.generate(exporter)
+            self.assertEqual(prefill.call_args.kwargs["execution_block_size"], 4)
+            self.assertGreater(actual["generated_tokens"], 0)
+            self.assertEqual(len(exporter.manifest["episodes"]), 1)
+            self.assertEqual(self.model.config.working_memory_size, 4)
+
     def setUp(self):
         torch.manual_seed(123)
         self.config = TaalQwen3Config(
