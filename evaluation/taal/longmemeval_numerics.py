@@ -1,6 +1,7 @@
 """Bounded real-checkpoint diagnosis; stops and saves the first non-finite block."""
 
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ from evaluation.run import load_model
 from evaluation.taal.longmemeval import create_trace_exporter, generate_taal_example, resolve_generation_settings
 from evaluation.taal.numerical_diagnostic import BlockMonitor, NumericalFailure, replay_block
 from evaluation.taal.prefix_store import checkpoint_fingerprint
+from evaluation.taal.runaway_diagnostic import RunawayRecorder
 from utils.seed import seed_everything
 
 
@@ -33,6 +35,7 @@ def main():
     parser.add_argument("--config", type=Path, default=Path("evaluation/configs/taal/longmemeval_smoke.yaml"))
     parser.add_argument("--row", type=int, default=0)
     parser.add_argument("--read-scales", type=float, nargs="+", default=[1.0, 0.5, 0.0])
+    parser.add_argument("--trace-updates", action="store_true")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("Real-checkpoint numerical diagnostic expects CUDA")
@@ -62,6 +65,7 @@ def main():
         "checkpoint": source, "fingerprint": settings["checkpoint_fingerprint"],
         "model_config": config.to_dict(), "settings": settings, "metadata": metadata,
         "row": args.row, "question_id": example["question_id"], "read_scales": args.read_scales,
+        "trace_updates": args.trace_updates,
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "job_id": os.environ.get("SLURM_JOB_ID"), "torch": torch.__version__,
         "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name(),
@@ -78,12 +82,13 @@ def main():
         settings["model"]["memory_read_scale"] = scale
         exporter = create_trace_exporter(arm, source, config, metadata, settings, {})
         monitor = BlockMonitor(model, example["prompt_length"])
+        recorder = RunawayRecorder(monitor, arm / "updates") if args.trace_updates else nullcontext()
         started = time.perf_counter()
         report = {"scale": scale, "question_id": example["question_id"], "status": "started"}
         write_report(arm / "report.json", report)
         print(f"NUMERICAL_ARM scale={scale} tokens={example['prompt_length']}", flush=True)
         try:
-            with monitor:
+            with monitor, recorder:
                 report["outcome"] = generate_taal_example(model, tokenizer, example, settings,
                                                           torch.device("cuda"), exporter)
             report["status"] = "finite_generation"
