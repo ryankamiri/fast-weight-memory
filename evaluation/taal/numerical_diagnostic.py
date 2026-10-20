@@ -169,7 +169,7 @@ class FirstNonfinite(TorchDispatchMode):
         return result
 
 
-def independent_gradient(weights, keys, values, strength, dtype):
+def independent_gradient(weights, keys, values, strength, dtype, output_layernorm=False, normalization_eps=1e-6):
     if keys.shape[0] != 1:
         raise ValueError("Independent diagnostic reference requires B=1")
 
@@ -180,6 +180,8 @@ def independent_gradient(weights, keys, values, strength, dtype):
             predicted = F.linear(predicted[0], weight[0]).unsqueeze(0)
             if index + 1 < len(reference):
                 predicted = F.silu(predicted)
+        if output_layernorm:
+            predicted = F.layer_norm(predicted, (predicted.size(-1),), eps=normalization_eps)
         loss = ((predicted - values.detach().to(dtype=dtype).clone()).square().mean(-1)
                 * strength.detach().to(dtype=dtype).clone()).sum()
         gradients = torch.autograd.grad(loss, tuple(reference.values()))
@@ -208,8 +210,10 @@ def check_write(memory, step):
     strength = memory.write_strength_projection(inputs).sigmoid().reshape(B, C).float()
     strength = torch.where(mask, strength, 0.0)
     manual = memory._chunk_gradient(state.weights, keys, values, strength).chunk_gradients
-    automatic = independent_gradient(state.weights, keys, values, strength, torch.float32)
-    double = independent_gradient(state.weights, keys, values, strength, torch.float64)
+    automatic = independent_gradient(state.weights, keys, values, strength, torch.float32,
+                                     memory.config.mlp_output_layernorm, memory.config.normalization_eps)
+    double = independent_gradient(state.weights, keys, values, strength, torch.float64,
+                                  memory.config.mlp_output_layernorm, memory.config.normalization_eps)
     mean_input = inputs.float().mean(1).to(memory.forget_projection.weight.dtype)
     forget = memory.forget_projection(mean_input).sigmoid().reshape(B, 1, 1).float()
     momentum = memory.momentum_projection(mean_input).sigmoid().reshape(B, 1, 1).float()

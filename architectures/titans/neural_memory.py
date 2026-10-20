@@ -20,6 +20,8 @@ class MemoryMLPResult:
     predicted_values: Float[torch.Tensor, "*B D"]
     keys_by_layer: list[Float[torch.Tensor, "*B D"]] | None = None
     values_before_silu: list[Float[torch.Tensor, "*B D"]] | None = None
+    normalized_values: Float[torch.Tensor, "*B D"] | None = None
+    inverse_std: Float[torch.Tensor, "*B 1"] | None = None
 
 
 @dataclass
@@ -31,13 +33,16 @@ class ChunkGradientResult:
 class MemoryMLP(nn.Module):
     """Same-width, bias-free MLP whose parameters form the fast memory state."""
 
-    def __init__(self, dim: int, depth: int):
+    def __init__(self, dim: int, depth: int, output_layernorm: bool = False, normalization_eps: float = 1e-6):
         super().__init__()
         self.layers = nn.ModuleList(
             nn.Linear(dim, dim, bias=False) for _ in range(depth)
         )
         self.activation = nn.SiLU()
+        self.dim = dim
         self.timing_observer = None
+        self.output_layernorm = output_layernorm
+        self.normalization_eps = normalization_eps
 
     def forward(
         self,
@@ -84,10 +89,25 @@ class MemoryMLP(nn.Module):
                 if timer is not None:
                     timer(f"{operation}_mlp_silu", perf_counter() - tic)
 
+        normalized_values = None
+        inverse_std = None
+        if self.output_layernorm:
+            # Fixed-affine LN tests normalization without adding fast parameters or a residual.
+            normalized_values = F.layer_norm(
+                layer_keys, (self.dim,), eps=self.normalization_eps,
+            )
+            if return_intermediates:
+                inverse_std = (
+                    layer_keys.var(dim=-1, unbiased=False, keepdim=True) + self.normalization_eps
+                ).rsqrt()
+            layer_keys = normalized_values
+
         return MemoryMLPResult(
             predicted_values=layer_keys,
             keys_by_layer=keys_by_layer,
             values_before_silu=values_before_silu,
+            normalized_values=normalized_values if return_intermediates else None,
+            inverse_std=inverse_std,
         )
 
 
@@ -106,7 +126,7 @@ class NeuralMemory(nn.Module):
         self.key_conv = CausalDepthwiseConv1d(dim, config.conv_kernel_size)
         self.value_conv = CausalDepthwiseConv1d(dim, config.conv_kernel_size)
         self.activation = nn.SiLU()
-        self.memory_mlp = MemoryMLP(dim, config.depth)
+        self.memory_mlp = MemoryMLP(dim, config.depth, config.mlp_output_layernorm, config.normalization_eps)
         self.forget_projection = nn.Linear(dim, 1)
         self.momentum_projection = nn.Linear(dim, 1)
         self.write_strength_projection = nn.Linear(dim, 1)
@@ -261,6 +281,17 @@ class NeuralMemory(nn.Module):
                 timer("write_loss", perf_counter() - tic)
 
             tic = perf_counter() if timer is not None else 0.0
+            if self.config.mlp_output_layernorm:
+                assert result.normalized_values is not None
+                assert result.inverse_std is not None
+                # LN backward: dL/dz = r * (dL/dy - mean(dL/dy) - y * mean(y * dL/dy)).
+                # Means reduce D only; keeping this differentiable preserves outer training.
+                normalized_values = result.normalized_values
+                value_gradient = result.inverse_std * (
+                    value_gradient
+                    - value_gradient.mean(dim=-1, keepdim=True)
+                    - normalized_values * (value_gradient * normalized_values).mean(dim=-1, keepdim=True)
+                )
             weight_gradients: dict[str, Float32[torch.Tensor, "B D D"]] = {}
             token_gradients: dict[str, Float32[torch.Tensor, "B C D D"]] = {}
             for layer_index in reversed(range(self.config.depth)):
@@ -552,6 +583,10 @@ class NeuralMemory(nn.Module):
             return inputs.new_empty(batch_size, 0, dim), state
         if timer is not None:
             timer("state_and_mask_setup", perf_counter() - tic)
+
+        if self.config.pre_rmsnorm:
+            # Normalize memory-space inputs before Q/K/V and all three update controls.
+            inputs = F.rms_norm(inputs.float(), (dim,), eps=self.config.normalization_eps).to(inputs.dtype)
 
         tic = perf_counter() if timer is not None else 0.0
         queries: Float[torch.Tensor, "B S D"]

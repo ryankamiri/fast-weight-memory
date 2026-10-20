@@ -63,6 +63,9 @@ class TaalModelConfig(ModelConfig):
     memory_initial_forget: float = 0.01
     memory_initial_momentum: float = 0.9
     memory_initial_write_strength: float = 0.1
+    memory_pre_rmsnorm: bool = False
+    memory_mlp_output_layernorm: bool = False
+    memory_normalization_eps: float = 1e-6
     num_persistent_tokens: int = 8
     persistent_init_std: float = 0.02
 
@@ -266,6 +269,14 @@ class TrainingConfig:
             if self.training.trainable_parameters == "ttcd_only" and not self.model.fast_weight_layers:
                 raise ValueError("ttcd_only training requires fast-weight layers")
         elif isinstance(self.model, TaalModelConfig):
+            for name in ("memory_pre_rmsnorm", "memory_mlp_output_layernorm"):
+                if type(getattr(self.model, name)) is not bool:
+                    raise ValueError(f"{name} must be a boolean")
+
+            epsilon = self.model.memory_normalization_eps
+            if type(epsilon) not in (int, float) or not math.isfinite(epsilon) or epsilon <= 0:
+                raise ValueError("memory_normalization_eps must be finite and positive")
+
             if not isinstance(self.validation, TaalValidationConfig):
                 raise ValueError("TaaL models require TaaL validation settings")
             if self.training.trainable_parameters == "ttcd_only":
