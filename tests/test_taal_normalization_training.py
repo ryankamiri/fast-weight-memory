@@ -65,7 +65,7 @@ class NormalizationTrainingTests(unittest.TestCase):
         self.assertEqual(audit["dataset"]["end"], 16)
         self.assertEqual(len(audit_conditions("standard")), 6)
 
-    def test_guard_rejects_wrong_arm_step_recipe_and_skipped_updates(self):
+    def test_guard_rejects_mismatches_but_retains_skipped_updates(self):
         settings = recipe("both")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -83,8 +83,15 @@ class NormalizationTrainingTests(unittest.TestCase):
             for arm, step in (("input", 100), ("both", 400)):
                 with self.assertRaises(ValueError):
                     normalization_training_audit.validate_snapshot(root, arm, step, settings)
+            skipped = metadata | {"progress": {"step": 100, "skipped_updates": 1,
+                                               "infinite_gradients": 1, "tokens_seen": 20907}}
+            target.write_text(json.dumps(skipped))
+            actual = normalization_training_audit.validate_snapshot(root, "both", 100, settings)
+            self.assertEqual(actual, skipped)
+            self.assertEqual(json.loads(target.read_text()), skipped)
             for modified in (metadata | {"reason": "exception"},
-                             metadata | {"progress": {"step": 100, "skipped_updates": 1}}):
+                             metadata | {"progress": {"step": 100, "skipped_updates": -1}},
+                             metadata | {"progress": {"step": 100, "skipped_updates": True}}):
                 target.write_text(json.dumps(modified))
                 with self.assertRaises(ValueError):
                     normalization_training_audit.validate_snapshot(root, "both", 100, settings)
@@ -93,6 +100,43 @@ class NormalizationTrainingTests(unittest.TestCase):
             changed.optimizer.lr *= 2
             with self.assertRaises(ValueError):
                 normalization_training_audit.validate_snapshot(root, "both", 100, changed)
+
+    def test_skipped_attempts_are_audited_and_logged_without_changing_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for step, skips in ((100, 1), (400, 13)):
+                checkpoint = root / f"step-{step}"
+                checkpoint.mkdir()
+                (checkpoint / "training_metadata.json").write_text(json.dumps({
+                    "progress": {"step": step, "skipped_updates": skips,
+                                 "infinite_gradients": skips, "tokens_seen": (step + skips) * 207},
+                }))
+
+            def validate(checkpoint, arm, step, settings):
+                return json.loads((checkpoint / "training_metadata.json").read_text())
+
+            stdout = io.StringIO()
+            with (patch.object(normalization_training_audit, "validate_snapshot", side_effect=validate),
+                  patch.object(normalization_training_audit.subprocess, "run") as launch,
+                  patch.object(normalization_training_audit, "run_long_probe", return_value={}) as probe,
+                  redirect_stdout(stdout)):
+                summary = normalization_training_audit.audit_training_run(root, "both", root, root / "audit")
+
+            self.assertEqual(launch.call_count, 4)
+            probe.assert_called_once()
+            for step, skips in ((100, 1), (400, 13)):
+                record = summary["snapshots"][str(step)]
+                self.assertEqual(record["status"], "audit_completed")
+                self.assertEqual(record["progress"]["skipped_updates"], skips)
+                self.assertEqual(record["attempted_updates"], step + skips)
+                self.assertEqual(record["comparison_basis"], "successful_optimizer_updates")
+                self.assertIn("sample exposure does not match", record["warnings"][0])
+                sidecar = json.loads((root / f"audit/step-{step}/training_progress.json").read_text())
+                self.assertEqual(sidecar["progress"], record["progress"])
+                self.assertEqual(sidecar["warnings"], record["warnings"])
+                original = json.loads((root / f"step-{step}/training_metadata.json").read_text())
+                self.assertEqual(original["progress"], record["progress"])
+            self.assertEqual(stdout.getvalue().count("NORMALIZATION_AUDIT_WARNING"), 2)
 
     def test_missing_milestone_never_falls_back_to_final(self):
         with tempfile.TemporaryDirectory() as directory:

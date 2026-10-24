@@ -26,11 +26,15 @@ MATCHED_STEPS = (100, 400)
 
 
 def validate_snapshot(checkpoint, arm, expected_step, recipe):
-    """Reject mismatched or skipped-update snapshots instead of substituting final."""
+    """Require successful-step milestones while retaining skipped-attempt evidence."""
     metadata = json.loads((checkpoint / "training_metadata.json").read_text())
     progress = metadata["progress"]
-    if progress["step"] != expected_step or progress["skipped_updates"] != 0:
+    if progress["step"] != expected_step:
         raise ValueError("Matched audit requires the exact successful optimizer-step budget")
+
+    if type(progress["skipped_updates"]) is not int or progress["skipped_updates"] < 0:
+        raise ValueError("Checkpoint skipped_updates must be a nonnegative integer")
+
     if metadata["reason"] != "matched optimizer-step snapshot":
         raise ValueError("Matched audit requires a fully validated milestone checkpoint")
 
@@ -113,13 +117,34 @@ def audit_training_run(run_dir, arm, source_run, output_dir):
             continue
 
         parent = validate_snapshot(checkpoint, arm, step, recipe)
-        record = {"status": "validated", "checkpoint": str(checkpoint), "progress": parent["progress"]}
+        progress = parent["progress"]
+        warnings = []
+        if progress["skipped_updates"] > 0:
+            warnings.append(
+                f"Checkpoint has {progress['skipped_updates']} skipped update attempts. "
+                "Successful optimizer updates match, but training sample exposure does not "
+                "match a run without skipped attempts."
+            )
+            print(f"NORMALIZATION_AUDIT_WARNING arm={arm} step={step}: {warnings[0]}", flush=True)
+
+        record = {
+            "status": "validated", "checkpoint": str(checkpoint), "progress": progress,
+            "comparison_basis": "successful_optimizer_updates", "warnings": warnings,
+            "attempted_updates": progress["step"] + progress["skipped_updates"],
+        }
         summary["snapshots"][str(step)] = record
         write_report(output_dir / "summary.json", summary)
+        snapshot_output = output_dir / f"step-{step}"
+        snapshot_output.mkdir()
+        write_report(snapshot_output / "training_progress.json", {
+            "checkpoint": str(checkpoint), "progress": progress,
+            "comparison_basis": record["comparison_basis"], "warnings": warnings,
+            "attempted_updates": record["attempted_updates"],
+        })
         subprocess.run([sys.executable, "-m", "utils.explorer_preflight", "--config", str(AUDIT_CONFIG),
                         "--checkpoint", str(checkpoint)], check=True)
         subprocess.run([sys.executable, "-m", "evaluation.taal.state_audit", "--config", str(AUDIT_CONFIG),
-                        "--checkpoint", str(checkpoint), "--output-dir", str(output_dir / f"step-{step}")], check=True)
+                        "--checkpoint", str(checkpoint), "--output-dir", str(snapshot_output)], check=True)
         record["status"] = "audit_completed"
         write_report(output_dir / "summary.json", summary)
 
