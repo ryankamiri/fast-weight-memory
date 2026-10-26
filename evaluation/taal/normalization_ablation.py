@@ -49,7 +49,8 @@ def run_fixed(model, tokenizer, source, manifest, directory):
     tokens = source.example["input_ids"] + source.continuation
     layers = list(range(model.config.num_hidden_layers))
     monitor = BlockMonitor(model, S)
-    updates = RunawayRecorder(monitor, directory / "updates", tail_size=1)
+    updates = RunawayRecorder(monitor, directory / "updates", tail_size=1,
+                              allow_transition_ablation=manifest.get("allow_transition_ablation", False))
     decoder = DecoderRecorder(model, directory / "decoder", manifest["layers"], manifest["trace_start"])
     trace = TaalTraceRecorder(model, layers, len(tokens))
     exporter = TaalTraceExporter(directory / "memory_traces", run_metadata=manifest | {
@@ -63,7 +64,7 @@ def run_fixed(model, tokenizer, source, manifest, directory):
     try:
         with monitor, updates, decoder, trace:
             output, predictions = replay_fixed_tokens(model, prompt, source.continuation,
-                                                      manifest["execution_block_size"], 1.0)
+                                                      manifest["execution_block_size"], manifest.get("memory_read_scale", 1.0))
         expected = {(layer, position) for layer in manifest["layers"]
                     for position in range(manifest["trace_start"], len(tokens))}
         actual = {(row["layer"], row["position"]) for row in decoder.rows}
@@ -111,7 +112,7 @@ def run_generation(model, tokenizer, source, manifest, directory):
     directory.mkdir()
     settings = copy.deepcopy(source.manifest["settings"])
     settings["save_traces"] = True
-    settings["model"]["memory_read_scale"] = 1.0
+    settings["model"]["memory_read_scale"] = manifest.get("memory_read_scale", 1.0)
     settings["generation"]["max_new_tokens"] = manifest["max_new_tokens"]
     settings["generation"]["do_sample"] = False
     settings["generation"]["execution_block_size"] = manifest["execution_block_size"]

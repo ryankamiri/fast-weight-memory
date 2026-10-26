@@ -15,16 +15,22 @@ class NeuralMemoryConfig:
     initial_write_strength: float = 0.1
     pre_rmsnorm: bool = False
     mlp_output_layernorm: bool = False
+    read_layernorm: bool = False
+    norm_learned_scale: bool = False
+    norm_residual: bool = False
     normalization_eps: float = 1e-6
 
     def __post_init__(self):
-        for name in ("pre_rmsnorm", "mlp_output_layernorm"):
+        for name in ("pre_rmsnorm", "mlp_output_layernorm", "read_layernorm", "norm_learned_scale", "norm_residual"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be a boolean")
 
         if (type(self.normalization_eps) not in (int, float)
                 or not math.isfinite(self.normalization_eps) or self.normalization_eps <= 0):
             raise ValueError("normalization_eps must be finite and positive")
+
+        if (self.norm_learned_scale or self.norm_residual) and not self.mlp_output_layernorm:
+            raise ValueError("Memory normalization scale/residual requires normalized writes and reads")
 
         for name in ("dim", "depth", "conv_kernel_size", "chunk_size"):
             value = getattr(self, name)

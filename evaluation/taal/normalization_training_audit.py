@@ -17,7 +17,7 @@ from evaluation.taal.decoder_diagnostic import load_replay_source
 from evaluation.taal.longmemeval_numerics import write_report
 from evaluation.taal.normalization_ablation import ARMS, run_fixed, run_generation
 from evaluation.taal.prefix_store import checkpoint_fingerprint
-from training.config import load_config
+from training.config import load_config, TaalModelConfig, OptimizerConfig
 from utils.seed import seed_everything
 
 
@@ -39,7 +39,13 @@ def validate_snapshot(checkpoint, arm, expected_step, recipe):
         raise ValueError("Matched audit requires a fully validated milestone checkpoint")
 
     expected = recipe.to_dict()
-    actual = metadata["training_config"]
+    actual = json.loads(json.dumps(metadata["training_config"]))
+    defaults = {"model": TaalModelConfig(), "optimizer": OptimizerConfig()}
+    new_fields = {"model": ("memory_read_layernorm", "memory_norm_learned_scale", "memory_norm_residual"),
+                  "optimizer": ("gate_lr_multiplier", "gate_max_grad_norm")}
+    for section, names in new_fields.items():
+        for name in names:
+            actual[section].setdefault(name, getattr(defaults[section], name))
     for section in ("model", "data", "loss", "optimizer", "scheduler", "training", "validation", "checkpoints"):
         if actual[section] != expected[section]:
             raise ValueError(f"Checkpoint training recipe differs in {section}")

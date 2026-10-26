@@ -15,10 +15,10 @@ class NeuralMemoryState:
     """
 
     # Final weights committed by the most recently completed chunk.
-    weights: dict[str, Float32[torch.Tensor, "B D D"]]
-    momentum: dict[str, Float32[torch.Tensor, "B D D"]]
+    weights: dict[str, Float32[torch.Tensor, "B ..."]]
+    momentum: dict[str, Float32[torch.Tensor, "B ..."]]
     # Weighted surprise gradients accumulated for an incomplete chunk.
-    pending_gradient: dict[str, Float32[torch.Tensor, "B D D"]] | None = None
+    pending_gradient: dict[str, Float32[torch.Tensor, "B ..."]] | None = None
     # Sum of its token inputs, used for chunk-level forgetting and momentum.
     pending_input_sum: Float32[torch.Tensor, "B D"] | None = None
     # Number of tokens already accumulated into the pending chunk.

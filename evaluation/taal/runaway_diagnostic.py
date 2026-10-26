@@ -53,11 +53,12 @@ class UpdateCapture:
 class RunawayRecorder:
     """Record every C1 update and residual read; retain only bounded state slices."""
 
-    def __init__(self, monitor, output_dir, tail_size=8):
+    def __init__(self, monitor, output_dir, tail_size=8, allow_transition_ablation=False):
         if tail_size < 1:
             raise ValueError("tail_size must be positive")
 
         self.monitor = monitor
+        self.allow_transition_ablation = allow_transition_ablation
         self.output_dir = Path(output_dir)
         self.tail_size = tail_size
         self.stack = ExitStack()
@@ -128,7 +129,7 @@ class RunawayRecorder:
             read, next_state = original(*step)
             observed = self.current.pop(layer)
             # This extra read probes the just-written key; it is never fed to the model.
-            after_prediction = memory.memory_mlp(keys.float(), weights=next_state.weights).predicted_values
+            after_prediction = memory.memory_mlp(keys.float(), weights=next_state.weights, return_intermediates=True).predicted_values
             before_mse = (observed["prediction"].double() - values.double()).square().mean()
             after_mse = (after_prediction.double() - values.double()).square().mean()
             delta = {name: next_state.weights[name].double() - weight.double() for name, weight in state.weights.items()}
@@ -137,7 +138,7 @@ class RunawayRecorder:
                 "gradient": weights_norm(observed["gradient"]), "weight_delta": weights_norm(delta),
                 "momentum_before": weights_norm(state.momentum), "momentum_after": weights_norm(next_state.momentum),
                 "write_strength": observed["strength"].reshape(()).double(),
-                "forget": observed["forget"].double(), "momentum_retention": observed["retention"].double(),
+                "forget": observed["forget"].double(), "momentum_retention": (observed["retention"] if memory.momentum_enabled else torch.zeros_like(observed["retention"])).double(),
                 "same_key_mse_before": before_mse, "same_key_mse_after": after_mse,
                 "query": norm64(queries), "key": norm64(keys), "value": norm64(values),
                 "memory_input": norm64(inputs), "raw_read": norm64(read),
@@ -214,7 +215,7 @@ class RunawayRecorder:
 
         for layer in model.model.layers:
             memory = layer.taal.neural_memory
-            if not all((memory.updates_enabled, memory.forgetting_enabled, memory.momentum_enabled, layer.taal.reads_enabled)):
+            if not self.allow_transition_ablation and not all((memory.updates_enabled, memory.forgetting_enabled, memory.momentum_enabled, layer.taal.reads_enabled)):
                 raise ValueError("Runaway diagnostic expects the unmodified recurrence and enabled reads")
 
         self.output_dir.mkdir(parents=True, exist_ok=False)

@@ -17,6 +17,7 @@ from .config import (
 )
 from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
+from .optimization import clip_training_gradients
 from .taal_timing import TaalKernelSampler, TaalMicrobatchTimer, print_taal_timing
 
 
@@ -425,9 +426,8 @@ def train(
                 # don't backprob yet
                 continue
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                trainable_parameters, config.training.max_grad_norm,
-            ).item()
+            clipping = clip_training_gradients(model, config)
+            grad_norm = clipping.total_norm
             # we have a nan in the grad
             if not math.isfinite(grad_norm):
                 progress.nan_gradients += int(math.isnan(grad_norm))
@@ -453,6 +453,7 @@ def train(
                     "optimizer/grad_norm": grad_norm,
                     "train/tokens_per_second": group.input_tokens / (time.perf_counter() - group_started),
                 }
+                metrics.update(clipping.metrics)
                 if device.type == "cuda":
                     metrics["gpu/peak_memory_gib"] = torch.cuda.max_memory_allocated(device) / 2**30
                 log(metrics)

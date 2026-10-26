@@ -22,6 +22,9 @@ class TaalQwen3Config(Qwen3Config):
         memory_initial_write_strength: float = 0.1,
         memory_pre_rmsnorm: bool = False,
         memory_mlp_output_layernorm: bool = False,
+        memory_read_layernorm: bool = False,
+        memory_norm_learned_scale: bool = False,
+        memory_norm_residual: bool = False,
         memory_normalization_eps: float = 1e-6,
         num_persistent_tokens: int = 8,
         persistent_init_std: float = 0.02,
@@ -49,6 +52,9 @@ class TaalQwen3Config(Qwen3Config):
             initial_write_strength=memory_initial_write_strength,
             pre_rmsnorm=memory_pre_rmsnorm,
             mlp_output_layernorm=memory_mlp_output_layernorm,
+            read_layernorm=memory_read_layernorm,
+            norm_learned_scale=memory_norm_learned_scale,
+            norm_residual=memory_norm_residual,
             normalization_eps=memory_normalization_eps,
         )
         taal = TaalLayerConfig(
@@ -71,6 +77,9 @@ class TaalQwen3Config(Qwen3Config):
         self.memory_initial_write_strength = memory.initial_write_strength
         self.memory_pre_rmsnorm = memory.pre_rmsnorm
         self.memory_mlp_output_layernorm = memory.mlp_output_layernorm
+        self.memory_read_layernorm = memory.read_layernorm
+        self.memory_norm_learned_scale = memory.norm_learned_scale
+        self.memory_norm_residual = memory.norm_residual
         self.memory_normalization_eps = memory.normalization_eps
         self.num_persistent_tokens = taal.num_persistent_tokens
         self.persistent_init_std = taal.persistent_init_std
@@ -88,6 +97,9 @@ class TaalQwen3Config(Qwen3Config):
                 initial_write_strength=self.memory_initial_write_strength,
                 pre_rmsnorm=self.memory_pre_rmsnorm,
                 mlp_output_layernorm=self.memory_mlp_output_layernorm,
+                read_layernorm=self.memory_read_layernorm,
+                norm_learned_scale=self.memory_norm_learned_scale,
+                norm_residual=self.memory_norm_residual,
                 normalization_eps=self.memory_normalization_eps,
             ),
             num_persistent_tokens=self.num_persistent_tokens,

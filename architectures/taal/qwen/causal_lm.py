@@ -10,7 +10,7 @@ from architectures.shared.qwen.causal_lm import (
     StatefulQwen3ForCausalLM,
 )
 from architectures.taal.layer import TaalLayer
-from architectures.titans.neural_memory import NeuralMemory
+from architectures.titans.neural_memory import MemoryMLP, NeuralMemory
 from inference.generation import GenerationOutput
 
 from .configuration import TaalQwen3Config
@@ -50,6 +50,8 @@ class TaalQwen3ForCausalLM(StatefulQwen3ForCausalLM):
                 mean=0.0,
                 std=module.config.persistent_init_std,
             )
+        if isinstance(module, MemoryMLP) and module.norm_gamma is not None:
+            module.norm_gamma.zero_()
         if isinstance(module, NeuralMemory):
             # The wrapper's post_init traverses the already-built backbone a
             # second time, so restore the configured online-update controls.

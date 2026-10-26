@@ -65,6 +65,9 @@ class TaalModelConfig(ModelConfig):
     memory_initial_write_strength: float = 0.1
     memory_pre_rmsnorm: bool = False
     memory_mlp_output_layernorm: bool = False
+    memory_read_layernorm: bool = False
+    memory_norm_learned_scale: bool = False
+    memory_norm_residual: bool = False
     memory_normalization_eps: float = 1e-6
     num_persistent_tokens: int = 8
     persistent_init_std: float = 0.02
@@ -146,6 +149,8 @@ class OptimizerConfig:
     beta2: float = 0.95
     eps: float = 1e-8
     weight_decay: float = 0.1
+    gate_lr_multiplier: float = 1.0
+    gate_max_grad_norm: float | None = None
 
 
 @dataclass
@@ -269,7 +274,7 @@ class TrainingConfig:
             if self.training.trainable_parameters == "ttcd_only" and not self.model.fast_weight_layers:
                 raise ValueError("ttcd_only training requires fast-weight layers")
         elif isinstance(self.model, TaalModelConfig):
-            for name in ("memory_pre_rmsnorm", "memory_mlp_output_layernorm"):
+            for name in ("memory_pre_rmsnorm", "memory_mlp_output_layernorm", "memory_read_layernorm", "memory_norm_learned_scale", "memory_norm_residual"):
                 if type(getattr(self.model, name)) is not bool:
                     raise ValueError(f"{name} must be a boolean")
 
@@ -408,6 +413,17 @@ class TrainingConfig:
                             ("max_grad_norm", self.training.max_grad_norm)):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if not math.isfinite(self.optimizer.gate_lr_multiplier) or self.optimizer.gate_lr_multiplier <= 0:
+            raise ValueError("gate_lr_multiplier must be finite and positive")
+
+        gate_clip = self.optimizer.gate_max_grad_norm
+        if gate_clip is not None and (not math.isfinite(gate_clip) or gate_clip <= 0):
+            raise ValueError("gate_max_grad_norm must be finite and positive")
+
+        if isinstance(self.model, TaalModelConfig):
+            if (self.model.memory_norm_learned_scale or self.model.memory_norm_residual) and not self.model.memory_mlp_output_layernorm:
+                raise ValueError("Memory scale/residual requires normalized writes and reads")
+
         for value in (self.optimizer.beta1, self.optimizer.beta2):
             if not 0 <= value < 1:
                 raise ValueError("AdamW betas must be in [0, 1)")

@@ -26,14 +26,16 @@ class MemoryMLPResult:
 
 @dataclass
 class ChunkGradientResult:
-    chunk_gradients: dict[str, Float32[torch.Tensor, "B D D"]]
-    token_gradients: dict[str, Float32[torch.Tensor, "B C D D"]] | None = None
+    chunk_gradients: dict[str, Float32[torch.Tensor, "B ..."]]
+    token_gradients: dict[str, Float32[torch.Tensor, "B C ..."]] | None = None
 
 
 class MemoryMLP(nn.Module):
     """Same-width, bias-free MLP whose parameters form the fast memory state."""
 
-    def __init__(self, dim: int, depth: int, output_layernorm: bool = False, normalization_eps: float = 1e-6):
+    def __init__(self, dim: int, depth: int, output_layernorm: bool = False,
+                 normalization_eps: float = 1e-6, read_layernorm: bool = False,
+                 norm_learned_scale: bool = False, norm_residual: bool = False):
         super().__init__()
         self.layers = nn.ModuleList(
             nn.Linear(dim, dim, bias=False) for _ in range(depth)
@@ -43,11 +45,14 @@ class MemoryMLP(nn.Module):
         self.timing_observer = None
         self.output_layernorm = output_layernorm
         self.normalization_eps = normalization_eps
+        self.read_layernorm = read_layernorm
+        self.norm_residual = norm_residual
+        self.norm_gamma = nn.Parameter(torch.zeros(dim)) if norm_learned_scale else None
 
     def forward(
         self,
         keys: Float[torch.Tensor, "*B D"],
-        weights: dict[str, Float[torch.Tensor, "... D D"]] | None = None,
+        weights: dict[str, Float[torch.Tensor, "..."]] | None = None,
         return_intermediates: bool = False,
     ) -> MemoryMLPResult:
         """Evaluate M(keys) with current fast weights, or initial weights if omitted."""
@@ -91,8 +96,8 @@ class MemoryMLP(nn.Module):
 
         normalized_values = None
         inverse_std = None
-        if self.output_layernorm:
-            # Fixed-affine LN tests normalization without adding fast parameters or a residual.
+        if self.output_layernorm or (self.read_layernorm and not return_intermediates):
+            # Normalize the MLP result before the optional fast scale and input residual.
             normalized_values = F.layer_norm(
                 layer_keys, (self.dim,), eps=self.normalization_eps,
             )
@@ -101,6 +106,13 @@ class MemoryMLP(nn.Module):
                     layer_keys.var(dim=-1, unbiased=False, keepdim=True) + self.normalization_eps
                 ).rsqrt()
             layer_keys = normalized_values
+            if self.norm_gamma is not None:
+                gamma = self.norm_gamma if weights is None else weights["norm_gamma"]
+                if gamma.ndim == layer_keys.ndim - 1:
+                    gamma = gamma.unsqueeze(-2)
+                layer_keys = layer_keys * (1.0 + gamma)
+            if self.norm_residual:
+                layer_keys = keys + layer_keys
 
         return MemoryMLPResult(
             predicted_values=layer_keys,
@@ -126,7 +138,10 @@ class NeuralMemory(nn.Module):
         self.key_conv = CausalDepthwiseConv1d(dim, config.conv_kernel_size)
         self.value_conv = CausalDepthwiseConv1d(dim, config.conv_kernel_size)
         self.activation = nn.SiLU()
-        self.memory_mlp = MemoryMLP(dim, config.depth, config.mlp_output_layernorm, config.normalization_eps)
+        self.memory_mlp = MemoryMLP(
+            dim, config.depth, config.mlp_output_layernorm, config.normalization_eps,
+            config.read_layernorm, config.norm_learned_scale, config.norm_residual,
+        )
         self.forget_projection = nn.Linear(dim, 1)
         self.momentum_projection = nn.Linear(dim, 1)
         self.write_strength_projection = nn.Linear(dim, 1)
@@ -157,13 +172,13 @@ class NeuralMemory(nn.Module):
         # Keep ordinary tensors so this state can participate in later training,
         # even when initialized inside an enclosing inference_mode.
         with torch.inference_mode(False):
-            weights: dict[str, Float32[torch.Tensor, "B D D"]] = {
+            weights: dict[str, Float32[torch.Tensor, "B ..."]] = {
                 name: parameter.float().unsqueeze(0).expand(
                     batch_size, *parameter.shape
                 ).clone()
                 for name, parameter in self.memory_mlp.named_parameters()
             }
-            momentum: dict[str, Float32[torch.Tensor, "B D D"]] = {
+            momentum: dict[str, Float32[torch.Tensor, "B ..."]] = {
                 name: torch.zeros_like(parameter)
                 for name, parameter in weights.items()
             }
@@ -233,7 +248,7 @@ class NeuralMemory(nn.Module):
 
     def _chunk_gradient(
         self,
-        weights: dict[str, Float32[torch.Tensor, "B D D"]],
+        weights: dict[str, Float32[torch.Tensor, "B ..."]],
         keys: Float32[torch.Tensor, "B C D"],
         values: Float32[torch.Tensor, "B C D"],
         write_strength: Float32[torch.Tensor, "B C"],
@@ -281,19 +296,25 @@ class NeuralMemory(nn.Module):
                 timer("write_loss", perf_counter() - tic)
 
             tic = perf_counter() if timer is not None else 0.0
+            weight_gradients = {}
+            token_gradients = {}
             if self.config.mlp_output_layernorm:
                 assert result.normalized_values is not None
                 assert result.inverse_std is not None
                 # LN backward: dL/dz = r * (dL/dy - mean(dL/dy) - y * mean(y * dL/dy)).
                 # Means reduce D only; keeping this differentiable preserves outer training.
                 normalized_values = result.normalized_values
+                if self.memory_mlp.norm_gamma is not None:
+                    gamma_gradient = value_gradient * normalized_values
+                    weight_gradients["norm_gamma"] = gamma_gradient.sum(dim=1)
+                    if trace_tokens:
+                        token_gradients["norm_gamma"] = gamma_gradient
+                    value_gradient = value_gradient * (1.0 + weights["norm_gamma"].unsqueeze(1))
                 value_gradient = result.inverse_std * (
                     value_gradient
                     - value_gradient.mean(dim=-1, keepdim=True)
                     - normalized_values * (value_gradient * normalized_values).mean(dim=-1, keepdim=True)
                 )
-            weight_gradients: dict[str, Float32[torch.Tensor, "B D D"]] = {}
-            token_gradients: dict[str, Float32[torch.Tensor, "B C D D"]] = {}
             for layer_index in reversed(range(self.config.depth)):
                 name = f"layers.{layer_index}.weight"
                 layer_keys: Float32[torch.Tensor, "B C D"] = (
@@ -467,16 +488,14 @@ class NeuralMemory(nn.Module):
         # Titans Eq. (14): S_t = eta_t S_{t-1} - theta_t * grad ell.
         # momentum_retention = eta_t; chunk_gradient already includes theta_t
         # and our 1/D normalization, so do not multiply write_strength again.
-        next_momentum: dict[str, Float32[torch.Tensor, "B D D"]] = {
-            name: momentum_retention * state.momentum[name] - gradient
-            for name, gradient in chunk_gradient.items()
-        }
-        # Titans Eq. (13): M_t = (1 - alpha_t) M_{t-1} + S_t.
-        # state.weights = M_{t-1}; forget = alpha_t; next_momentum = S_t.
-        next_weights: dict[str, Float32[torch.Tensor, "B D D"]] = {
-            name: (1.0 - forget) * weight + next_momentum[name]
-            for name, weight in state.weights.items()
-        }
+        next_momentum = {}
+        next_weights = {}
+        for name, weight in state.weights.items():
+            control_shape = (B,) + (1,) * (weight.ndim - 1)
+            eta = momentum_retention.reshape(control_shape)
+            alpha = forget.reshape(control_shape)
+            next_momentum[name] = eta * state.momentum[name] - chunk_gradient[name]
+            next_weights[name] = (1.0 - alpha) * weight + next_momentum[name]
         if timer is not None:
             timer("momentum_and_weight_update", perf_counter() - tic)
         tic = perf_counter() if timer is not None else 0.0

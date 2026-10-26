@@ -12,7 +12,7 @@ from architectures.shared.qwen.cache import SlidingWindowKVCache
 from architectures.shared.qwen.masking import prepare_sliding_attention_mask
 from architectures.shared.qwen.model import StatefulQwen3Model
 from architectures.taal.layer import TaalLayer
-from architectures.titans.neural_memory import NeuralMemory
+from architectures.titans.neural_memory import MemoryMLP, NeuralMemory
 
 from .configuration import TaalQwen3Config
 from .decoder import TaalQwen3DecoderLayer
@@ -49,6 +49,8 @@ class TaalQwen3Model(StatefulQwen3Model):
                 mean=0.0,
                 std=module.config.persistent_init_std,
             )
+        if isinstance(module, MemoryMLP) and module.norm_gamma is not None:
+            module.norm_gamma.zero_()
         if isinstance(module, NeuralMemory):
             # Qwen initializes every child Linear during post_init; restore the
             # configured Titans control biases after that traversal.

@@ -18,6 +18,7 @@ from data.dataloader import create_dataloader
 from utils.seed import seed_everything
 from .config import TaalModelConfig, TrainingConfig, TTCDModelConfig, load_config
 from .engine import Progress, build_scheduler, train
+from .optimization import build_optimizer
 from .checkpoints import ModelCheckpoints
 from .stopping import reached_validation_target
 
@@ -167,11 +168,7 @@ def main():
     trainable_parameters = configure_trainable_parameters(
         model, config.training.trainable_parameters,
     )
-    optimizer = torch.optim.AdamW(
-        trainable_parameters, lr=config.optimizer.lr,
-        betas=(config.optimizer.beta1, config.optimizer.beta2),
-        eps=config.optimizer.eps, weight_decay=config.optimizer.weight_decay,
-    )
+    optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config)
     train_loader = create_dataloader(
         config.data, config.data.train, config.loss,
