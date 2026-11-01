@@ -19,8 +19,16 @@ class NeuralMemoryConfig:
     norm_learned_scale: bool = False
     norm_residual: bool = False
     normalization_eps: float = 1e-6
+    max_write_grad_norm: float | None = None
 
     def __post_init__(self):
+        if self.max_write_grad_norm is not None and (
+            type(self.max_write_grad_norm) not in (int, float)
+            or not math.isfinite(self.max_write_grad_norm) or self.max_write_grad_norm <= 0
+        ):
+            raise ValueError("max_write_grad_norm must be finite and positive")
+        if self.max_write_grad_norm is not None and self.chunk_size != 1:
+            raise ValueError("Write clipping currently requires chunk_size=1")
         for name in ("pre_rmsnorm", "mlp_output_layernorm", "read_layernorm", "norm_learned_scale", "norm_residual"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be a boolean")

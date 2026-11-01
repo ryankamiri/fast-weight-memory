@@ -26,6 +26,10 @@ def has_sequence_length(example, seq_len):
     return len(example["input_ids"]) == seq_len
 
 
+def fits_causal_sequence(example, seq_len):
+    return 2 <= len(example["input_ids"]) <= seq_len
+
+
 def fits_bridge_sequence(example, seq_len):
     return len(example["input_ids"]) + 1 <= seq_len
 
@@ -55,7 +59,18 @@ class CausalLMCollator:
             torch.tensor(example["input_ids"], dtype=torch.long)
             for example in examples
         ])
-        return {"input_ids": input_ids, "labels": input_ids.clone()}
+        label_rows = []
+        for example in examples:
+            values = example.get("labels")
+            if values is None:
+                values = example["input_ids"]
+            label_rows.append(torch.tensor(values, dtype=torch.long))
+        labels = torch.stack(label_rows)
+        if labels.shape != input_ids.shape or not (labels[:, 1:] != -100).any():
+            raise ValueError("Causal-LM labels must match input shape and supervise a next token")
+        if not ((labels == -100) | (labels == input_ids)).all():
+            raise ValueError("Causal-LM labels must equal the input tokens or the ignore index")
+        return {"input_ids": input_ids, "labels": labels}
 
 
 class BridgeMemoryCollator:
@@ -186,8 +201,6 @@ def create_dataloader(
     if filters and not local_dataset:
         load_options["filters"] = filters
     if local_dataset:
-        if not isinstance(config, BridgeMemoryDataConfig):
-            raise ValueError("Local JSONL is supported only for bridge-memory records")
         dataset = load_dataset(
             "json", data_files={"train": config.dataset_id},
             split="train", streaming=True,
@@ -204,8 +217,10 @@ def create_dataloader(
             in_record_range, index_field=index_field, start=start, end=end,
         ))
     if isinstance(config, CausalLMDataConfig):
-        dataset = dataset.filter(partial(has_sequence_length, seq_len=seq_len))
-        dataset = dataset.select_columns(["input_ids"])
+        predicate = fits_causal_sequence if config.variable_length else has_sequence_length
+        dataset = dataset.filter(partial(predicate, seq_len=seq_len))
+        if not local_dataset:
+            dataset = dataset.select_columns(["input_ids"])
         collator = CausalLMCollator()
     else:
         dataset = dataset.filter(partial(fits_bridge_sequence, seq_len=seq_len))
@@ -226,7 +241,7 @@ def create_dataloader(
             delayed_answer_weight=loss.delayed_answer_weight,
             query_fresh_writes_enabled=config.query_fresh_writes_enabled,
         )
-    if shuffle:
+    if shuffle and not (isinstance(config, CausalLMDataConfig) and config.preserve_order):
         dataset = dataset.shuffle(seed=seed, buffer_size=config.shuffle_buffer_size)
     return DataLoader(
         dataset,

@@ -362,13 +362,13 @@ def summarize(rows, conditions=AUDIT_CONDITIONS):
     return summary
 
 
-def load_model(checkpoint: Path) -> TaalQwen3ForCausalLM:
+def load_model(checkpoint: Path, dtype: torch.dtype = torch.bfloat16) -> TaalQwen3ForCausalLM:
     source = str(checkpoint.resolve())
     config = TaalQwen3Config.from_pretrained(source)
     model, loading = TaalQwen3ForCausalLM.from_pretrained(
         source,
         config=config,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         attn_implementation="sdpa",
         output_loading_info=True,
     )
@@ -524,7 +524,13 @@ def main():
         metadata["tokenizer"],
         revision=metadata["tokenizer_revision"],
     )
-    model = load_model(args.checkpoint).to(device).eval()
+    parameter_dtype = settings.get('parameter_dtype', 'bfloat16')
+    if parameter_dtype not in ('float32', 'bfloat16'):
+        raise ValueError('parameter_dtype must be float32 or bfloat16')
+    if parameter_dtype == 'float32':
+        model = load_model(args.checkpoint, dtype=torch.float32).to(device).eval()
+    else:
+        model = load_model(args.checkpoint).to(device).eval()
     if settings.get("audit_suite") == "layer_access":
         configured_layers = sorted(index for group in settings["layer_groups"].values() for index in group)
         if configured_layers != list(range(len(model.model.layers))):

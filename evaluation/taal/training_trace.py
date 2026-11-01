@@ -13,10 +13,21 @@ from evaluation.taal.trace_export import (
     TaalTraceExporter, TaalTraceRecorder, make_trace_tokens, trace_greedy_prediction,
 )
 from training.engine import precision_context
+from training.config import CausalLMDataConfig
+from evaluation.taal.cpt_trace import export_documents
 
 
 @torch.inference_mode()
 def export_training_traces(model, config, checkpoint_directory: Path, progress) -> None:
+    if isinstance(config.data, CausalLMDataConfig):
+        bounds = config.data.val
+        rows = [json.loads(line) for line in Path(config.data.dataset_id).read_text().splitlines()]
+        rows = [row for row in rows if row['source_record_index'] >= bounds.start
+                and (bounds.end is None or row['source_record_index'] < bounds.end)]
+        tokenizer = AutoTokenizer.from_pretrained(config.model.model_id, revision=config.model.revision)
+        export_documents(model, tokenizer, rows, checkpoint_directory / 'final',
+                         checkpoint_directory / 'native_documents', scales=(1.0,), max_new_tokens=1)
+        return
     bounds = config.data.val
     dataset = [json.loads(line) for line in Path(config.data.dataset_id).read_text().splitlines()]
     examples = select_examples(dataset, {

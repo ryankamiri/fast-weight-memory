@@ -30,6 +30,27 @@ class ChunkGradientResult:
     token_gradients: dict[str, Float32[torch.Tensor, "B C ..."]] | None = None
 
 
+def clip_write_gradient(result: ChunkGradientResult, maximum: float) -> ChunkGradientResult:
+    """Bound the fresh Titans write per session; retain its outer training graph."""
+    squared_norms = []
+    for gradient in result.chunk_gradients.values():
+        squared_norms.append(gradient.double().flatten(1).square().sum(1))
+    # Clamp before sqrt so zero writes have a finite backward derivative.
+    norm: Float[torch.Tensor, "B"] = torch.stack(squared_norms).sum(0).clamp_min(1e-60).sqrt()
+    scale: Float[torch.Tensor, "B"] = (maximum / norm).clamp(max=1).float()
+    gradients = {}
+    for name, gradient in result.chunk_gradients.items():
+        shape = (gradient.shape[0],) + (1,) * (gradient.ndim - 1)
+        gradients[name] = gradient * scale.reshape(shape)
+    token_gradients = None
+    if result.token_gradients is not None:
+        token_gradients = {}
+        for name, gradient in result.token_gradients.items():
+            shape = (gradient.shape[0],) + (1,) * (gradient.ndim - 1)
+            token_gradients[name] = gradient * scale.reshape(shape)
+    return ChunkGradientResult(gradients, token_gradients)
+
+
 class MemoryMLP(nn.Module):
     """Same-width, bias-free MLP whose parameters form the fast memory state."""
 
@@ -417,6 +438,8 @@ class NeuralMemory(nn.Module):
             write_strength,
             trace_tokens=self.trace_observer is not None,
         )
+        if self.config.max_write_grad_norm is not None:
+            gradient_result = clip_write_gradient(gradient_result, self.config.max_write_grad_norm)
         chunk_gradient = gradient_result.chunk_gradients
         token_gradients = gradient_result.token_gradients
         if timer is not None:

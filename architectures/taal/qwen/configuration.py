@@ -26,6 +26,7 @@ class TaalQwen3Config(Qwen3Config):
         memory_norm_learned_scale: bool = False,
         memory_norm_residual: bool = False,
         memory_normalization_eps: float = 1e-6,
+        memory_max_write_grad_norm: float | None = None,
         num_persistent_tokens: int = 8,
         persistent_init_std: float = 0.02,
         **kwargs,
@@ -56,6 +57,7 @@ class TaalQwen3Config(Qwen3Config):
             norm_learned_scale=memory_norm_learned_scale,
             norm_residual=memory_norm_residual,
             normalization_eps=memory_normalization_eps,
+            max_write_grad_norm=memory_max_write_grad_norm,
         )
         taal = TaalLayerConfig(
             model_dim=self.hidden_size,
@@ -81,6 +83,7 @@ class TaalQwen3Config(Qwen3Config):
         self.memory_norm_learned_scale = memory.norm_learned_scale
         self.memory_norm_residual = memory.norm_residual
         self.memory_normalization_eps = memory.normalization_eps
+        self.memory_max_write_grad_norm = memory.max_write_grad_norm
         self.num_persistent_tokens = taal.num_persistent_tokens
         self.persistent_init_std = taal.persistent_init_std
 
@@ -101,6 +104,7 @@ class TaalQwen3Config(Qwen3Config):
                 norm_learned_scale=self.memory_norm_learned_scale,
                 norm_residual=self.memory_norm_residual,
                 normalization_eps=self.memory_normalization_eps,
+                max_write_grad_norm=self.memory_max_write_grad_norm,
             ),
             num_persistent_tokens=self.num_persistent_tokens,
             persistent_init_std=self.persistent_init_std,

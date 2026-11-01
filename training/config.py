@@ -69,6 +69,7 @@ class TaalModelConfig(ModelConfig):
     memory_norm_learned_scale: bool = False
     memory_norm_residual: bool = False
     memory_normalization_eps: float = 1e-6
+    memory_max_write_grad_norm: float | None = None
     num_persistent_tokens: int = 8
     persistent_init_std: float = 0.02
 
@@ -95,6 +96,8 @@ class DataConfig(ABC):
 
 @dataclass
 class CausalLMDataConfig(DataConfig):
+    variable_length: bool = False
+    preserve_order: bool = False
     train: RecordRange = field(default_factory=lambda: RecordRange(64))
     val: RecordRange = field(default_factory=lambda: RecordRange(0, 64))
 
@@ -251,12 +254,22 @@ class TrainingConfig:
             raise ValueError("Early stopping requires a positive finite loss and val/ accuracy metric")
         if self.training.save_traces and (
             not isinstance(self.model, TaalModelConfig)
-            or not isinstance(self.data, BridgeMemoryDataConfig)
             or not self.data.dataset_id.endswith(".jsonl")
         ):
-            raise ValueError("Training traces currently require local TaaL bridge-memory data")
+            raise ValueError("Training traces currently require local TaaL data")
         if self.training.save_traces and not self.checkpoints.save_final:
             raise ValueError("Training traces require a final checkpoint")
+        if isinstance(self.data, CausalLMDataConfig):
+            if type(self.data.variable_length) is not bool or type(self.data.preserve_order) is not bool:
+                raise ValueError("Causal-LM data flags must be boolean")
+            if self.data.variable_length and self.data.batch_size != 1:
+                raise ValueError("Variable-length records require batch_size=1")
+        if isinstance(self.model, TaalModelConfig):
+            cap = self.model.memory_max_write_grad_norm
+            if cap is not None and (type(cap) not in (int, float) or not math.isfinite(cap) or cap <= 0):
+                raise ValueError("memory_max_write_grad_norm must be finite and positive")
+            if cap is not None and self.model.memory_chunk_size != 1:
+                raise ValueError("Write clipping requires memory_chunk_size=1")
         if isinstance(self.data, CausalLMDataConfig) != isinstance(self.loss, CausalLMLossConfig):
             raise ValueError("Causal-LM data requires a causal-LM loss config")
         if isinstance(self.data, BridgeMemoryDataConfig) != isinstance(self.loss, BridgeMemoryLossConfig):
