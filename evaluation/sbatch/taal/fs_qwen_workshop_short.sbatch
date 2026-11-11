@@ -20,22 +20,23 @@ export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=4
 export HF_HOME=/projects/llpr/amiri.ry/huggingface
 export TRANSFORMERS_CACHE="${HF_HOME}/transformers" HF_DATASETS_CACHE="${HF_HOME}/datasets"
 export http_proxy=http://10.99.0.130:3128 https_proxy=http://10.99.0.130:3128
-if (( $# < 2 )) || [[ "$(git rev-parse HEAD)" != "$2" ]]; then
-    echo "Usage: sbatch $0 baseline EXPECTED_COMMIT | matched EXPECTED_COMMIT NARROW_RUN DIVERSE_RUN" >&2
+if (( $# < 1 )); then
+    echo "Usage: sbatch $0 baseline | matched NARROW_RUN DIVERSE_RUN" >&2
     exit 2
 fi
 if [[ "$PWD" != /projects/llpr/amiri.ry/dev/fast-weight-memory ]] || [[ "$(git branch --show-current)" != titans-impl ]]; then
     echo "Expected canonical attached titans-impl checkout" >&2
     exit 2
 fi
-echo "WORKSHOP_AUDIT_SOURCE commit=$2 mode=$1"
+# Record the code actually executed; queue-time revisions must not block compatible pulls.
+echo "WORKSHOP_AUDIT_SOURCE commit=$(git rev-parse HEAD) mode=$1"
 output="output/taal/workshop-$1-${SLURM_JOB_ID}"
-if [[ "$1" == baseline ]] && (( $# == 2 )); then
+if [[ "$1" == baseline ]] && (( $# == 1 )); then
     exec python -m scripts.taal_workshop baseline --output-dir "$output"
-elif [[ "$1" == matched ]] && (( $# == 4 )); then
+elif [[ "$1" == matched ]] && (( $# == 3 )); then
     # afterany dependencies allow valid saved checkpoints after graceful timeout.
     # The runner refuses missing or unequal-step snapshots; skipped updates remain logged.
-    exec python -m scripts.taal_workshop matched --narrow-run "$3" --diverse-run "$4" --output-dir "$output"
+    exec python -m scripts.taal_workshop matched --narrow-run "$2" --diverse-run "$3" --output-dir "$output"
 else
     echo "Invalid workshop audit arguments" >&2
     exit 2

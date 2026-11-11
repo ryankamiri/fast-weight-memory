@@ -22,8 +22,8 @@ export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=4
 export HF_HOME=/projects/llpr/amiri.ry/huggingface
 export TRANSFORMERS_CACHE="${HF_HOME}/transformers" HF_DATASETS_CACHE="${HF_HOME}/datasets"
 export http_proxy=http://10.99.0.130:3128 https_proxy=http://10.99.0.130:3128
-if (( $# != 2 )) || [[ ! "$1" =~ ^(narrow|diverse)$ ]] || [[ "$(git rev-parse HEAD)" != "$2" ]]; then
-    echo "Usage: sbatch $0 narrow|diverse EXPECTED_COMMIT" >&2
+if (( $# != 1 )) || [[ ! "$1" =~ ^(narrow|diverse)$ ]]; then
+    echo "Usage: sbatch $0 narrow|diverse" >&2
     exit 2
 fi
 if [[ "$PWD" != /projects/llpr/amiri.ry/dev/fast-weight-memory ]] || [[ "$(git branch --show-current)" != titans-impl ]]; then
@@ -31,7 +31,8 @@ if [[ "$PWD" != /projects/llpr/amiri.ry/dev/fast-weight-memory ]] || [[ "$(git b
     exit 2
 fi
 export CHECKPOINT_RUN_ID="taal-workshop-$1-${SLURM_JOB_ID}"
-echo "WORKSHOP_TRAIN_SOURCE commit=$2 arm=$1 run=$CHECKPOINT_RUN_ID"
+# Record the code actually executed; queue-time revisions must not block compatible pulls.
+echo "WORKSHOP_TRAIN_SOURCE commit=$(git rev-parse HEAD) arm=$1 run=$CHECKPOINT_RUN_ID"
 # This model/update is discarded. Training reloads the exact D449 parent.
 python -m scripts.taal_workshop preflight --arm "$1"
 exec python -m training.train --config "training/configs/taal/workshop_$1.yaml"
