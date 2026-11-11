@@ -2,6 +2,7 @@ import argparse
 import math
 from dataclasses import asdict
 import os
+from pathlib import Path
 import signal
 from threading import Event
 
@@ -71,6 +72,8 @@ def verify_loading(model, loading_info):
 
 def load_model(config: TrainingConfig):
     settings = config.model
+    if config.training.initialize_from_checkpoint is not None:
+        return load_initial_checkpoint(config)
     base = Qwen3Config.from_pretrained(settings.model_id, revision=settings.revision)
     overrides = asdict(settings)
     for name in ("model_id", "revision"):
@@ -91,6 +94,38 @@ def load_model(config: TrainingConfig):
     verify_loading(model, loading_info)
     if config.training.gradient_checkpointing:
         model.gradient_checkpointing_enable({"use_reentrant": False})
+    return model
+
+
+def load_initial_checkpoint(config: TrainingConfig):
+    """Warm-start learned weights, with a fresh optimizer and no gate reset.
+
+    Only the explicitly configured fresh-write clipping threshold may differ
+    from the saved memory architecture. This prevents accidentally changing
+    the KV window, memory cadence or normalization while continuing training.
+    """
+    source = Path(config.training.initialize_from_checkpoint)
+    if not source.is_dir():
+        raise FileNotFoundError(source)
+    saved = TaalQwen3Config.from_pretrained(source, local_files_only=True)
+    for name, value in asdict(config.model).items():
+        if name in ("model_id", "revision", "memory_max_write_grad_norm"):
+            continue
+        if getattr(saved, name) != value:
+            raise ValueError(f"Checkpoint initialization changes {name}: {getattr(saved, name)!r} -> {value!r}")
+    saved.memory_max_write_grad_norm = config.model.memory_max_write_grad_norm
+    model, loading = TaalQwen3ForCausalLM.from_pretrained(
+        source, config=saved, dtype=torch.float32, attn_implementation="sdpa",
+        output_loading_info=True, local_files_only=True,
+    )
+    errors = {name: loading.get(name) for name in (
+        "missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs",
+    ) if loading.get(name)}
+    if errors:
+        raise ValueError(f"Initial checkpoint did not load exactly: {errors}")
+    if config.training.gradient_checkpointing:
+        model.gradient_checkpointing_enable({"use_reentrant": False})
+    print(f"Initialized learned weights from {source}; optimizer/scheduler start fresh; gates preserved.", flush=True)
     return model
 
 

@@ -1,0 +1,486 @@
+{
+  "documents": {
+    "dev": [
+      {
+        "document_index": 0,
+        "document_sha256": "355a674cec218a06443ce7097812882b7c59839555f34d42e806d9c13a73b7e4",
+        "source": "book-65536",
+        "source_record": 56
+      },
+      {
+        "document_index": 76,
+        "document_sha256": "3a2b49944de1c508d6a4cdcd70e3b97cedb4e623081bd645a7f5c4b628111e07",
+        "source": "fineweb-edu",
+        "source_record": 4
+      },
+      {
+        "document_index": 45,
+        "document_sha256": "30b9ec6b820e655b4ff6ec980ec00e9cb24f53ed22387121eb681c8502da8e25",
+        "source": "dolmawiki",
+        "source_record": 2
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "3c4a8213ca4f47fc72fa67b87a812cb818cdc57ab4a1f267f66e51fbf01f0e4d",
+        "source": "book-65536",
+        "source_record": 2
+      },
+      {
+        "document_index": 50,
+        "document_sha256": "45421615ebc1790f5690fa5ffb0e65a1fb94deae31b5c630ff678578a150ef7d",
+        "source": "fineweb-edu",
+        "source_record": 0
+      },
+      {
+        "document_index": 12,
+        "document_sha256": "328d5b3c44a99cd2dfd0c05fc58639d0c38f0c201c89796100bbc4914c64f00e",
+        "source": "dolmawiki",
+        "source_record": 2
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "3cdc16a5a192ddc8813d8adc6178c37758d0109e920f87337b12df99fcb47d28",
+        "source": "book-65536",
+        "source_record": 6
+      },
+      {
+        "document_index": 13,
+        "document_sha256": "4857d757a7003a005503431bb84fbc06512e4256933180dd9ed9713613dbd1e3",
+        "source": "fineweb-edu",
+        "source_record": 2
+      },
+      {
+        "document_index": 1,
+        "document_sha256": "3662308a544374fb32d09c0346dad2cceacb0f2e867af64d3dbb5b17bc3c8c44",
+        "source": "dolmawiki",
+        "source_record": 2
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "3d75cf6edc8e9877a4c562d04c13548cee8d51de2a5cf9a012acefd2565af2c5",
+        "source": "book-65536",
+        "source_record": 5
+      },
+      {
+        "document_index": 39,
+        "document_sha256": "4ae75a12a1412c4fbab3041ad0da52d700d7075de9a3f6b642f4bac03cda33b7",
+        "source": "fineweb-edu",
+        "source_record": 2
+      },
+      {
+        "document_index": 8,
+        "document_sha256": "38ec090d1c6cb938e5a8128042ce6abe552ab4d7111140a696a14c704c4a1795",
+        "source": "dolmawiki",
+        "source_record": 1
+      }
+    ],
+    "test": [
+      {
+        "document_index": 0,
+        "document_sha256": "3e574a4e34c84b67fbb6251e12257c93a45dfd4aa132f629ae70b79f6cd79bcb",
+        "source": "book-65536",
+        "source_record": 95
+      },
+      {
+        "document_index": 41,
+        "document_sha256": "4cd4a04699fa86778e8cb9142792728f5508c9de98d777be5ac7e2e4ed21579b",
+        "source": "fineweb-edu",
+        "source_record": 0
+      },
+      {
+        "document_index": 44,
+        "document_sha256": "3dc24e04994e1149ae67034f84608c6089da5e90535c901c8c0d25a146eac0af",
+        "source": "dolmawiki",
+        "source_record": 1
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "3e6622c91d36789f22a4f1f2884b544c7904bf42a7b52c85e9b498c46b815106",
+        "source": "book-65536",
+        "source_record": 35
+      },
+      {
+        "document_index": 3,
+        "document_sha256": "4f2d92f8992253e2ae1398545fbb1a403702d2adeb7e7f54e7eaa3dacfbd72fd",
+        "source": "fineweb-edu",
+        "source_record": 5
+      },
+      {
+        "document_index": 32,
+        "document_sha256": "3de3b315cdd6e1cba08c51a47e8c0a36e8a0fc62fc9e036dd17197046a39add6",
+        "source": "dolmawiki",
+        "source_record": 6
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "3e9132953b24df10c40af200e1c1a01f8071ad403f7c2b2a0bd474ec2805a4de",
+        "source": "book-65536",
+        "source_record": 8
+      },
+      {
+        "document_index": 32,
+        "document_sha256": "505b126f8bdfe88a89c580c227a89a0e5c6d44ebfa7979995b0b6052b465679c",
+        "source": "fineweb-edu",
+        "source_record": 2
+      },
+      {
+        "document_index": 110,
+        "document_sha256": "3e2966e5b3a77cd7e29e7787230d157ea458c4aab157f308ec37906e0bd509d0",
+        "source": "dolmawiki",
+        "source_record": 3
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "3fb62f8a50ad62b9cd0bdf8db38b553de8d14b8de64660307c2919b7799d7e1c",
+        "source": "book-65536",
+        "source_record": 87
+      },
+      {
+        "document_index": 17,
+        "document_sha256": "506881d5082573377ddfa46872ded9e715ef62f75d4306aede1a0b0a6f58923e",
+        "source": "fineweb-edu",
+        "source_record": 1
+      },
+      {
+        "document_index": 55,
+        "document_sha256": "3e78e2606cdeac98d2bac0b6a58791d81eb62ef1de7dee5cc6e02d237980ac36",
+        "source": "dolmawiki",
+        "source_record": 2
+      }
+    ],
+    "train": [
+      {
+        "document_index": 0,
+        "document_sha256": "01dc4a4d5cf9e3066740fb8ee3b2db02e3808addf8abaf5827acf6cfc47905c6",
+        "source": "book-65536",
+        "source_record": 72
+      },
+      {
+        "document_index": 65,
+        "document_sha256": "02c355cb5353b713da649a568033ddbebb4465e43b8fa965d6e35811034d346d",
+        "source": "fineweb-edu",
+        "source_record": 4
+      },
+      {
+        "document_index": 71,
+        "document_sha256": "017c089b628084538efe25ed9d553c28363d05b4a87dedf823e55d4804fc49fc",
+        "source": "dolmawiki",
+        "source_record": 2
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "02e8b5d8ec1c3b6604562fe074aff33e7f43b7cca0a1e5954295ac0ad4c3b3a2",
+        "source": "book-65536",
+        "source_record": 82
+      },
+      {
+        "document_index": 46,
+        "document_sha256": "0893e148e70a2e8969ce0b1cde86a893339b1b141f44be9c537484842491bdda",
+        "source": "fineweb-edu",
+        "source_record": 2
+      },
+      {
+        "document_index": 51,
+        "document_sha256": "02008b5ae858eee36c34cf01d1172bf3d510b286524153fb25bca4c3f8f85bb3",
+        "source": "dolmawiki",
+        "source_record": 2
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "06222586ac26e73bdd373413119e2db242c57d0023c16449ec9c9b6883af7a7e",
+        "source": "book-65536",
+        "source_record": 70
+      },
+      {
+        "document_index": 65,
+        "document_sha256": "096d2a7007955e77904e8a8173854ead145a97e05b728eb957be330056660cf8",
+        "source": "fineweb-edu",
+        "source_record": 1
+      },
+      {
+        "document_index": 19,
+        "document_sha256": "04e5ee3f7c0ff2fbebb0b30c48d8a0dd6e50a948f267983303bb5a166c0df84d",
+        "source": "dolmawiki",
+        "source_record": 4
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "09a31ed7252d0d3d41eea5bf5b29f3b67d9926afd48df805d0f8932c4ff56c15",
+        "source": "book-65536",
+        "source_record": 64
+      },
+      {
+        "document_index": 48,
+        "document_sha256": "0cbd1b817bcce526360bd43edaf79d7ddbbdf59138b09f0766b0009a3444d664",
+        "source": "fineweb-edu",
+        "source_record": 3
+      },
+      {
+        "document_index": 34,
+        "document_sha256": "0611d3d91b884d019cad99c4b4d549d93d63989fce361f421be160e5980da8aa",
+        "source": "dolmawiki",
+        "source_record": 1
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "0a7e868cff8f65db595582e64db731895ae9c042ee2eea29110dedf115e96164",
+        "source": "book-65536",
+        "source_record": 3
+      },
+      {
+        "document_index": 50,
+        "document_sha256": "121aee137dc5b2f14b847550a5b34ea55996768b3879af78bdfd48e58bf010c5",
+        "source": "fineweb-edu",
+        "source_record": 4
+      },
+      {
+        "document_index": 4,
+        "document_sha256": "08989fafa8ae03448fefc59c629d49704cac5317a01bcbdf070bbc5a8bc2caaf",
+        "source": "dolmawiki",
+        "source_record": 6
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "0b85fbd53b38d0b4b4d00902ddb95449a3619a3067a5af6a2c1ff9303b6aed36",
+        "source": "book-65536",
+        "source_record": 85
+      },
+      {
+        "document_index": 43,
+        "document_sha256": "188e9ae2984dffda9060c90f2374d004a492db814da0006a850c6f98a435d88c",
+        "source": "fineweb-edu",
+        "source_record": 2
+      },
+      {
+        "document_index": 34,
+        "document_sha256": "0cf0014f7dd994809c6d0427faf3ee93837b52084d4b9da0d1131d09d72ec1bc",
+        "source": "dolmawiki",
+        "source_record": 4
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "113e49b20e617efccb1fdd7d49b5fe977c6a4cc743627955bccdc26bca677a3f",
+        "source": "book-65536",
+        "source_record": 73
+      },
+      {
+        "document_index": 3,
+        "document_sha256": "19821d15c8065ef7486a132f17ba2a73036879e924dd87b2d6a5545571086b60",
+        "source": "fineweb-edu",
+        "source_record": 3
+      },
+      {
+        "document_index": 1,
+        "document_sha256": "0db982e9943eec7f66ec89315153f36efe7baf6da4917a0d30c4accb5072be85",
+        "source": "dolmawiki",
+        "source_record": 4
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "1705dee5adf899c111a90a98bf54c4a85206a3dd132bf1bd5ffc05685a98411f",
+        "source": "book-65536",
+        "source_record": 14
+      },
+      {
+        "document_index": 13,
+        "document_sha256": "19e13abb194ce1dfba25c89d9210eb805576354a9e0af8f7e7cfb24cf4fff123",
+        "source": "fineweb-edu",
+        "source_record": 3
+      },
+      {
+        "document_index": 114,
+        "document_sha256": "150f8145cb1ee0bc313a0a2cd8d781f5f3ba5e57d6214c0ac40cf79bac53a983",
+        "source": "dolmawiki",
+        "source_record": 0
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "1e4df59ac905f0f51467a67b0fc649e487a380b1cb2bdc38e62026af1a352bfe",
+        "source": "book-65536",
+        "source_record": 66
+      },
+      {
+        "document_index": 47,
+        "document_sha256": "1f4c4ead1ab1f07fe67873a96c832f38c807cca46d056ad06c237d6031a136e0",
+        "source": "fineweb-edu",
+        "source_record": 2
+      },
+      {
+        "document_index": 21,
+        "document_sha256": "19219297e3ebd50a5123c52651b4bec02bf12e489670cfa0d5b0b5d0b7a9a9ee",
+        "source": "dolmawiki",
+        "source_record": 2
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "22149db02435555e4fe13480c0251fd80f4f002b10e156f794ececa6e6e2945a",
+        "source": "book-65536",
+        "source_record": 79
+      },
+      {
+        "document_index": 13,
+        "document_sha256": "21d4248dab9a9a3dc502743d363064bfea4004f3af31253248b93277d5f22204",
+        "source": "fineweb-edu",
+        "source_record": 0
+      },
+      {
+        "document_index": 27,
+        "document_sha256": "1bcd53f74f13859e7e2f789b1686b8675d8272cbfd4cc3d151feba8fd8073ef5",
+        "source": "dolmawiki",
+        "source_record": 6
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "25b63f212ca47c26eb0fd55a5a0e6a61c600baa7a85a406ab92534f792bd355e",
+        "source": "book-65536",
+        "source_record": 59
+      },
+      {
+        "document_index": 68,
+        "document_sha256": "21e215693e80a55a2c1d02226a2142e5caf77197a9e4549ceefd9c3cfdcb0ce0",
+        "source": "fineweb-edu",
+        "source_record": 4
+      },
+      {
+        "document_index": 37,
+        "document_sha256": "231d821affcb7d5127888c95633108744c1c931741dd3f51fe7aff2ea5c0846b",
+        "source": "dolmawiki",
+        "source_record": 0
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "28b17894ee29ec804d8a46bc70be7f16158f079ca8c56269e7fe80f9131ee9bf",
+        "source": "book-65536",
+        "source_record": 37
+      },
+      {
+        "document_index": 36,
+        "document_sha256": "291b3510400c1ca4a4e4a4976bf8e26f7bb35384a98b96ac65e9f6e27c2635d9",
+        "source": "fineweb-edu",
+        "source_record": 5
+      },
+      {
+        "document_index": 65,
+        "document_sha256": "25eca7968b1792a90b7a3b0b644194e629a6bacda8a848ed2154b85f80aa2488",
+        "source": "dolmawiki",
+        "source_record": 1
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "2ba161b56bc0d100e026ff489d9ba2d8407fcb4e59d39a0cbeeb87d8ba95fd52",
+        "source": "book-65536",
+        "source_record": 52
+      },
+      {
+        "document_index": 55,
+        "document_sha256": "2e95d7ec63208ed63a2e18f6c5633465f0f4654e9c929e0ca2e0403cdf5c2059",
+        "source": "fineweb-edu",
+        "source_record": 0
+      },
+      {
+        "document_index": 27,
+        "document_sha256": "2710a3fd9396d219347c17a4130917cf1b47d4f785362995fa283f877182c64c",
+        "source": "dolmawiki",
+        "source_record": 4
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "2f12cd217d039f80214c0b4e4c769c4a9e516dacffbee2063b26e14e9e67de83",
+        "source": "book-65536",
+        "source_record": 44
+      },
+      {
+        "document_index": 5,
+        "document_sha256": "2f1c63344edbb376b0a18058ba3b02c9ab689237340083443394d61ec8ee033b",
+        "source": "fineweb-edu",
+        "source_record": 3
+      },
+      {
+        "document_index": 37,
+        "document_sha256": "2776a8f57f5232e18b188b7065b26dfe5c29d546b2b8d422ab5f265858325b65",
+        "source": "dolmawiki",
+        "source_record": 1
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "30c03f18f640ae569010a42369702957a124cbfc23afa5a2bf759b883176d90f",
+        "source": "book-65536",
+        "source_record": 28
+      },
+      {
+        "document_index": 61,
+        "document_sha256": "3658c5acb3169a5ffa9a6a2584ab8c0fce9c430ebf3e96d17d2abca9e21f0e7c",
+        "source": "fineweb-edu",
+        "source_record": 1
+      },
+      {
+        "document_index": 112,
+        "document_sha256": "2a08f3b9eb393b9817b27e9a37507c24ad1c399d4c6fd8580373e0d6cff85b6c",
+        "source": "dolmawiki",
+        "source_record": 3
+      },
+      {
+        "document_index": 0,
+        "document_sha256": "32bd13b57d92094585cf8e54cc655d313510980b0d8b76c3f2098eb43221cb78",
+        "source": "book-65536",
+        "source_record": 75
+      },
+      {
+        "document_index": 25,
+        "document_sha256": "36e99f3b9809b9589a68e61d5bb24ad8fea7fbd9f79c3172d2423299af14f57a",
+        "source": "fineweb-edu",
+        "source_record": 2
+      },
+      {
+        "document_index": 136,
+        "document_sha256": "2b168e8898e9ed3e9bb0d758f61b631fc8e7adda7efa0f809b2aad4b39b1a191",
+        "source": "dolmawiki",
+        "source_record": 5
+      }
+    ]
+  },
+  "evaluation_cells": {
+    "combined": 8,
+    "distance": 8,
+    "filler": 8,
+    "position": 8,
+    "reference": 16,
+    "selection": 16
+  },
+  "files": {
+    "diverse.jsonl": "39bce12d1f078ed4536d3b8f88f4eedc4784235d19b45e4dabec29451bb60002",
+    "evaluation.jsonl": "67d0fcaaf1c3ef9aa7c172832866952fe73c376a3b0b7454b88d86c607bd46c5",
+    "narrow.jsonl": "018eb6158e6247982c23699c8bbde23e198db816641d99e19721ead26eec8a66"
+  },
+  "limits": "One parent checkpoint, familiar labels/queries, small context-transfer pilot. Exact source-document isolation, not guaranteed book-level isolation. Reference cases are deliberate regression controls.",
+  "parent_checkpoint": "checkpoints/taal-capacity-d-distance-diversity-11021676/final",
+  "parent_checkpoint_sha256": "285dab0ad8f638d95caefb283aeb67598ca959105974e57453a8e925a4359100",
+  "parent_dataset_sha256": "685041cd94587585da055371c0460576637f0d23f4169b6b53dcfcf4071e4d93",
+  "schema": "taal-workshop-pilot/v1",
+  "source_repo": "princeton-nlp/prolong-data-64K",
+  "source_revision": "1447128c751f0fbc7d2082b2a113a938426a9bba",
+  "splits": {
+    "diverse": {
+      "dev": [
+        128,
+        144
+      ],
+      "train": [
+        0,
+        128
+      ]
+    },
+    "narrow": {
+      "dev": [
+        128,
+        144
+      ],
+      "train": [
+        0,
+        128
+      ]
+    }
+  },
+  "tokenizer": "Qwen/Qwen3-0.6B-Base",
+  "tokenizer_revision": "da87bfb608c14b7cf20ba1ce41287e8de496c0cd"
+}

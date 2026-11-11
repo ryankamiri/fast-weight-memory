@@ -1,0 +1,78 @@
+checkpoints:
+  output_dir: checkpoints
+  save_best: true
+  save_final: true
+  selection_metric: val/loss
+  selection_mode: min
+  save_steps:
+  - 100
+  - 200
+data:
+  allow_train_val_overlap: false
+  batch_size: 1
+  dataset_config: local-jsonl
+  dataset_id: data/taal_workshop/diverse.jsonl
+  num_workers: 0
+  record_format: bridge_memory
+  seq_len: 448
+  shuffle_buffer_size: 128
+  train:
+    split: train
+    start: 0
+    end: 128
+  val:
+    split: train
+    start: 128
+    end: 144
+loss:
+  all_tokens_weight: 0.0
+  delayed_answer_weight: 1.0
+model:
+  architecture: taal
+  max_persistent_kv_tokens: 0
+  memory_chunk_size: 1
+  memory_conv_kernel_size: 4
+  memory_depth: 2
+  memory_dim: 128
+  memory_initial_forget: 0.01
+  memory_initial_momentum: 0.9
+  memory_initial_write_strength: 0.1
+  model_id: Qwen/Qwen3-0.6B-Base
+  num_persistent_tokens: 8
+  persistent_init_std: 0.02
+  revision: da87bfb608c14b7cf20ba1ce41287e8de496c0cd
+  working_memory_size: 32
+  memory_max_write_grad_norm: 1.0
+optimizer:
+  beta1: 0.9
+  beta2: 0.95
+  eps: 1.0e-08
+  lr: 0.0001
+  weight_decay: 0.0
+scheduler:
+  final_lr: 0.0001
+  schedule_steps: 200
+  warmup_steps: 10
+training:
+  early_stop_accuracy_metric: null
+  early_stop_val_loss: null
+  eval_at_end: true
+  eval_every_steps: 100
+  gradient_accumulation_steps: 1
+  gradient_checkpointing: false
+  initial_taal_gate: null
+  log_every_steps: 1
+  max_grad_norm: 1.0
+  max_steps: 200
+  save_traces: true
+  seed: 42
+  trainable_parameters: taal_only
+  initialize_from_checkpoint: checkpoints/taal-capacity-d-distance-diversity-11021676/final
+validation:
+  memory_read_scales:
+  - 1.0
+  - 0.0
+wandb:
+  entity: ryanamiri05-northeastern-university
+  name: taal-workshop-diverse-continuation
+  project: fast-weight-memory

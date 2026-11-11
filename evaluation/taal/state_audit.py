@@ -4,6 +4,7 @@ import copy
 from dataclasses import asdict, replace
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -219,6 +220,41 @@ def example_batches_by_prefix_length(examples, batch_size):
     for group in groups.values():
         for start in range(0, len(group), batch_size):
             yield group[start:start + batch_size]
+
+
+def shared_prefix_examples(examples, group_field):
+    """Validate explicit query groups before reusing their exact pre-query state."""
+    if group_field is None:
+        return {row["example_id"]: [row] for row in examples}
+    if not isinstance(group_field, str) or not group_field:
+        raise ValueError("prefix_group_field must be a nonempty string")
+    groups = {}
+    for row in examples:
+        name = row.get(group_field)
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"Missing prefix group for {row['example_id']}")
+        groups.setdefault(name, []).append(row)
+    aliases = {}
+    for group in groups.values():
+        prefix, _ = split_episode(group[0])
+        if any(split_episode(row)[0] != prefix for row in group):
+            raise ValueError("Shared query states require identical prefix token IDs")
+        for row in group:
+            aliases[row["example_id"]] = group
+    return aliases
+
+
+def configure_write_clipping(model, cap):
+    """Explicit evaluation override; the resolved value is recorded in the manifest."""
+    if type(cap) not in (int, float) or not math.isfinite(cap) or cap <= 0:
+        raise ValueError("memory_max_write_grad_norm override must be finite and positive")
+    if model.config.memory_chunk_size != 1:
+        raise ValueError("Write clipping requires memory_chunk_size=1")
+    model.config.memory_max_write_grad_norm = cap
+    for layer in model.model.layers:
+        memory = layer.taal.neural_memory
+        memory.config = replace(memory.config, max_write_grad_norm=cap)
+        layer.taal.config = replace(layer.taal.config, memory=memory.config)
 
 
 def paired_differences(rows, conditions=AUDIT_CONDITIONS):
@@ -462,6 +498,9 @@ def main():
     if swap_group_field is not None and not isinstance(swap_group_field, str):
         parser.error("swap_group_field must be a string")
     swapped_sources = swap_sources(examples, swap_group_field)
+    prefix_aliases = shared_prefix_examples(examples, settings.get("prefix_group_field"))
+    if settings.get("prefix_group_field") is not None and (suite != "standard" or state_bank_batch_size != 1):
+        parser.error("Shared-prefix query groups require the standard audit with batch size 1")
     example_ids = {example["example_id"] for example in examples}
     expected_result_ids = {
         f"{example_id}/{condition.name}"
@@ -531,6 +570,8 @@ def main():
         model = load_model(args.checkpoint, dtype=torch.float32).to(device).eval()
     else:
         model = load_model(args.checkpoint).to(device).eval()
+    if "memory_max_write_grad_norm" in settings:
+        configure_write_clipping(model, settings["memory_max_write_grad_norm"])
     if settings.get("audit_suite") == "layer_access":
         configured_layers = sorted(index for group in settings["layer_groups"].values() for index in group)
         if configured_layers != list(range(len(model.model.layers))):
@@ -608,6 +649,8 @@ def main():
         # produce scores without first completing the whole 64-prefix bank.
         missing = [example for example in required_examples if not prefix_store.contains(example)]
         for batch in example_batches_by_prefix_length(missing, state_bank_batch_size):
+            if all(prefix_store.contains(example) for example, _ in batch):
+                continue
             batch_ids = torch.tensor(
                 [prefix_ids for _, prefix_ids in batch], dtype=torch.long, device=device,
             )
@@ -632,16 +675,17 @@ def main():
                 )
             with timings.phase("prefix_snapshot_save"):
                 for batch_index, (example, _) in enumerate(batch):
-                    prefix_store.save(
-                        example,
-                        output.state,
-                        None if prefix_trace is None else PrefixTrace(
-                            writes=prefix_trace.writes,
-                            reads=prefix_trace.reads,
-                            internal_prefixes=prefix_trace.internal_prefixes,
-                        ),
-                        batch_index=batch_index,
-                    )
+                    for alias in prefix_aliases[example["example_id"]]:
+                        prefix_store.save(
+                            alias,
+                            output.state,
+                            None if prefix_trace is None else PrefixTrace(
+                                writes=prefix_trace.writes,
+                                reads=prefix_trace.reads,
+                                internal_prefixes=prefix_trace.internal_prefixes,
+                            ),
+                            batch_index=batch_index,
+                        )
             built += len(batch)
             print(f"Saved {built} new prefix states this run", flush=True)
             del output

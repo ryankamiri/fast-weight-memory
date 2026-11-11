@@ -175,6 +175,7 @@ class LoopConfig:
     log_every_steps: int = 10
     trainable_parameters: str = "all"
     initial_taal_gate: float | None = None
+    initialize_from_checkpoint: str | None = None
     early_stop_val_loss: float | None = None
     early_stop_accuracy_metric: str | None = None
     save_traces: bool = False
@@ -237,12 +238,24 @@ class TrainingConfig:
 
     def to_dict(self):
         values = asdict(self)
+        # Fresh-training manifests predate warm starts. Keep their unchanged
+        # recipe identity so existing checkpoint audits still match exactly.
+        if self.training.initialize_from_checkpoint is None:
+            values["training"].pop("initialize_from_checkpoint")
         values["model"]["architecture"] = self.model.architecture
         values["data"]["record_format"] = self.data.record_format
         values["loss"]["objective"] = self.loss.objective
         return values
 
     def validate(self):
+        checkpoint = self.training.initialize_from_checkpoint
+        if checkpoint is not None:
+            if not isinstance(checkpoint, str) or not checkpoint.strip():
+                raise ValueError("initialize_from_checkpoint must be a nonempty local path")
+            if not isinstance(self.model, TaalModelConfig):
+                raise ValueError("Checkpoint initialization currently supports TaaL only")
+            if self.training.initial_taal_gate is not None:
+                raise ValueError("Checkpoint initialization must preserve learned gates")
         threshold = self.training.early_stop_val_loss
         accuracy = self.training.early_stop_accuracy_metric
         if (threshold is None) != (accuracy is None):
