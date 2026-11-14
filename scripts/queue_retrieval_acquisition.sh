@@ -10,7 +10,7 @@ if [[ "$PWD" != /projects/llpr/amiri.ry/dev/fast-weight-memory ]] || [[ "$(git b
     exit 2
 fi
 mkdir -p logs
-for arm in lr3e5 lr1e4 lr3e4; do
+for arm in lr3e5 lr1e4 lr3e4 fullcontext; do
     receipt=$(sbatch --parsable training/sbatch/taal/fs_qwen_retrieval_acquisition_short.sbatch "$arm")
     train_job=${receipt%%;*}
     if [[ ! "$train_job" =~ ^[0-9]+$ ]]; then

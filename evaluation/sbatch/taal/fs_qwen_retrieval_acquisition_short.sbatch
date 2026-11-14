@@ -19,4 +19,9 @@ source "${SLURM_SUBMIT_DIR}/scripts/explorer_retrieval_env.sh" "$1"
 checkpoint="checkpoints/taal-retrieval-$1-$2/final"
 output="output/retrieval-acquisition/$1-$2/val"
 python -m scripts.retrieval_acquisition --train-config "$train_config" --checkpoint "$checkpoint" --output-dir "$output"
-exec python -m evaluation.shared --config "$output/config.yaml" --output-dir "$output"
+python -m evaluation.shared --config "$output/config.yaml" --output-dir "$output"
+if [[ "$1" == lr1e4 ]]; then
+    output="output/retrieval-acquisition/$1-$2/val-reads-off"
+    python -m scripts.retrieval_acquisition --train-config "$train_config" --checkpoint "$checkpoint" --output-dir "$output" --read-scale 0
+    python -m evaluation.shared --config "$output/config.yaml" --output-dir "$output"
+fi

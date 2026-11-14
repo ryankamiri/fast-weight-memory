@@ -202,6 +202,7 @@ class TTCDValidationConfig(ValidationConfig):
 
 @dataclass
 class TaalValidationConfig(ValidationConfig):
+    context_access: str = "evicted"
     probe_families: int = 0
     probe_max_new_tokens: int = 8
     memory_read_scales: list[float] = field(default_factory=lambda: [1.0, 0.5, 0.0])
@@ -255,6 +256,8 @@ class TrainingConfig:
         if isinstance(self.validation, TaalValidationConfig) and not self.validation.probe_families:
             values["validation"].pop("probe_families")
             values["validation"].pop("probe_max_new_tokens")
+        if isinstance(self.validation, TaalValidationConfig) and self.validation.context_access == "evicted":
+            values["validation"].pop("context_access")
         values["model"]["architecture"] = self.model.architecture
         values["data"]["record_format"] = self.data.record_format
         values["loss"]["objective"] = self.loss.objective
@@ -296,6 +299,9 @@ class TrainingConfig:
             raise ValueError("Faithful resume currently requires manifest-backed split files")
 
         if isinstance(self.validation, TaalValidationConfig):
+            if self.validation.context_access not in {"evicted", "full_context"}:
+                raise ValueError("Unknown retrieval context_access")
+
             if type(self.validation.probe_families) is not int or self.validation.probe_families < 0:
                 raise ValueError("probe_families must be a nonnegative integer")
 

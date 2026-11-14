@@ -12,7 +12,9 @@ from evaluation.storage import atomic_json, ensure_manifest, file_sha256
 from training.config import load_config
 
 
-def prepare_evaluation(train_config, checkpoint, output):
+def prepare_evaluation(train_config, checkpoint, output, read_scale=1.0):
+    if read_scale not in (0.0, 1.0):
+        raise ValueError("Acquisition audits require reads on or off")
     config = load_config(train_config)
     metadata = json.loads((checkpoint / "training_metadata.json").read_text())
     if metadata["progress"]["step"] != config.training.max_steps:
@@ -40,6 +42,7 @@ def prepare_evaluation(train_config, checkpoint, output):
     settings = yaml.safe_load(Path("evaluation/configs/shared/retrieval_acquisition_val.yaml").read_text())
     settings["dataset"]["path"] = config.data.split_files["val"]
     settings["model"]["checkpoint"] = str(checkpoint)
+    settings["model"]["settings"]["memory_read_scale"] = read_scale
     output.mkdir(parents=True, exist_ok=True)
     ensure_manifest(output / "config.yaml", settings)
     atomic_json(output / "training_receipt.json", {
@@ -55,8 +58,9 @@ def main():
     parser.add_argument("--train-config", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--read-scale", type=float, default=1.0, choices=[0.0, 1.0])
     args = parser.parse_args()
-    prepare_evaluation(args.train_config, args.checkpoint, args.output_dir)
+    prepare_evaluation(args.train_config, args.checkpoint, args.output_dir, args.read_scale)
 
 
 if __name__ == "__main__":

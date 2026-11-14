@@ -50,8 +50,17 @@ class RetrievalValidation:
         if tokenizer.special_tokens_map != manifest["special_tokens"]:
             raise ValueError("Training special tokens differ from dataset tokenizer")
 
-        if config.model.working_memory_size != manifest["config"]["kv_window"] or config.model.max_persistent_kv_tokens != 0:
-            raise ValueError("Retrieval recipe must preserve the verified recent-KV budget without pinned prefix slots")
+        if config.model.max_persistent_kv_tokens != 0:
+            raise ValueError("Retrieval recipes cannot pin prefix slots")
+        if config.validation.context_access == "evicted":
+            if config.model.working_memory_size != manifest["config"]["kv_window"]:
+                raise ValueError("Retrieval recipe must preserve the verified recent-KV budget")
+        else:
+            for rows in splits.values():
+                for row in rows:
+                    required = max(len(row["input_ids"]), len(row["prompt_input_ids"]) + config.validation.probe_max_new_tokens)
+                    if config.model.working_memory_size < required:
+                        raise ValueError("Full-context reference must retain the whole episode")
 
         self.rows = {}
         self.examples = {}

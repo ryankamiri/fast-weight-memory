@@ -15,6 +15,7 @@ from training.checkpoints import ModelCheckpoints
 from training.config import load_config
 from training.engine import Progress
 from training.resume import TrainingState
+from training.retrieval_validation import RetrievalValidation
 from tests.test_acquisition_training import fixture_config, tiny_training
 
 
@@ -34,6 +35,24 @@ class RetrievalLaunchTests(unittest.TestCase):
         self.assertEqual(evaluation['model']['dtype'], 'float32')
         self.assertEqual(evaluation['model']['autocast_dtype'], 'bfloat16')
 
+    def test_full_context_reference_and_coverage_guard(self):
+        base = load_config('training/configs/taal/retrieval_acquisition.yaml')
+        actual = load_config('training/configs/taal/retrieval_acquisition_fullcontext.yaml')
+        base.model.working_memory_size = 1024
+        base.validation.context_access = 'full_context'
+        base.wandb.name = actual.wandb.name
+        self.assertEqual(actual, base)
+        with TemporaryDirectory() as directory:
+            config, tokenizer = fixture_config(Path(directory))
+            config.model.working_memory_size = 2048
+            with self.assertRaisesRegex(ValueError, 'recent-KV'):
+                RetrievalValidation(config, tokenizer, Path(directory) / 'probe')
+            config.validation.context_access = 'full_context'
+            RetrievalValidation(config, tokenizer, Path(directory) / 'probe')
+            config.model.working_memory_size = 128
+            with self.assertRaisesRegex(ValueError, 'whole episode'):
+                RetrievalValidation(config, tokenizer, Path(directory) / 'probe')
+
     def test_shell_syntax_resources_dependencies_and_no_smoke(self):
         paths = [Path('scripts/queue_retrieval_acquisition.sh'), Path('scripts/explorer_retrieval_env.sh'),
                  Path('training/sbatch/taal/fs_qwen_retrieval_acquisition_short.sbatch'),
@@ -47,7 +66,7 @@ class RetrievalLaunchTests(unittest.TestCase):
             self.assertNotIn('preflight',source)
         queue = paths[0].read_text()
         self.assertIn('--dependency="afterok:$train_job"',queue)
-        self.assertIn('for arm in lr3e5 lr1e4 lr3e4',queue)
+        self.assertIn('for arm in lr3e5 lr1e4 lr3e4 fullcontext',queue)
 
     def test_saved_tokenizer_and_matched_full_val_preparation(self):
         with TemporaryDirectory() as directory:
@@ -72,6 +91,11 @@ class RetrievalLaunchTests(unittest.TestCase):
             prepared=yaml.safe_load((root/'audit/config.yaml').read_text())
             self.assertEqual(prepared['model']['checkpoint'],str(source))
             self.assertEqual(prepared['dataset']['path'],config.data.split_files['val'])
+            prepare_evaluation(train_path,source,root/'reads-off',0.0)
+            disabled=yaml.safe_load((root/'reads-off/config.yaml').read_text())
+            self.assertEqual(disabled['model']['settings']['memory_read_scale'],0.0)
+            self.assertTrue(disabled['save_traces'])
+            self.assertEqual(prepared['model']['settings']['memory_read_scale'],1.0)
             self.assertTrue((source/'tokenizer.json').is_file())
             self.assertEqual(json.loads((root/'audit/training_receipt.json').read_text())['validation_questions'],16)
 
