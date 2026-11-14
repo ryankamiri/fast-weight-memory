@@ -1,0 +1,8 @@
+seed: 42
+train_families: 256
+val_families: 64
+test_families: 128
+fact_counts: [2]
+kv_window: 128
+min_gap_tokens: 192
+max_sequence_tokens: 1024
