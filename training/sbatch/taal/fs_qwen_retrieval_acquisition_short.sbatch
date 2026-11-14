@@ -8,15 +8,21 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=02:00:00
-#SBATCH --signal=B:TERM@300
+#SBATCH --signal=B:USR1@300
+#SBATCH --requeue
+#SBATCH --open-mode=append
 #SBATCH --output=logs/taal-retrieval-train-%j.log
 #SBATCH --error=logs/taal-retrieval-train-%j.log
 
-# Reuse the workshop's node exclusions for A100/H200 eligibility.
-if (( $# != 1 )); then
-    echo "Usage: sbatch $0 lr3e5|lr1e4|lr3e4" >&2
+# Optional root job preserves checkpoint identity across a replacement job.
+if (( $# < 1 || $# > 2 )) || [[ ! "${2:-0}" =~ ^[0-9]+$ ]]; then
+    echo "Usage: sbatch $0 ARM [ROOT_TRAIN_JOB]" >&2
     exit 2
 fi
 source "${SLURM_SUBMIT_DIR}/scripts/explorer_retrieval_env.sh" "$1"
-export CHECKPOINT_RUN_ID="taal-retrieval-$1-${SLURM_JOB_ID}"
-exec python -m training.train --config "$train_config"
+root_job=${2:-$SLURM_JOB_ID}
+if (( $# == 2 )) && [[ ! -f "checkpoints/taal-retrieval-$1-$root_job/final/trainer_state.pt" ]]; then
+    echo "Requested resume checkpoint is missing; refusing fresh training" >&2
+    exit 2
+fi
+exec python -m scripts.retrieval_training_segment --config "$train_config" --run-id "taal-retrieval-$1-$root_job"
