@@ -1,0 +1,21 @@
+benchmark:
+  name: controlled
+dataset:
+  path: data/shared_retrieval/test.jsonl
+  revision: generated-v1
+  split: test
+model:
+  mode: taal
+  checkpoint: checkpoints/TAAL_RUN/final
+  device: cuda
+  dtype: bfloat16
+  settings:
+    memory_read_scale: 1.0
+    retain_task_prefix: false
+seed: 42
+save_traces: true
+required_capabilities: [memory_trace]
+generation:
+  execution_block_size: null
+  max_new_tokens: 32
+  do_sample: false

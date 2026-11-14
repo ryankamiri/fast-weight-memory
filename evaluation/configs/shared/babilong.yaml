@@ -1,0 +1,18 @@
+benchmark:
+  name: babilong
+  task: qa1
+dataset:
+  path: data/babilong/qa1.jsonl
+  revision: ee0d588794c7ac098062ee0d247c733d62e94fe2
+  split: test
+model:
+  mode: taal
+  checkpoint: checkpoints/TAAL_RUN/final
+  device: cuda
+  dtype: bfloat16
+seed: 42
+save_traces: true
+generation:
+  execution_block_size: null
+  max_new_tokens: 64
+  do_sample: false

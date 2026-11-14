@@ -1,14 +1,18 @@
 import type { Episode, TraceFolder } from './trace';
-import { loadEpisode, splitEpisodeKey } from './trace';
+import { loadEpisode, referenceCondition, splitEpisodeKey } from './trace';
 
 export interface LayerCalibration {
   layer: number;
-  referenceCondition: string;
-  referenceEpisodes: number;
   writes: number[];
   reads: number[];
   writeP99: number;
   readP99: number;
+}
+
+export interface SharedCalibration {
+  layers: Map<number, LayerCalibration>;
+  referenceEpisodes: number;
+  referenceRuns: number;
 }
 
 export function percentile(sorted: number[], value: number): number | null {
@@ -28,54 +32,65 @@ function quantile(sorted: number[], fraction: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))];
 }
 
-export function valuesForLayer(episode: Episode, layer: number): { writes: number[]; reads: number[] } {
-  return {
-    writes: episode.writes
-      .filter(write => write.layer === layer && write.position !== null && write.write_enabled && write.proposed_write_norm > 0)
-      .map(write => write.proposed_write_norm),
-    reads: episode.reads
-      .filter(read => read.layer === layer && read.enabled && read.relative_injection !== null && read.relative_injection > 0)
-      .map(read => read.relative_injection!),
-  };
+export function compatibleRuns(runs: TraceFolder[], selected: TraceFolder): TraceFolder[] {
+  if (selected.synthetic) return [selected];
+  const tokenizer = selected.manifest.run_metadata.tokenizer;
+  const layers = selected.manifest.run_metadata.layers;
+  if (typeof tokenizer !== 'string' || !Array.isArray(layers)) return [selected];
+  return runs.filter(run => !run.synthetic
+    && run.manifest.schema === selected.manifest.schema
+    && run.manifest.run_metadata.tokenizer === tokenizer
+    && JSON.stringify(run.manifest.run_metadata.layers) === JSON.stringify(layers));
 }
 
-export async function calibrateLayer(
-  folder: TraceFolder,
-  layer: number,
-  condition: string,
-  checkpoint: string,
-  onProgress?: (done: number, total: number) => void,
-): Promise<LayerCalibration> {
-  // One fixed reference condition prevents intervention copies of the same
-  // episode from silently overweighting the scale.
-  const keys = Object.keys(folder.manifest.episodes)
-    .filter(key => splitEpisodeKey(key).condition === condition);
-  const writes: number[] = [];
-  const reads: number[] = [];
-  let referenceEpisodes = 0;
-  for (const [index, key] of keys.entries()) {
-    const episode = await loadEpisode(folder, key);
-    if (episode.checkpoint === checkpoint) {
-      const values = valuesForLayer(episode, layer);
-      writes.push(...values.writes);
-      reads.push(...values.reads);
-      referenceEpisodes += 1;
-    }
-    onProgress?.(index + 1, keys.length);
-    // Permit the browser to paint progress during long local imports.
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
+function addEpisode(
+  episode: Episode,
+  values: Map<number, { writes: number[]; reads: number[] }>,
+) {
+  for (const write of episode.writes) {
+    if (write.position === null || !write.write_enabled || write.proposed_write_norm <= 0) continue;
+    const layer = values.get(write.layer) ?? { writes: [], reads: [] };
+    layer.writes.push(write.proposed_write_norm);
+    values.set(write.layer, layer);
   }
-  writes.sort((a, b) => a - b);
-  reads.sort((a, b) => a - b);
-  return {
-    layer,
-    referenceCondition: condition,
-    referenceEpisodes,
-    writes,
-    reads,
-    writeP99: quantile(writes, 0.99),
-    readP99: quantile(reads, 0.99),
-  };
+  for (const read of episode.reads) {
+    if (!read.enabled || read.relative_injection === null || read.relative_injection <= 0) continue;
+    const layer = values.get(read.layer) ?? { writes: [], reads: [] };
+    layer.reads.push(read.relative_injection);
+    values.set(read.layer, layer);
+  }
+}
+
+// Load each reference episode once and derive every layer's scale together.
+// Compatible runs share these scales, so their token colors are comparable.
+export async function calibrateRuns(folders: TraceFolder[]): Promise<SharedCalibration> {
+  const values = new Map<number, { writes: number[]; reads: number[] }>();
+  let referenceEpisodes = 0;
+  for (const folder of folders) {
+    const condition = referenceCondition(folder.manifest);
+    const checkpoint = folder.manifest.run_metadata.checkpoint;
+    const keys = Object.keys(folder.manifest.episodes)
+      .filter(key => splitEpisodeKey(key).condition === condition);
+    for (const key of keys) {
+      const episode = await loadEpisode(folder, key);
+      if (typeof checkpoint === 'string' && episode.checkpoint !== checkpoint) continue;
+      addEpisode(episode, values);
+      referenceEpisodes += 1;
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+    }
+  }
+  const layers = new Map<number, LayerCalibration>();
+  for (const [layer, signals] of values) {
+    signals.writes.sort((a, b) => a - b);
+    signals.reads.sort((a, b) => a - b);
+    layers.set(layer, {
+      layer,
+      ...signals,
+      writeP99: quantile(signals.writes, 0.99),
+      readP99: quantile(signals.reads, 0.99),
+    });
+  }
+  return { layers, referenceEpisodes, referenceRuns: folders.length };
 }
 
 export function intensity(value: number, p99: number): number {

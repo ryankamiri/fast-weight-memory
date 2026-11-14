@@ -14,7 +14,7 @@ from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 from architectures.taal.qwen.configuration import TaalQwen3Config
 from architectures.titans.configuration import NeuralMemoryConfig
 from architectures.titans.neural_memory import MemoryMLP, NeuralMemory
-from evaluation.run import load_model
+from evaluation.models import load_model
 from evaluation.taal.decoder_diagnostic import DecoderRecorder, FixedReplaySource, replay_fixed_tokens
 from evaluation.taal.normalization_ablation import ARMS, ablation_config, run_fixed, run_generation
 from evaluation.taal.numerical_diagnostic import independent_gradient, NumericalFailure

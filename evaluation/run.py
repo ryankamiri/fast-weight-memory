@@ -3,83 +3,33 @@
 import argparse
 import asyncio
 import json
-import math
 import os
-from pathlib import Path
 import time
+from pathlib import Path
 
-from datasets import load_dataset
+import torch
+import yaml
 from dotenv import load_dotenv
 from huggingface_hub import HfApi, hf_hub_download
 from jaxtyping import Int
-import torch
 from transformers import AutoTokenizer, Qwen3Config
-import yaml
 
-from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 from architectures.taal.qwen.configuration import TaalQwen3Config
-from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
+from datasets import load_dataset
 from evaluation.data import PROMPT_VERSION, prepare_example
 from evaluation.diagnostic_judge import diagnose_all
 from evaluation.judge import BackgroundJudge, judge_all, judge_backend
+from evaluation.models import configure_model, load_model
+from evaluation.shared.generation import capture_generation, resolve_generation_settings
 from evaluation.storage import append_result, ensure_manifest, read_results
-from evaluation.taal.longmemeval import create_trace_exporter, generate_taal_example, resolve_generation_settings, select_dataset
+from evaluation.taal.longmemeval import (
+    create_trace_exporter,
+    generate_taal_example,
+    select_dataset,
+)
 from evaluation.taal.prefix_store import checkpoint_fingerprint
 from utils.seed import seed_everything
-
-
-def configure_model(config, mode, settings=None):
-    if mode == "taal":
-        if not isinstance(config, TaalQwen3Config):
-            raise ValueError("taal mode requires a TaaL checkpoint")
-
-        settings = settings or {}
-        unsupported = set(settings) - {"memory_read_scale", "retain_task_prefix"}
-        if unsupported:
-            raise ValueError(f"TaaL evaluation preserves checkpoint architecture; unsupported settings: {sorted(unsupported)}")
-
-        scale = settings.get("memory_read_scale", 1.0)
-        if type(scale) not in (int, float) or not math.isfinite(scale) or scale < 0:
-            raise ValueError("memory_read_scale must be finite and nonnegative")
-
-        if type(settings.get("retain_task_prefix", False)) is not bool:
-            raise ValueError("retain_task_prefix must be boolean")
-
-        return config
-    if isinstance(config, TaalQwen3Config):
-        raise ValueError("TaaL checkpoints require taal mode")
-
-    if mode not in {"full", "swa", "fw_swa"}:
-        raise ValueError("mode must be full, swa, or fw_swa")
-    if bool(config.fast_weight_layers) != (mode == "fw_swa"):
-        raise ValueError("Checkpoint fast-weight layers do not match evaluation mode")
-    if settings:
-        overrides = {
-            name: settings[name]
-            for name in ("teacher_window_size", "student_window_size", "chunk_size")
-            if name in settings
-        }
-        config = TTCDQwen3Config(**{**config.to_dict(), **overrides})
-    return config
-
-
-def load_model(source, config, fast_weight_read_scale=1.0):
-    if type(fast_weight_read_scale) not in (int, float) or not math.isfinite(fast_weight_read_scale) or fast_weight_read_scale < 0:
-        raise ValueError("fast_weight_read_scale must be a finite nonnegative number")
-
-    model_class = TTCDQwen3ForCausalLM
-    if isinstance(config, TaalQwen3Config):
-        model_class = TaalQwen3ForCausalLM
-    else:
-        config.fast_weight_read_scale = float(fast_weight_read_scale)
-    model, loading = model_class.from_pretrained(
-        source, config=config, dtype=torch.bfloat16,
-        attn_implementation="sdpa", output_loading_info=True,
-    )
-    if any(loading.get(key) for key in ("missing_keys", "unexpected_keys", "mismatched_keys", "error_msgs")):
-        raise ValueError(f"Checkpoint did not load exactly: {loading}")
-    return model
 
 
 @torch.inference_mode()
@@ -96,12 +46,12 @@ def generate_example(model, tokenizer, example, config, device, trace_exporter=N
     generation_settings = {
         **config["generation"], "persistent_mask": persistent, "generator": generator,
     }
-    result = model.generate(input_ids, **generation_settings)
+    result = capture_generation(model, input_ids, generation_settings)
 
     return {
         "question_id": example["question_id"],
-        "hypothesis": tokenizer.decode(result.token_ids[0].tolist(), skip_special_tokens=True),
-        "prompt_tokens": input_ids.shape[1], "generated_tokens": result.token_ids.numel(),
+        "hypothesis": tokenizer.decode(result.token_ids, skip_special_tokens=True),
+        "prompt_tokens": input_ids.shape[1], "generated_tokens": len(result.token_ids),
         "stop_reason": result.stop_reason,
     }
 

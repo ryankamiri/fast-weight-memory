@@ -12,7 +12,7 @@ import torch
 from transformers import AutoTokenizer
 
 from architectures.taal.qwen.configuration import TaalQwen3Config
-from evaluation.run import load_model
+from evaluation.models import load_model
 from evaluation.taal.decoder_diagnostic import DecoderRecorder, load_replay_source, replay_fixed_tokens
 from evaluation.taal.longmemeval_numerics import write_report
 from evaluation.taal.numerical_diagnostic import BlockMonitor, NumericalFailure

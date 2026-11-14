@@ -13,8 +13,10 @@ from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 from architectures.taal.qwen.configuration import TaalQwen3Config
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
 from evaluation.data import PROMPT_VERSION
-from evaluation.run import configure_model, generate_example, load_model, main
-from evaluation.taal.longmemeval import create_trace_exporter, resolve_generation_settings, select_dataset
+from evaluation.models import configure_model, load_model
+from evaluation.run import generate_example, main
+from evaluation.shared.generation import resolve_generation_settings
+from evaluation.taal.longmemeval import create_trace_exporter, select_dataset
 
 
 class Tokenizer:

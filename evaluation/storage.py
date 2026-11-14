@@ -1,16 +1,21 @@
 """Durable JSONL results and a simple settings check for resuming."""
 
+import hashlib
 import json
 import os
+import tempfile
+from pathlib import Path
 
 
 def ensure_manifest(path, manifest):
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         if json.loads(path.read_text()) != manifest:
-            raise ValueError(f"Run settings changed. Use a new output directory: {path.parent}")
+            raise ValueError(
+                f"Run settings changed. Use a new output directory: {path.parent}"
+            )
     else:
-        path.write_text(json.dumps(manifest, indent=2) + "\n")
+        atomic_json(path, manifest)
 
 
 def read_results(path, id_field="question_id"):
@@ -19,7 +24,11 @@ def read_results(path, id_field="question_id"):
     if not path.exists():
         return rows
     with path.open("rb+") as file:
-        while line := file.readline():
+        while True:
+            line = file.readline()
+            if not line:
+                break
+
             end = file.tell()
             try:
                 row = json.loads(line)
@@ -41,3 +50,32 @@ def append_result(path, row):
         file.write(json.dumps(row, ensure_ascii=False) + "\n")
         file.flush()
         os.fsync(file.fileno())
+
+
+def atomic_json(path: Path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, delete=False
+    ) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(value, stream, ensure_ascii=False, allow_nan=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    os.replace(temporary, path)
+
+
+def file_sha256(path: Path) -> str:
+    """Hash artifact contents without loading large traces into memory."""
+    checksum = hashlib.sha256()
+    with path.open("rb") as stream:
+        while True:
+            block = stream.read(8 * 1024 * 1024)
+            if not block:
+                break
+            checksum.update(block)
+    return checksum.hexdigest()

@@ -112,18 +112,36 @@ export async function scanTraces(root: string): Promise<TraceIndex> {
   return index;
 }
 
+export function createIndexReader(scan: () => Promise<TraceIndex>) {
+  let pending: Promise<TraceIndex> | null = null;
+  let latest: TraceIndex | null = null;
+  let checkedAt = 0;
+  return async function readIndex(): Promise<TraceIndex> {
+    if (pending) return pending;
+    if (latest && Date.now() - checkedAt < 3000) return latest;
+    // Discovery, calibration and episode requests share validation of the same files.
+    pending = scan().then(index => {
+      latest = index;
+      checkedAt = Date.now();
+      return index;
+    }).finally(() => { pending = null; });
+    return pending;
+  };
+}
+
 export function localTraces(root: string): Plugin {
   return {
     name: 'local-taal-traces',
     async configureServer(server) {
       await seedSynthetic(root);
+      const readIndex = createIndexReader(() => scanTraces(root));
       server.middlewares.use(async (request, response, next) => {
         const url = new URL(request.url ?? '/', 'http://localhost');
         if (!['/api/trace-runs', '/api/trace-file'].includes(url.pathname)) return next();
         response.setHeader('Cache-Control', 'no-store');
         try {
           if (request.method !== 'GET') throw new Error('Read-only endpoint');
-          const index = await scanTraces(root);
+          const index = await readIndex();
           if (url.pathname === '/api/trace-runs') {
             response.setHeader('Content-Type', 'application/json');
             response.end(JSON.stringify(index));

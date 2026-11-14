@@ -1,0 +1,18 @@
+benchmark:
+  name: ruler
+  task: niah_multiquery
+dataset:
+  path: data/ruler/niah_multiquery/validation.jsonl
+  revision: db43f92ff634bbce1c33d1fb15858aec4bba509a
+  split: validation
+model:
+  mode: taal
+  checkpoint: checkpoints/TAAL_RUN/final
+  device: cuda
+  dtype: bfloat16
+seed: 42
+save_traces: true
+generation:
+  execution_block_size: null
+  max_new_tokens: 128
+  do_sample: false

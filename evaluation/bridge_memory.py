@@ -11,7 +11,7 @@ from transformers import AutoTokenizer, Qwen3Config
 import yaml
 
 from architectures.ttcd.qwen.configuration import TTCDQwen3Config
-from evaluation.run import configure_model, load_model
+from evaluation.models import configure_model, load_model
 from evaluation.scoring import grouped_score_summary, score_logits
 from evaluation.storage import append_result, ensure_manifest, read_results
 from utils.seed import seed_everything

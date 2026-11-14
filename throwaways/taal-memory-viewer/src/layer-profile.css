@@ -1,0 +1,15 @@
+.profile-summary { margin: 15px 20px 8px; color: #aab6c4; font-size: 11px; }
+.layer-profile { margin: 0 20px 12px; padding: 12px; border: 1px solid #303c4a; border-radius: 8px; background: #101722; }
+.layer-profile-heading { display: flex; flex-direction: column; gap: 4px; margin-bottom: 11px; }
+.layer-profile-heading strong { font-size: 12px; }
+.layer-profile-heading span { color: #8392a3; font-size: 10px; }
+.layer-profile-rows { display: grid; gap: 3px; }
+.layer-profile-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) 49px; align-items: center; gap: 7px; width: 100%; padding: 3px 5px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #afbdcb; text-align: left; }
+.layer-profile-row:hover, .layer-profile-row.selected { background: #242c3a; border-color: #697389; }
+.layer-profile-index, .layer-profile-value { font: 10px ui-monospace, monospace; }
+.layer-profile-value { text-align: right; }
+.layer-profile-track { display: block; height: 7px; border-radius: 3px; background: #28323f; overflow: hidden; }
+.layer-profile-track > span { display: block; height: 100%; border-radius: 3px; }
+.layer-profile-row.writes .layer-profile-track > span { background: #dc5864; }
+.layer-profile-row.reads .layer-profile-track > span { background: #9b70e3; }
+.layer-detail-heading { margin: 8px 0; font-size: 12px; font-weight: 600; }

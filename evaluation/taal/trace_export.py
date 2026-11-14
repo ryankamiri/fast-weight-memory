@@ -1,21 +1,22 @@
-from contextlib import AbstractContextManager
-from dataclasses import dataclass
 import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
 import tempfile
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 from architectures.taal.qwen.state import TaalModelState
 from architectures.titans.state import NeuralMemoryState
+from evaluation.storage import atomic_json
 from evaluation.taal.trace_contract import (
+    SCHEMA_VERSION,
     InternalPrefix,
     ReadEvent,
-    SCHEMA_VERSION,
     TraceComparison,
     TraceEpisode,
     TraceToken,
@@ -354,19 +355,23 @@ def trace_greedy_prediction(
     )
 
 
-def _atomic_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as file:
-        temporary = Path(file.name)
-        try:
-            json.dump(payload, file, ensure_ascii=False, allow_nan=False, indent=2)
-            file.write("\n")
-            file.flush()
-            os.fsync(file.fileno())
-        except BaseException:
-            temporary.unlink(missing_ok=True)
-            raise
-    os.replace(temporary, path)
+def validate_generation_trace(root: Path, manifest: dict, example_id: str, prediction: dict, expected_path: Path | None = None):
+    """Check the native trace index and generated answer before accepting resume."""
+    relative = manifest["episodes"].get(f"{example_id}/native")
+    if relative is None:
+        raise ValueError(f"Saved prediction {example_id} has no trace; use a new output directory")
+
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root.resolve()) or not path.is_file():
+        raise ValueError(f"Saved prediction {example_id} has no trace at a valid indexed path")
+
+    if expected_path is not None and path != expected_path.resolve():
+        raise ValueError(f"TaaL trace index disagrees for {example_id}")
+
+    with gzip.open(path, "rt") as stream:
+        episode = json.load(stream)
+    if episode["example_id"] != example_id or episode["outcome"]["hypothesis"] != prediction["hypothesis"]:
+        raise ValueError(f"Saved prediction and trace disagree for {example_id}")
 
 
 class TaalTraceExporter:
@@ -385,7 +390,7 @@ class TaalTraceExporter:
                 "episodes": {},
                 "comparisons": {},
             }
-            _atomic_json(self.manifest_path, self.manifest)
+            atomic_json(self.manifest_path, self.manifest)
 
     def export(self, episode: TraceEpisode) -> Path:
         payload = episode.to_dict()
@@ -398,8 +403,39 @@ class TaalTraceExporter:
             raise ValueError(f"Trace index disagrees for {key}")
         self._write_gzip(path, payload)
         self.manifest["episodes"][key] = str(relative)
-        _atomic_json(self.manifest_path, self.manifest)
+        atomic_json(self.manifest_path, self.manifest)
         return path
+
+    def export_generation(
+        self,
+        example_id: str,
+        prompt_ids: list[int],
+        generated_ids: list[int],
+        tokenizer,
+        recorder: TaalTraceRecorder,
+        outcome: dict,
+        metadata: dict,
+    ) -> Path:
+        """Assemble prompt and generated-token events with one causal ordering."""
+        tokens = make_trace_tokens(prompt_ids, tokenizer)
+        generated_tokens = make_trace_tokens(
+            generated_ids, tokenizer, offset=len(prompt_ids), phase="generated",
+        )
+        tokens.extend(generated_tokens)
+        episode = TraceEpisode(
+            run_id=self.root.parent.name,
+            example_id=example_id,
+            condition_id="native",
+            checkpoint=self.manifest["run_metadata"]["checkpoint"],
+            tokenizer_id=self.manifest["run_metadata"]["tokenizer"],
+            tokens=tokens,
+            writes=recorder.writes,
+            reads=recorder.reads,
+            internal_prefixes=recorder.internal_prefixes,
+            outcome=outcome,
+            metadata=metadata,
+        )
+        return self.export(episode)
 
     def export_comparison(self, comparison: TraceComparison) -> Path:
         if comparison.schema != SCHEMA_VERSION:
@@ -420,7 +456,7 @@ class TaalTraceExporter:
         path = self.root / relative
         self._write_gzip(path, comparison.__dict__)
         self.manifest["comparisons"][key] = str(relative)
-        _atomic_json(self.manifest_path, self.manifest)
+        atomic_json(self.manifest_path, self.manifest)
         return path
 
     @staticmethod

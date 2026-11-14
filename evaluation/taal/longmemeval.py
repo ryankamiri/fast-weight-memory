@@ -1,30 +1,13 @@
 """TaaL generation and compact trajectories for the shared LongMemEval runner."""
 
-from contextlib import nullcontext
-import gzip
 import json
 from pathlib import Path
 
-from jaxtyping import Bool, Int
 import torch
+from jaxtyping import Bool, Int
 
-from evaluation.taal.trace_contract import TraceEpisode
-from evaluation.taal.trace_export import TaalTraceExporter, TaalTraceRecorder, make_trace_tokens
-
-
-def resolve_generation_settings(settings, working_memory_size):
-    generation = dict(settings)
-    block_size = generation.get("execution_block_size")
-    if block_size is None:
-        block_size = working_memory_size
-    if type(block_size) is not int or not 1 <= block_size <= working_memory_size:
-        raise ValueError(
-            f"execution_block_size must be an integer in [1, {working_memory_size}], "
-            f"or null to use the checkpoint KV window; got {block_size!r}"
-        )
-
-    generation["execution_block_size"] = block_size
-    return generation
+from evaluation.shared.generation import capture_generation, resolve_generation_settings
+from evaluation.taal.trace_export import TaalTraceExporter, validate_generation_trace
 
 
 def select_dataset(dataset, settings):
@@ -58,14 +41,7 @@ def create_trace_exporter(output, checkpoint, model_config, metadata, settings, 
         "capture": "Prompt and all generated tokens, including EOS; fresh state per question",
     })
     for question_id, prediction in predictions.items():
-        relative = exporter.manifest["episodes"].get(f"{question_id}/native")
-        if relative is None or not (exporter.root / relative).is_file():
-            raise ValueError(f"Saved prediction {question_id} has no trace; use a new output directory")
-
-        with gzip.open(exporter.root / relative, "rt") as stream:
-            episode = json.load(stream)
-        if episode["example_id"] != question_id or episode["outcome"]["hypothesis"] != prediction["hypothesis"]:
-            raise ValueError(f"Saved prediction and trace disagree for {question_id}")
+        validate_generation_trace(exporter.root, exporter.manifest, question_id, prediction)
 
     return exporter
 
@@ -91,15 +67,9 @@ def generate_taal_example(model, tokenizer, example, settings, device, exporter=
         "memory_read_scale": model_settings.get("memory_read_scale", 1.0),
         "generator": torch.Generator(device=device).manual_seed(settings["seed"]),
     })
-    recorder = None
-    if exporter is not None:
-        recorder = TaalTraceRecorder(model, list(range(model.config.num_hidden_layers)), S)
-    with recorder if recorder is not None else nullcontext():
-        generated = model.generate(ids, **generation)
-        generated_ids = generated.token_ids[0].tolist()
-        if recorder is not None:
-            # Generation feeds back every chosen token; EOS determines the final coverage count.
-            recorder.token_count = S + len(generated_ids)
+    captured = capture_generation(model, ids, generation, trace_memory=exporter is not None)
+    generated_ids = captured.token_ids
+    recorder = captured.recorder
 
     outcome = {
         "question_id": example["question_id"],
@@ -107,21 +77,12 @@ def generate_taal_example(model, tokenizer, example, settings, device, exporter=
         "prompt_tokens": S,
         "generated_tokens": len(generated_ids),
         "generated_token_ids": generated_ids,
-        "stop_reason": generated.stop_reason,
+        "stop_reason": captured.stop_reason,
     }
     if exporter is not None:
-        exporter.export(TraceEpisode(
-            run_id=exporter.root.parent.name,
-            example_id=example["question_id"],
-            condition_id="native",
-            checkpoint=exporter.manifest["run_metadata"]["checkpoint"],
-            tokenizer_id=exporter.manifest["run_metadata"]["tokenizer"],
-            tokens=make_trace_tokens(example["input_ids"], tokenizer)
-                + make_trace_tokens(generated_ids, tokenizer, offset=S, phase="generated"),
-            writes=recorder.writes,
-            reads=recorder.reads,
-            internal_prefixes=recorder.internal_prefixes,
-            outcome=outcome,
+        exporter.export_generation(
+            example["question_id"], example["input_ids"], generated_ids,
+            tokenizer, recorder, outcome,
             metadata={
                 "expected_answer": example["answer"],
                 "question": example.get("question"),
@@ -134,5 +95,5 @@ def generate_taal_example(model, tokenizer, example, settings, device, exporter=
                 "judge_result": "Stored separately in judgments JSONL after grading",
                 "timing_note": "A generated token's read/write events follow the prediction that chose it",
             },
-        ))
+        )
     return outcome

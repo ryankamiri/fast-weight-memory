@@ -1,0 +1,24 @@
+{
+  "babilong": {
+    "revision": "7a6efee29f5cac03c3c410e6799c80fd2ffe3610",
+    "files": {
+      "prompts.py": {
+        "upstream_path": "babilong/prompts.py",
+        "sha256": "be08d7e466170177e38fddb997e3dd9ffb281d5a830edd240933e069a9c5c2ee"
+      },
+      "metrics.py": {
+        "upstream_path": "babilong/metrics.py",
+        "sha256": "f77c139809690588f85ed29c1c93f22394c6b48b1fdc8afeaaa5d0969d973daf"
+      }
+    }
+  },
+  "ruler": {
+    "revision": "db43f92ff634bbce1c33d1fb15858aec4bba509a",
+    "files": {
+      "metrics.py": {
+        "upstream_path": "scripts/eval/synthetic/constants.py",
+        "sha256": "6740467c17b8dc06b6b30f4f97e54ce8de81db0dd879f1538d0b6b5727f4bd5f"
+      }
+    }
+  }
+}

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { scanTraces, seedSynthetic } from '../server/local-traces';
-import { calibrateLayer, percentile } from './calibration';
+import { calibrateRuns, percentile } from './calibration';
 import { demoEpisode, demoManifest } from './demo';
 import { loadEpisode, splitEpisodeKey } from './trace';
 import { exampleName, expectedAnswer, trajectoryTokens } from './answer';
@@ -42,9 +42,9 @@ describe('fixed local trace directory', () => {
     }));
     const folder = index.runs[0];
     expect((await loadEpisode(folder, 'example-01/correct_full')).tokens).toHaveLength(15);
-    const calibration = await calibrateLayer(folder, 0, 'correct_full', 'synthetic-checkpoint');
+    const calibration = await calibrateRuns([folder]);
     expect(calibration.referenceEpisodes).toBe(1);
-    expect(percentile(calibration.writes, 0.81)).toBe(100);
+    expect(percentile(calibration.layers.get(0)!.writes, 0.81)).toBe(100);
   });
   it('discovers new exports and rejects unsupported, missing, malformed or escaping files', async () => {
     const directory = await root();

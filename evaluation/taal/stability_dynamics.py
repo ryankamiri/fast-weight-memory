@@ -12,7 +12,7 @@ import yaml
 from transformers import AutoTokenizer
 
 from architectures.taal.qwen.configuration import TaalQwen3Config
-from evaluation.run import load_model
+from evaluation.models import load_model
 from evaluation.taal.decoder_diagnostic import load_replay_source
 from evaluation.taal.longmemeval_numerics import write_report
 from evaluation.taal.prefix_store import checkpoint_fingerprint

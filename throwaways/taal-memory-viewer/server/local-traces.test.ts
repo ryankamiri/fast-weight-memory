@@ -1,15 +1,46 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { demoEpisode, demoManifest } from '../src/demo';
 import { readTimingNotes } from '../src/trace';
-import { scanTraces } from './local-traces';
+import { createIndexReader, scanTraces } from './local-traces';
+import type { TraceIndex } from '../src/trace';
 
 const roots: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+});
+
+it('shares concurrent validation and refreshes the index after the polling interval', async () => {
+  vi.useFakeTimers();
+  let finish: (index: TraceIndex) => void = () => {};
+  const first = { runs: [], errors: [] };
+  const changed = { runs: [], errors: ['Changed export is invalid'] };
+  const scan = vi.fn().mockImplementationOnce(() => new Promise<TraceIndex>(resolve => { finish = resolve; }))
+    .mockResolvedValueOnce(changed);
+  const read = createIndexReader(scan);
+  const discovery = read();
+  const episode = read();
+  expect(scan).toHaveBeenCalledTimes(1);
+  finish(first);
+  expect(await discovery).toBe(first);
+  expect(await episode).toBe(first);
+  await vi.advanceTimersByTimeAsync(2999);
+  expect(await read()).toBe(first);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await read()).toBe(changed);
+  expect(scan).toHaveBeenCalledTimes(2);
+});
+
+it('permits another validation attempt after an I/O failure', async () => {
+  const recovered = { runs: [], errors: [] };
+  const scan = vi.fn().mockRejectedValueOnce(new Error('Temporary read failure')).mockResolvedValueOnce(recovered);
+  const read = createIndexReader(scan);
+  await expect(read()).rejects.toThrow('Temporary read failure');
+  expect(await read()).toBe(recovered);
 });
 
 it.each(['pre-write', 'post-write', 'substituted', 'invalid'])('validates read timing %s', async timing => {

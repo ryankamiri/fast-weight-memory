@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { InternalToken } from './InternalToken';
-import { demoEpisode } from './demo';
+import type { ActivitySummary } from './activity';
 
-const write = demoEpisode.writes.find(event => event.position === null)!;
-function render(mode: 'writes' | 'reads', event = write) {
-  return renderToStaticMarkup(<InternalToken index={0} write={event} mode={mode} writeP99={0.24} selected={false} onSelect={() => {}} />);
+const measured: ActivitySummary = { status: 'measured', strength: 0.375, measuredLayers: 2, unusuallyActiveLayers: 0 };
+function render(mode: 'writes' | 'reads', activity = measured) {
+  return renderToStaticMarkup(<InternalToken index={0} activity={activity} mode={mode} selected={false} onSelect={() => {}} />);
 }
 
 describe('persistent token colors', () => {
@@ -21,9 +21,9 @@ describe('persistent token colors', () => {
     expect(html).toContain('Read output discarded');
   });
   it('distinguishes missing and masked writes', () => {
-    const html = renderToStaticMarkup(<InternalToken index={0} mode="writes" writeP99={0.24} selected={false} onSelect={() => {}} />);
+    const html = render('writes', { ...measured, status: 'missing' });
     expect(html).toContain(' missing');
     expect(html).toContain('Write not measured');
-    expect(render('writes', { ...write, write_enabled: false })).toContain('Write masked');
+    expect(render('writes', { ...measured, status: 'disabled' })).toContain('Write masked');
   });
 });

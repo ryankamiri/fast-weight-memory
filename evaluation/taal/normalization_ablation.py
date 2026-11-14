@@ -13,7 +13,7 @@ import torch
 from transformers import AutoTokenizer
 
 from architectures.taal.qwen.configuration import TaalQwen3Config
-from evaluation.run import load_model
+from evaluation.models import load_model
 from evaluation.taal.decoder_diagnostic import DecoderRecorder, load_replay_source, replay_fixed_tokens
 from evaluation.taal.longmemeval import create_trace_exporter, generate_taal_example
 from evaluation.taal.longmemeval_decoder_replay import compare_reference

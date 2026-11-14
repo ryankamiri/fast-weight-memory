@@ -38,7 +38,8 @@ from evaluation.judge import (
     rubric,
     summarize,
 )
-from evaluation.run import configure_model, generate_example, load_model
+from evaluation.models import configure_model, load_model
+from evaluation.run import generate_example
 from evaluation.storage import append_result, ensure_manifest, read_results
 
 

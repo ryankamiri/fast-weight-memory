@@ -16,8 +16,9 @@ import yaml
 
 from architectures.taal.qwen.configuration import TaalQwen3Config
 from evaluation.data import PROMPT_VERSION, prepare_example
-from evaluation.run import load_model
-from evaluation.taal.longmemeval import create_trace_exporter, generate_taal_example, resolve_generation_settings
+from evaluation.models import load_model
+from evaluation.shared.generation import resolve_generation_settings
+from evaluation.taal.longmemeval import create_trace_exporter, generate_taal_example
 from evaluation.taal.numerical_diagnostic import BlockMonitor, NumericalFailure, replay_block
 from evaluation.taal.prefix_store import checkpoint_fingerprint
 from evaluation.taal.runaway_diagnostic import RunawayRecorder
