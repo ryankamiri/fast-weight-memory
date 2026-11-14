@@ -96,6 +96,8 @@ class DataConfig(ABC):
 
 @dataclass
 class CausalLMDataConfig(DataConfig):
+    split_files: dict[str, str] = field(default_factory=dict)
+    manifest_path: str | None = None
     variable_length: bool = False
     preserve_order: bool = False
     train: RecordRange = field(default_factory=lambda: RecordRange(64))
@@ -200,6 +202,8 @@ class TTCDValidationConfig(ValidationConfig):
 
 @dataclass
 class TaalValidationConfig(ValidationConfig):
+    probe_families: int = 0
+    probe_max_new_tokens: int = 8
     memory_read_scales: list[float] = field(default_factory=lambda: [1.0, 0.5, 0.0])
 
     @property
@@ -209,6 +213,7 @@ class TaalValidationConfig(ValidationConfig):
 
 @dataclass
 class CheckpointConfig:
+    save_training_state: bool = False
     output_dir: str = "checkpoints"
     save_best: bool = True
     save_final: bool = True
@@ -242,6 +247,14 @@ class TrainingConfig:
         # recipe identity so existing checkpoint audits still match exactly.
         if self.training.initialize_from_checkpoint is None:
             values["training"].pop("initialize_from_checkpoint")
+        if not self.checkpoints.save_training_state:
+            values["checkpoints"].pop("save_training_state")
+        if isinstance(self.data, CausalLMDataConfig) and not self.data.split_files:
+            values["data"].pop("split_files")
+            values["data"].pop("manifest_path")
+        if isinstance(self.validation, TaalValidationConfig) and not self.validation.probe_families:
+            values["validation"].pop("probe_families")
+            values["validation"].pop("probe_max_new_tokens")
         values["model"]["architecture"] = self.model.architecture
         values["data"]["record_format"] = self.data.record_format
         values["loss"]["objective"] = self.loss.objective
@@ -265,9 +278,39 @@ class TrainingConfig:
             or threshold <= 0 or not isinstance(accuracy, str) or not accuracy.startswith("val/")
         ):
             raise ValueError("Early stopping requires a positive finite loss and val/ accuracy metric")
+        split_data = isinstance(self.data, CausalLMDataConfig) and bool(self.data.split_files)
+        if split_data:
+            if not isinstance(self.model, TaalModelConfig):
+                raise ValueError("Retrieval training probes currently require TaaL")
+
+            if set(self.data.split_files) != {"train", "val"} or not self.data.manifest_path:
+                raise ValueError("Split-file training requires train/val files and a manifest")
+
+            if self.data.num_workers != 0 or self.data.batch_size != 1 or not self.data.variable_length:
+                raise ValueError("Resumable retrieval requires variable_length, batch_size=1, num_workers=0")
+
+            if self.data.train != RecordRange(0, None, "train") or self.data.val != RecordRange(0, None, "val"):
+                raise ValueError("Use complete retrieval splits; probe selection keeps families intact")
+
+        if self.checkpoints.save_training_state and (not split_data or not isinstance(self.model, TaalModelConfig)):
+            raise ValueError("Faithful resume currently requires manifest-backed split files")
+
+        if isinstance(self.validation, TaalValidationConfig):
+            if type(self.validation.probe_families) is not int or self.validation.probe_families < 0:
+                raise ValueError("probe_families must be a nonnegative integer")
+
+            if type(self.validation.probe_max_new_tokens) is not int or self.validation.probe_max_new_tokens < 1:
+                raise ValueError("probe_max_new_tokens must be positive")
+
+            if split_data and not self.validation.probe_families:
+                raise ValueError("Retrieval training requires family-complete generation probes")
+
+            if self.validation.probe_families and not split_data:
+                raise ValueError("Retrieval probes require manifest-backed splits")
+
         if self.training.save_traces and (
             not isinstance(self.model, TaalModelConfig)
-            or not self.data.dataset_id.endswith(".jsonl")
+            or not (self.data.dataset_id.endswith(".jsonl") or split_data)
         ):
             raise ValueError("Training traces currently require local TaaL data")
         if self.training.save_traces and not self.checkpoints.save_final:
@@ -395,6 +438,7 @@ class TrainingConfig:
             ("gradient_checkpointing", self.training.gradient_checkpointing),
             ("eval_at_end", self.training.eval_at_end),
             ("save_traces", self.training.save_traces),
+            ("save_training_state", self.checkpoints.save_training_state),
             ("save_best", self.checkpoints.save_best),
             ("save_final", self.checkpoints.save_final),
         ):

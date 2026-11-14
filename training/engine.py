@@ -9,6 +9,8 @@ from typing import Callable
 
 import torch
 
+from data.retrieval import RetrievalDataset
+
 from .config import (
     BridgeMemoryLossConfig,
     CausalLMLossConfig,
@@ -18,6 +20,7 @@ from .config import (
 from architectures.ttcd.qwen.mlp import TTCDQwen3MLP
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 from .optimization import clip_training_gradients
+from .resume import UpdateBoundary
 from .taal_timing import TaalKernelSampler, TaalMicrobatchTimer, print_taal_timing
 
 
@@ -26,6 +29,8 @@ class Progress:
     step: int = 0
     epoch: int = 0
     tokens_seen: int = 0
+    examples_seen: int = 0
+    supervised_tokens_seen: int = 0
     skipped_updates: int = 0
     nan_losses: int = 0
     nan_gradients: int = 0
@@ -37,6 +42,8 @@ class Progress:
             "train/step": self.step,
             "train/epoch": self.epoch,
             "train/tokens_seen": self.tokens_seen,
+            "train/examples_seen": self.examples_seen,
+            "train/supervised_tokens_seen": self.supervised_tokens_seen,
             "train/skipped_updates": self.skipped_updates,
             "train/nan_losses": self.nan_losses,
             "train/nan_gradients": self.nan_gradients,
@@ -321,7 +328,7 @@ def validate(model, dataloader, device: torch.device, should_stop=lambda: False,
             module.fast_weight_read_scale = scale
 
 
-def train(
+def train_loop(
     model,
     train_loader,
     val_loader,
@@ -333,6 +340,8 @@ def train(
     should_stop: Callable[[], bool],
     on_validation=None,
     progress: Progress | None = None,
+    evaluate=None,
+    boundary=None,
 ) -> Progress:
     """Repeat epochs until max_steps successful updates or an external stop."""
     progress = Progress() if progress is None else progress
@@ -347,11 +356,24 @@ def train(
     timing_pending = os.environ.get("TAAL_TIMING_FIRST_BATCH") == "1"
 
     while progress.step < config.training.max_steps and not should_stop():
-        train_loader.dataset.set_epoch(progress.epoch)
-        progress.epoch += 1
+        if boundary is not None:
+            dataset = train_loader.dataset
+            if dataset.cursor == len(dataset.rows):
+                dataset.set_epoch(dataset.epoch + 1)
+            progress.epoch = dataset.epoch
+        else:
+            train_loader.dataset.set_epoch(progress.epoch)
+            progress.epoch += 1
         epoch_batches = 0
 
-        for batch in train_loader:
+        if boundary is not None:
+            # Worker seeds are unused with num_workers=0; iterator recreation must not advance RNG.
+            loader_rng = train_loader.generator.get_state()
+            batches = iter(train_loader)
+            train_loader.generator.set_state(loader_rng)
+        else:
+            batches = iter(train_loader)
+        for batch in batches:
             if should_stop():
                 break
             epoch_batches += 1
@@ -359,6 +381,10 @@ def train(
             B, S = batch["input_ids"].shape
             input_tokens = B * S
             progress.tokens_seen += input_tokens
+            progress.examples_seen += B
+            for name in ("labels", "delayed_labels"):
+                if name in batch:
+                    progress.supervised_tokens_seen += prediction_count(batch[name])
 
             timer = None
             sampler = None
@@ -402,6 +428,8 @@ def train(
                 del loss
                 log(progress.metrics())
                 group_started = time.perf_counter()
+                if boundary is not None:
+                    boundary.commit()
                 continue
 
             # Match TTCD: average the microbatch gradients over this update.
@@ -437,6 +465,8 @@ def train(
                 group = Accumulation()
                 log(progress.metrics())
                 group_started = time.perf_counter()
+                if boundary is not None:
+                    boundary.commit()
                 continue
 
             lr = optimizer.param_groups[0]["lr"]
@@ -454,15 +484,23 @@ def train(
                     "train/tokens_per_second": group.input_tokens / (time.perf_counter() - group_started),
                 }
                 metrics.update(clipping.metrics)
+                if boundary is not None:
+                    metrics["train/answer_nll"] = metrics["train/all_token_loss"]
+                    metrics["train/answer_perplexity"] = metrics["train/all_token_perplexity"]
                 if device.type == "cuda":
                     metrics["gpu/peak_memory_gib"] = torch.cuda.max_memory_allocated(device) / 2**30
                 log(metrics)
             group = Accumulation()
+            if boundary is not None:
+                boundary.commit()
 
             if progress.step % config.training.eval_every_steps == 0 and not should_stop():
                 # Run val
-                metrics = validate(model, val_loader, device, should_stop,
-                                   config.validation.read_scales, config.loss)
+                if evaluate is None:
+                    metrics = validate(model, val_loader, device, should_stop,
+                                       config.validation.read_scales, config.loss)
+                else:
+                    metrics = evaluate(model, progress, should_stop)
                 if metrics is not None:
                     log(progress.metrics() | metrics)
                     if on_validation is not None:
@@ -478,10 +516,33 @@ def train(
     # A partial accumulation group is discarded, never applied on shutdown.
     optimizer.zero_grad()
     if config.training.eval_at_end and last_validation_step != progress.step and not should_stop():
-        metrics = validate(model, val_loader, device, should_stop,
-                           config.validation.read_scales, config.loss)
+        if evaluate is None:
+            metrics = validate(model, val_loader, device, should_stop,
+                               config.validation.read_scales, config.loss)
+        else:
+            metrics = evaluate(model, progress, should_stop)
         if metrics is not None:
             log(progress.metrics() | metrics)
             if on_validation is not None:
                 on_validation(model, progress, metrics)
     return progress
+
+
+def train(
+    model, train_loader, val_loader, optimizer, scheduler, config, device,
+    log, should_stop, on_validation=None, progress=None, evaluate=None,
+):
+    progress = Progress() if progress is None else progress
+    boundary = None
+    if isinstance(train_loader.dataset, RetrievalDataset):
+        boundary = UpdateBoundary(train_loader, progress)
+    try:
+        return train_loop(
+            model, train_loader, val_loader, optimizer, scheduler, config, device,
+            log, should_stop, on_validation, progress, evaluate, boundary,
+        )
+    finally:
+        optimizer.zero_grad()
+        if boundary is not None:
+            # No partial gradients are saved: replay the unfinished group from its RNG/cursor.
+            boundary.rewind()

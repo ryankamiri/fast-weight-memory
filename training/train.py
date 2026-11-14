@@ -8,7 +8,7 @@ from threading import Event
 
 from huggingface_hub import HfApi
 import torch
-from transformers import Qwen3Config
+from transformers import AutoTokenizer, Qwen3Config
 import wandb
 
 from architectures.ttcd.qwen.causal_lm import TTCDQwen3ForCausalLM
@@ -17,11 +17,14 @@ from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 from architectures.taal.qwen.configuration import TaalQwen3Config
 from data.dataloader import create_dataloader
 from utils.seed import seed_everything
-from .config import TaalModelConfig, TrainingConfig, TTCDModelConfig, load_config
+from .config import CausalLMDataConfig, TaalModelConfig, TrainingConfig, TTCDModelConfig, load_config
 from .engine import Progress, build_scheduler, train
 from .optimization import build_optimizer
 from .checkpoints import ModelCheckpoints
 from .stopping import reached_validation_target
+from .resume import TrainingState
+from .retrieval_validation import RetrievalValidation
+from evaluation.taal.training_trace import export_training_traces
 
 
 def verify_loading(model, loading_info):
@@ -70,8 +73,10 @@ def verify_loading(model, loading_info):
     print(f"Loaded Qwen weights; initialized {len(loading_info.get('missing_keys', []))} added tensors.", flush=True)
 
 
-def load_model(config: TrainingConfig):
+def load_model(config: TrainingConfig, resume_from=None):
     settings = config.model
+    if resume_from is not None:
+        return load_initial_checkpoint(config, resume_from)
     if config.training.initialize_from_checkpoint is not None:
         return load_initial_checkpoint(config)
     base = Qwen3Config.from_pretrained(settings.model_id, revision=settings.revision)
@@ -92,19 +97,20 @@ def load_model(config: TrainingConfig):
         dtype=torch.float32, attn_implementation="sdpa", output_loading_info=True,
     )
     verify_loading(model, loading_info)
+    model.config._name_or_path = settings.model_id
     if config.training.gradient_checkpointing:
         model.gradient_checkpointing_enable({"use_reentrant": False})
     return model
 
 
-def load_initial_checkpoint(config: TrainingConfig):
+def load_initial_checkpoint(config: TrainingConfig, source=None):
     """Warm-start learned weights, with a fresh optimizer and no gate reset.
 
     Only the explicitly configured fresh-write clipping threshold may differ
     from the saved memory architecture. This prevents accidentally changing
     the KV window, memory cadence or normalization while continuing training.
     """
-    source = Path(config.training.initialize_from_checkpoint)
+    source = Path(source or config.training.initialize_from_checkpoint)
     if not source.is_dir():
         raise FileNotFoundError(source)
     saved = TaalQwen3Config.from_pretrained(source, local_files_only=True)
@@ -125,7 +131,8 @@ def load_initial_checkpoint(config: TrainingConfig):
         raise ValueError(f"Initial checkpoint did not load exactly: {errors}")
     if config.training.gradient_checkpointing:
         model.gradient_checkpointing_enable({"use_reentrant": False})
-    print(f"Initialized learned weights from {source}; optimizer/scheduler start fresh; gates preserved.", flush=True)
+    model.config._name_or_path = config.model.model_id
+    print(f"Loaded learned weights from {source}; gates preserved.", flush=True)
     return model
 
 
@@ -176,8 +183,15 @@ def initialize_taal_gates(model, effective_gate: float | None) -> None:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="training/configs/ttcd/qwen3_0_6b.yaml")
+    parser.add_argument("--resume", type=Path, help="Trusted local full training checkpoint")
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.resume is not None:
+        if not config.checkpoints.save_training_state or config.training.initialize_from_checkpoint:
+            raise ValueError("Resume requires full checkpoint support and cannot be combined with warm start")
+
+        if not (args.resume / "trainer_state.pt").is_file():
+            raise ValueError("Resume requires trainer_state.pt; a weights-only checkpoint is a warm start")
 
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         raise ValueError("Only one GPU is supported; distributed training is not implemented")
@@ -191,16 +205,18 @@ def main():
     seed_everything(config.training.seed)
 
     # This pilot pins both revisions; only absent revisions need Hub lookups.
-    local_dataset = config.data.dataset_id.endswith(".jsonl")
+    split_data = isinstance(config.data, CausalLMDataConfig) and bool(config.data.split_files)
+    local_dataset = config.data.dataset_id.endswith(".jsonl") or split_data
     if config.model.revision is None or (config.data.revision is None and not local_dataset):
         api = HfApi()
         if config.model.revision is None:
             config.model.revision = api.model_info(config.model.model_id).sha
         if config.data.revision is None and not local_dataset:
             config.data.revision = api.dataset_info(config.data.dataset_id).sha
-    model = load_model(config).to(device)
-    initialize_taal_gates(model, config.training.initial_taal_gate)
-    trainable_parameters = configure_trainable_parameters(
+    model = load_model(config, args.resume).to(device)
+    if args.resume is None:
+        initialize_taal_gates(model, config.training.initial_taal_gate)
+    configure_trainable_parameters(
         model, config.training.trainable_parameters,
     )
     optimizer = build_optimizer(model, config)
@@ -242,9 +258,19 @@ def main():
             print(" | ".join(f"{key}={value:.6g}" for key, value in metrics.items()), flush=True)
 
         checkpoint_run_id = os.environ.get("CHECKPOINT_RUN_ID") or run.id
-        checkpoints = ModelCheckpoints(config, checkpoint_run_id)
+        training_state = None
+        if config.checkpoints.save_training_state:
+            training_state = TrainingState(optimizer, scheduler, train_loader)
+        checkpoints = ModelCheckpoints(config, checkpoint_run_id, training_state)
         print(f"Checkpoint directory: {checkpoints.directory}", flush=True)
         progress = Progress()
+        evaluate = None
+        if getattr(config.validation, "probe_families", 0):
+            tokenizer = AutoTokenizer.from_pretrained(config.model.model_id, revision=config.model.revision)
+            evaluate = RetrievalValidation(config, tokenizer, checkpoints.directory)
+        if args.resume is not None:
+            training_state.restore(args.resume, config, model, progress, checkpoints)
+            print(f"Resumed optimizer step {progress.step}, epoch {train_loader.dataset.epoch}, cursor {train_loader.dataset.cursor}.", flush=True)
         reason = "exception"
         converged = False
 
@@ -259,9 +285,13 @@ def main():
         try:
             train(
                 model, train_loader, val_loader, optimizer, scheduler, config, device, log,
-                stop.is_set, on_validation=on_validation, progress=progress,
+                stop.is_set, on_validation=on_validation, progress=progress, evaluate=evaluate,
             )
             reason = "signal" if stop.is_set() else "completed"
+        except BaseException:
+            if training_state is not None:
+                training_state.safe_to_save = False
+            raise
         finally:
             if converged:
                 reason = "target_reached"
@@ -275,8 +305,7 @@ def main():
                 if reason != "exception" and not stop.is_set():
                     raise
                 print(f"Final model save failed: {error}", flush=True)
-            if config.training.save_traces and final_saved and progress.step > 0 and reason != "exception":
-                from evaluation.taal.training_trace import export_training_traces
+            if config.training.save_traces and not split_data and final_saved and progress.step > 0 and reason != "exception":
                 export_training_traces(model, config, checkpoints.directory, progress)
 
 

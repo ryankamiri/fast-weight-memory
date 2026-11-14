@@ -10,6 +10,9 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 
+from data.retrieval import RetrievalDataset, load_retrieval_splits
+from evaluation.storage import file_sha256
+
 from training.config import (
     BridgeMemoryDataConfig,
     BridgeMemoryLossConfig,
@@ -183,6 +186,27 @@ def create_dataloader(
             raise TypeError("BridgeMemoryDataConfig requires bridge-memory loss and record-range types")
     else:
         raise TypeError(f"Unsupported data config: {type(config).__name__}")
+
+    if isinstance(config, CausalLMDataConfig) and config.split_files:
+        if num_workers != 0 or batch_size != 1 or not config.variable_length:
+            raise ValueError("Retrieval loading requires one variable-length episode and no workers")
+
+        if records.split not in {"train", "val"} or records.start != 0 or records.end is not None:
+            raise ValueError("Retrieval loads whole train/val splits only")
+
+        splits, manifest = load_retrieval_splits(config)
+        identity = {
+            "manifest_sha256": file_sha256(Path(config.manifest_path)),
+            "file_sha256": manifest["files"][records.split]["sha256"],
+            "split": records.split,
+        }
+        dataset = RetrievalDataset(
+            splits[records.split], seed, shuffle and not config.preserve_order, identity,
+        )
+        return DataLoader(
+            dataset, batch_size=1, num_workers=0, collate_fn=CausalLMCollator(),
+            generator=torch.Generator().manual_seed(seed),
+        )
 
     load_options = {}
     if config.revision is not None:

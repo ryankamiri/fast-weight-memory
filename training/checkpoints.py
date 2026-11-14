@@ -1,4 +1,4 @@
-"""Keep best, final and explicitly selected validation snapshots, without optimizer state."""
+"""Keep best, final and explicitly selected validation snapshots, with optional complete training state."""
 
 from dataclasses import asdict
 import json
@@ -7,15 +7,20 @@ from pathlib import Path
 import shutil
 import tempfile
 
+import torch
+
+from evaluation.storage import file_sha256
+
 
 class ModelCheckpoints:
-    def __init__(self, config, run_id):
+    def __init__(self, config, run_id, training_state=None):
+        self.training_state = training_state
         self.config = config
         self.directory = Path(config.checkpoints.output_dir) / run_id
         self.best_metric_value: float | None = None
         self.saved_steps: set[int] = set()
 
-    def save(self, model, progress, name, *, val_loss=None, selection_value=None, reason=None):
+    def save(self, model, progress, name, val_loss=None, selection_value=None, reason=None):
         self.directory.mkdir(parents=True, exist_ok=True)
         target = self.directory / name
         temporary = Path(tempfile.mkdtemp(prefix=f".{name}-", dir=self.directory))
@@ -23,6 +28,12 @@ class ModelCheckpoints:
         
         try:
             model.save_pretrained(temporary, safe_serialization=True)
+            if self.config.checkpoints.save_training_state:
+                if self.training_state is None:
+                    raise ValueError("Full checkpoints require a bound optimizer, scheduler and data loader")
+
+                state = self.training_state.capture(self.config, model, progress, self)
+                torch.save(state, temporary / "trainer_state.pt")
             metadata = {
                 "progress": asdict(progress), "val_loss": val_loss, "reason": reason,
                 "selection_metric": self.config.checkpoints.selection_metric,
@@ -30,6 +41,12 @@ class ModelCheckpoints:
                 "training_config": self.config.to_dict(),
                 "contents": "Model/config only. No optimizer, scheduler, RNG, KV cache, or session fast weights.",
             }
+            if self.config.checkpoints.save_training_state:
+                metadata["contents"] = "Model plus optimizer, scheduler, RNG, data cursor and selection state. Fresh session memory per episode."
+                metadata["files"] = {}
+                for path in sorted(temporary.iterdir()):
+                    if path.is_file():
+                        metadata["files"][path.name] = file_sha256(path)
             (temporary / "training_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
             # Keep the previous snapshot intact until the new one is fully written.
             if backup.exists():
@@ -61,12 +78,16 @@ class ModelCheckpoints:
             or (mode == "max" and value > self.best_metric_value)
         )
         if self.config.checkpoints.save_best and math.isfinite(value) and improved:
-            self.save(
-                model, progress, "best", val_loss=metrics.get("val/loss"),
-                selection_value=value,
-                reason=f"best {metric} ({mode})",
-            )
+            previous = self.best_metric_value
             self.best_metric_value = value
+            try:
+                self.save(
+                    model, progress, "best", val_loss=metrics.get("val/loss"),
+                    selection_value=value, reason=f"best {metric} ({mode})",
+                )
+            except BaseException:
+                self.best_metric_value = previous
+                raise
 
         # A fixed-step snapshot lets accumulation runs be compared both at
         # equal optimizer updates and at equal supervised-example budgets.
@@ -78,12 +99,16 @@ class ModelCheckpoints:
             and math.isfinite(metrics.get("val/loss", value))
         )
         if should_save_step:
-            self.save(
-                model, progress, f"step-{progress.step}",
-                val_loss=metrics.get("val/loss"), selection_value=value,
-                reason="matched optimizer-step snapshot",
-            )
             self.saved_steps.add(progress.step)
+            try:
+                self.save(
+                    model, progress, f"step-{progress.step}",
+                    val_loss=metrics.get("val/loss"), selection_value=value,
+                    reason="matched optimizer-step snapshot",
+                )
+            except BaseException:
+                self.saved_steps.remove(progress.step)
+                raise
 
     def save_final(self, model, progress, reason):
         if self.config.checkpoints.save_final:

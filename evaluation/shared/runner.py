@@ -88,6 +88,7 @@ def run(
     seed: int = 42,
     save_traces: bool = True,
     required_capabilities: list[str] | None = None,
+    should_stop=lambda: False,
 ):
     if type(save_traces) is not bool or type(seed) is not int:
         raise ValueError("save_traces must be boolean and seed must be an integer")
@@ -130,6 +131,9 @@ def run(
     )
     backend.validate_saved(output, predictions)
     for example in examples:
+        if should_stop():
+            return None
+
         if example.example_id in predictions:
             continue
         try:
@@ -168,6 +172,9 @@ def run(
                 },
             )
             raise
+    if should_stop():
+        return None
+
     return rescore(benchmark, examples, output)
 
 
