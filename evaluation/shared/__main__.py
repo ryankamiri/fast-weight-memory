@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+from contextlib import nullcontext
 import json
 import re
 from pathlib import Path
@@ -255,6 +256,9 @@ def main():
         raise ValueError("dtype must be float32, bfloat16, or float16")
 
     device = torch.device(model_settings.get("device", "cuda"))
+    autocast_dtype = model_settings.get("autocast_dtype")
+    if autocast_dtype is not None and (autocast_dtype != "bfloat16" or device.type != "cuda"):
+        raise ValueError("Optional autocast_dtype supports CUDA bfloat16 only")
     seed = settings.get("seed", 42)
     seed_everything(seed)
     model = load_model(
@@ -272,6 +276,7 @@ def main():
             "tokenizer": str(source.resolve()),
             "tokenizer_sha256": token_hash,
             "dtype": dtype_name,
+            "autocast_dtype": autocast_dtype,
             "device": str(device),
             "source_sha256": source_fingerprint(),
             "mode": mode,
@@ -287,21 +292,25 @@ def main():
     )
     backend.require(settings.get("required_capabilities", []))
     model.to(device)
-    summary = run(
-        backend,
-        benchmark,
-        examples,
-        output,
-        dataset_identity={
-            "path": str(path.resolve()),
-            "sha256": file_sha256(path),
-            "revision": dataset_settings["revision"],
-            "split": dataset_settings["split"],
-        },
-        seed=seed,
-        save_traces=settings.get("save_traces", True),
-        required_capabilities=settings.get("required_capabilities", []),
-    )
+    precision = nullcontext()
+    if autocast_dtype is not None:
+        precision = torch.autocast("cuda", dtype=torch.bfloat16)
+    with precision:
+        summary = run(
+            backend,
+            benchmark,
+            examples,
+            output,
+            dataset_identity={
+                "path": str(path.resolve()),
+                "sha256": file_sha256(path),
+                "revision": dataset_settings["revision"],
+                "split": dataset_settings["split"],
+            },
+            seed=seed,
+            save_traces=settings.get("save_traces", True),
+            required_capabilities=settings.get("required_capabilities", []),
+        )
     print(json.dumps(summary, indent=2))
 
 

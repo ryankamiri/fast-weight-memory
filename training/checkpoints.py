@@ -13,7 +13,8 @@ from evaluation.storage import file_sha256
 
 
 class ModelCheckpoints:
-    def __init__(self, config, run_id, training_state=None):
+    def __init__(self, config, run_id, training_state=None, tokenizer=None):
+        self.tokenizer = tokenizer
         self.training_state = training_state
         self.config = config
         self.directory = Path(config.checkpoints.output_dir) / run_id
@@ -28,6 +29,8 @@ class ModelCheckpoints:
         
         try:
             model.save_pretrained(temporary, safe_serialization=True)
+            if self.tokenizer is not None:
+                self.tokenizer.save_pretrained(temporary)
             if self.config.checkpoints.save_training_state:
                 if self.training_state is None:
                     raise ValueError("Full checkpoints require a bound optimizer, scheduler and data loader")

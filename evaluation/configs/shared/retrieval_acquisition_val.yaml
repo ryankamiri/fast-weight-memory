@@ -1,0 +1,23 @@
+benchmark:
+  name: controlled
+dataset:
+  path: data/shared_retrieval/val.jsonl
+  revision: balanced-retrieval-v1
+  split: val
+model:
+  mode: taal
+  checkpoint: checkpoints/TAAL_RUN/final
+  device: cuda
+  dtype: float32
+  autocast_dtype: bfloat16
+  settings:
+    memory_read_scale: 1.0
+    retain_task_prefix: false
+seed: 42
+save_traces: true
+required_capabilities:
+- memory_trace
+generation:
+  execution_block_size: null
+  max_new_tokens: 8
+  do_sample: false

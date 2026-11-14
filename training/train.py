@@ -268,6 +268,7 @@ def main():
         if getattr(config.validation, "probe_families", 0):
             tokenizer = AutoTokenizer.from_pretrained(config.model.model_id, revision=config.model.revision)
             evaluate = RetrievalValidation(config, tokenizer, checkpoints.directory)
+            checkpoints.tokenizer = tokenizer
         if args.resume is not None:
             training_state.restore(args.resume, config, model, progress, checkpoints)
             print(f"Resumed optimizer step {progress.step}, epoch {train_loader.dataset.epoch}, cursor {train_loader.dataset.cursor}.", flush=True)
