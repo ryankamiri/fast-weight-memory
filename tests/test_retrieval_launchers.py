@@ -61,7 +61,8 @@ class RetrievalLaunchTests(unittest.TestCase):
             subprocess.run(['bash','-n',str(path)],check=True)
         for path in paths[2:]:
             source = path.read_text()
-            for setting in ['--partition=gpu-short','--mem=48G','--time=02:00:00','--gres=gpu:1']:
+            memory = '--mem=24G' if path == paths[2] else '--mem=48G'
+            for setting in ['--partition=gpu-short',memory,'--time=02:00:00','--gres=gpu:1']:
                 self.assertIn(setting,source)
             self.assertNotIn('preflight',source)
         queue = paths[0].read_text()
