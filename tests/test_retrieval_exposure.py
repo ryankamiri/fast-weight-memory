@@ -12,18 +12,24 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from torch.utils.data import DataLoader
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
+import yaml
 
 from architectures.taal.qwen.causal_lm import TaalQwen3ForCausalLM
 from data.retrieval import RetrievalDataset
 from data.retrieval_exposure import balanced_blocks, stratified_rows
 from evaluation.shared.retrieval_diagnostics import answer_loss, compare_logits, path_parity, score_answer, selection_counts
-from evaluation.storage import atomic_json
-from scripts.retrieval_exposure_audit import Allocation, generation_audit, token_diagnostics
+from evaluation.storage import atomic_json, file_sha256
+from scripts.retrieval_exposure_audit import Allocation, generation_audit, load_checkpoint, token_diagnostics
 from scripts.retrieval_exposure_preflight import check_gate
 from tests.test_taal_qwen_causal_lm import TaalQwen3CausalLMTests
 from tests.test_acquisition_training import fixture_config, tiny_training
 from training.config import load_config
-from training.engine import train
+from training.checkpoints import ModelCheckpoints
+from training.engine import Progress, train
+from training.resume import TrainingState
 
 
 class TinyTokenizer:
@@ -103,6 +109,52 @@ class ExposureTests(unittest.TestCase):
                     self.assertTrue(generation_audit(self.model, TinyTokenizer(), {"checkpoint": "tiny", "tokenizer": "tiny"}, [self.row], path, allocation, scale))
                     self.assertEqual(len((path / "predictions.jsonl").read_text().splitlines()), 1)
 
+    def test_saved_checkpoint_loads_and_exports_resumable_traces(self):
+        recipe = Path("training/configs/taal/retrieval_exposure_repeat.yaml")
+        config = load_config(recipe)
+        original_directory = Path.cwd()
+        with TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                recipe.parent.mkdir(parents=True)
+                settings = config.to_dict()
+                settings["loss"].pop("objective")
+                recipe.write_text(yaml.safe_dump(settings))
+                backend = Tokenizer(models.WordLevel({str(index): index for index in range(40)}))
+                backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+                tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, eos_token="39")
+                manifest = Path(config.data.manifest_path)
+                atomic_json(manifest, {
+                    "tokenizer_backend": json.loads(tokenizer.backend_tokenizer.to_str()),
+                    "special_tokens": tokenizer.special_tokens_map,
+                })
+                atomic_json(Path("data/retrieval_exposure/selection.json"), {})
+                dataset = RetrievalDataset([self.row], 42, False,
+                                           {"manifest_sha256": file_sha256(manifest)})
+                loader = DataLoader(dataset, generator=torch.Generator().manual_seed(42))
+                optimizer = torch.optim.AdamW(self.model.parameters())
+                scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1)
+                state = TrainingState(optimizer, scheduler, loader)
+                checkpoints = ModelCheckpoints(config, "taal-exposure-repeat-123", state, tokenizer)
+                checkpoints.save_final(self.model, Progress(step=512), "fixture")
+
+                output = Path("audit")
+                model, loaded_tokenizer, provenance = load_checkpoint("repeat", "123", output, torch.device("cpu"))
+                self.assertEqual(provenance["tokenizer"], str(checkpoints.directory / "final"))
+                for scale in (1.0, 0.0):
+                    target = output / str(scale)
+                    self.assertTrue(generation_audit(model, loaded_tokenizer, provenance,
+                                                     [self.row], target, Allocation(), scale))
+                    traces = target / "memory_traces/manifest.json"
+                    self.assertTrue(traces.is_file())
+                    before = file_sha256(traces)
+                    self.assertTrue(generation_audit(model, loaded_tokenizer, provenance,
+                                                     [self.row], target, Allocation(), scale))
+                    self.assertEqual(file_sha256(traces), before)
+                    self.assertEqual(len((target / "predictions.jsonl").read_text().splitlines()), 1)
+            finally:
+                os.chdir(original_directory)
+
     def test_label_balanced_blocks_and_resume_order(self):
         rows = []
         labels = [f"label{i:02}" for i in range(16)]
@@ -168,6 +220,36 @@ class ExposureTests(unittest.TestCase):
                   evaluate=evaluate)
             self.assertEqual(evaluated, [1, 2, 3])
             self.assertEqual(saved, evaluated)
+
+    def test_resume_finishes_interrupted_milestone_before_next_update(self):
+        with TemporaryDirectory() as directory:
+            config, _ = fixture_config(Path(directory))
+            config.training.max_steps = 3
+            config.training.eval_every_steps = 2
+            config.checkpoints.save_steps = [1, 3]
+            model, loader, optimizer, scheduler = tiny_training(config)
+            progress = Progress()
+            stopped = False
+            evaluated, saved = [], []
+
+            def evaluate(model, progress, should_stop):
+                nonlocal stopped
+                evaluated.append((progress.step, len(model.calls)))
+                if len(evaluated) == 1:
+                    stopped = True
+                    return None
+                return {"val/loss": 1.0}
+
+            for _ in range(2):
+                train(model, loader, [], optimizer, scheduler, config, torch.device("cpu"),
+                      lambda metrics: None, lambda: stopped, progress=progress,
+                      on_validation=lambda model, progress, metrics: saved.append(progress.step),
+                      evaluate=evaluate)
+                stopped = False
+            self.assertEqual(evaluated, [(1, 1), (1, 1), (2, 2), (3, 3)])
+            self.assertEqual(saved, [1, 2, 3])
+            self.assertEqual(progress.step, 3)
+            self.assertEqual(progress.examples_seen, 3)
 
     def test_allocation_and_failed_gate_boundaries(self):
         allocation = Allocation()

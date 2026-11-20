@@ -103,6 +103,7 @@ def load_checkpoint(arm, train_job, output, device):
         raise ValueError("Cohort special tokens do not match checkpoint")
     provenance = {
         "checkpoint": str(checkpoint), "checkpoint_sha256": checkpoint_fingerprint(checkpoint),
+        "tokenizer": str(checkpoint),
         "source_sha256": source_fingerprint(), "tokenizer_sha256": tokenizer_fingerprint(tokenizer),
         "dtype": "float32", "autocast_dtype": "bfloat16" if device.type == "cuda" else None,
         "device": str(device), "torch_version": torch.__version__,

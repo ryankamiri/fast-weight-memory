@@ -355,6 +355,30 @@ def train_loop(
     last_validation_step = None
     timing_pending = os.environ.get("TAAL_TIMING_FIRST_BATCH") == "1"
 
+    def evaluate_current_step():
+        nonlocal last_validation_step
+        if evaluate is None:
+            metrics = validate(model, val_loader, device, should_stop,
+                               config.validation.read_scales, config.loss)
+        else:
+            metrics = evaluate(model, progress, should_stop)
+        if metrics is not None:
+            log(progress.metrics() | metrics)
+            if on_validation is not None:
+                on_validation(model, progress, metrics)
+            last_validation_step = progress.step
+
+    # A walltime warning can interrupt validation after an update was committed.
+    # Finish that checkpoint's probes before advancing; retrieval trace exports
+    # resume completed examples, and checkpoint selection deduplicates saved steps.
+    validation_due = (
+        progress.step > 0
+        and (progress.step % config.training.eval_every_steps == 0
+             or progress.step in config.checkpoints.save_steps)
+    )
+    if validation_due and not should_stop():
+        evaluate_current_step()
+
     while progress.step < config.training.max_steps and not should_stop():
         if boundary is not None:
             dataset = train_loader.dataset
@@ -501,17 +525,7 @@ def train_loop(
                 or progress.step in config.checkpoints.save_steps
             )
             if validation_due and not should_stop():
-                # Run val
-                if evaluate is None:
-                    metrics = validate(model, val_loader, device, should_stop,
-                                       config.validation.read_scales, config.loss)
-                else:
-                    metrics = evaluate(model, progress, should_stop)
-                if metrics is not None:
-                    log(progress.metrics() | metrics)
-                    if on_validation is not None:
-                        on_validation(model, progress, metrics)
-                    last_validation_step = progress.step
+                evaluate_current_step()
             group_started = time.perf_counter()
             if progress.step >= config.training.max_steps:
                 break
@@ -522,15 +536,7 @@ def train_loop(
     # A partial accumulation group is discarded, never applied on shutdown.
     optimizer.zero_grad()
     if config.training.eval_at_end and last_validation_step != progress.step and not should_stop():
-        if evaluate is None:
-            metrics = validate(model, val_loader, device, should_stop,
-                               config.validation.read_scales, config.loss)
-        else:
-            metrics = evaluate(model, progress, should_stop)
-        if metrics is not None:
-            log(progress.metrics() | metrics)
-            if on_validation is not None:
-                on_validation(model, progress, metrics)
+        evaluate_current_step()
     return progress
 
 
