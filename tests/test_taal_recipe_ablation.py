@@ -137,7 +137,7 @@ class TaalRecipeAblationTests(unittest.TestCase):
 
     def test_milestones_validate_save_reload_and_do_not_replace_best(self):
         config = recipe("reference")
-        for steps in (None, [True], [0], [401], [100, 100], [99]):
+        for steps in (None, [True], [0], [401], [100, 100]):
             with self.subTest(steps=steps):
                 invalid = copy.deepcopy(config)
                 invalid.checkpoints.save_steps = steps

@@ -494,7 +494,13 @@ def train_loop(
             if boundary is not None:
                 boundary.commit()
 
-            if progress.step % config.training.eval_every_steps == 0 and not should_stop():
+            # A requested checkpoint also needs complete validation, even between
+            # regular probes (for example the shared first 64 acquisition updates).
+            validation_due = (
+                progress.step % config.training.eval_every_steps == 0
+                or progress.step in config.checkpoints.save_steps
+            )
+            if validation_due and not should_stop():
                 # Run val
                 if evaluate is None:
                     metrics = validate(model, val_loader, device, should_stop,

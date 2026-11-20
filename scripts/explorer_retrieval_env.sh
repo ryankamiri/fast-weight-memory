@@ -16,6 +16,7 @@ export http_proxy=http://10.99.0.130:3128 https_proxy=http://10.99.0.130:3128
 case "${1:-}" in
     lr3e5|lr3e4|fullcontext) train_config="training/configs/taal/retrieval_acquisition_$1.yaml" ;;
     lr1e4) train_config=training/configs/taal/retrieval_acquisition.yaml ;;
+    repeat|broad) train_config="training/configs/taal/retrieval_exposure_$1.yaml" ;;
     *) echo "Expected arm: lr3e5, lr1e4, lr3e4 or fullcontext" >&2; exit 2 ;;
 esac
 echo "RETRIEVAL_SOURCE commit=$(git rev-parse HEAD) arm=$1 config=$train_config"

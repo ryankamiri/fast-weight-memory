@@ -12,9 +12,7 @@ from evaluation.storage import atomic_json, ensure_manifest, file_sha256
 from training.config import load_config
 
 
-def prepare_evaluation(train_config, checkpoint, output, read_scale=1.0):
-    if read_scale not in (0.0, 1.0):
-        raise ValueError("Acquisition audits require reads on or off")
+def validate_checkpoint(train_config, checkpoint):
     config = load_config(train_config)
     metadata = json.loads((checkpoint / "training_metadata.json").read_text())
     if metadata["progress"]["step"] != config.training.max_steps:
@@ -37,6 +35,15 @@ def prepare_evaluation(train_config, checkpoint, output, read_scale=1.0):
     state = torch.load(checkpoint / "trainer_state.pt", map_location="cpu", weights_only=False)
     if state["data"]["identity"]["manifest_sha256"] != file_sha256(Path(config.data.manifest_path)):
         raise ValueError("Dataset manifest changed since training")
+
+    return metadata
+
+
+def prepare_evaluation(train_config, checkpoint, output, read_scale=1.0):
+    if read_scale not in (0.0, 1.0):
+        raise ValueError("Acquisition audits require reads on or off")
+    config = load_config(train_config)
+    metadata = validate_checkpoint(train_config, checkpoint)
 
     splits, manifest = load_retrieval_splits(config.data)
     settings = yaml.safe_load(Path("evaluation/configs/shared/retrieval_acquisition_val.yaml").read_text())

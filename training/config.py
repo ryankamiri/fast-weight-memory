@@ -470,8 +470,6 @@ class TrainingConfig:
             raise ValueError("checkpoints.save_steps must contain positive steps within max_steps")
         if len(save_steps) != len(set(save_steps)):
             raise ValueError("checkpoints.save_steps must contain unique steps")
-        if any(step % self.training.eval_every_steps != 0 for step in save_steps):
-            raise ValueError("checkpoints.save_steps must coincide with full validation steps")
         if self.data.seq_len < 2:
             raise ValueError("seq_len must allow at least one next-token prediction")
         for name, value in (("num_workers", self.data.num_workers),
