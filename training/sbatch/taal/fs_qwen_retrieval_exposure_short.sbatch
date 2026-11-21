@@ -14,10 +14,10 @@
 #SBATCH --output=logs/taal-exposure-train-%j.log
 #SBATCH --error=logs/taal-exposure-train-%j.log
 
-if (( $# != 2 )) || [[ "$1" != repeat && "$1" != broad ]]; then
-    echo "Expected repeat|broad and parity receipt directory" >&2
+if (( $# != 1 )) || [[ "$1" != repeat && "$1" != broad ]]; then
+    echo "Expected repeat|broad" >&2
     exit 2
 fi
 source "${SLURM_SUBMIT_DIR}/scripts/explorer_retrieval_env.sh" "$1"
-python -m scripts.retrieval_exposure_preflight --parity-dir "$2"
+python -m scripts.retrieval_exposure_preflight
 exec python -m scripts.retrieval_training_segment --config "$train_config" --run-id "taal-exposure-$1-$SLURM_JOB_ID"

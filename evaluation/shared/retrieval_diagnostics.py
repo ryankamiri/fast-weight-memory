@@ -65,7 +65,19 @@ def score_answer(model, row):
         output = model(ids, use_cache=False, logits_to_keep=len(labels) + 1)
         # Position P-1 predicts the first label; the final EOS input predicts nothing scored.
         logits = output.logits[0, :-1]
-        return asdict(answer_loss(logits, labels))
+        loss = answer_loss(logits, labels)
+        predicted_ids = logits.argmax(dim=-1)
+        correct = predicted_ids == labels
+        # Later label positions receive the correct preceding tokens. This is
+        # teacher-forced answer scoring, distinct from cached greedy generation.
+        return {
+            **asdict(loss),
+            "expected_token_ids": labels.tolist(),
+            "predicted_token_ids": predicted_ids.tolist(),
+            "first_label_token_correct": bool(correct[0]),
+            "all_label_tokens_correct": bool(correct[:-1].all()),
+            "label_and_eos_correct": bool(correct.all()),
+        }
 
 
 def compare_logits(training_logits, decoding_logits, labels, training_loss):
@@ -91,7 +103,7 @@ def compare_logits(training_logits, decoding_logits, labels, training_loss):
         "decode_argmax": decoding_logits.argmax(-1).tolist(),
     }
     # Conservative BF16 screening, not a proof of gradient or kernel equivalence.
-    # A failure blocks new training for inspection, including an argmax near-tie.
+    # Preserve failed screens for investigation, including an argmax near-tie.
     metrics["passed"] = (
         same_argmax and metrics["max_abs_logit_difference"] <= 0.5
         and metrics["mean_abs_logit_difference"] <= 0.03

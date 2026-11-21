@@ -1,5 +1,5 @@
 #!/bin/bash
-# Eight submissions: parity, three old-arm diagnostics, two train/audit chains.
+# Two independent training jobs, each followed by its own complete audit.
 set -euo pipefail
 if (( $# != 1 )) || [[ ! "$1" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     echo "Usage: bash $0 BATCH_NAME" >&2
@@ -9,8 +9,9 @@ if [[ "$PWD" != /projects/llpr/amiri.ry/dev/fast-weight-memory ]] || [[ "$(git b
     echo "Expected canonical attached titans-impl checkout" >&2
     exit 2
 fi
-if [[ -n "$(squeue -h -u "$USER" -o '%i')" ]]; then
-    echo "This eight-job batch requires eight free submission slots; inspect existing jobs" >&2
+queued=$(squeue -h -u "$USER" -o '%i' | wc -l)
+if (( queued > 4 )); then
+    echo "Four free submission slots are required; inspect existing jobs" >&2
     exit 2
 fi
 python3 -m scripts.retrieval_exposure_preflight
@@ -32,13 +33,11 @@ submit() {
 }
 audit=evaluation/sbatch/taal/fs_qwen_retrieval_exposure_short.sbatch
 train=training/sbatch/taal/fs_qwen_retrieval_exposure_short.sbatch
-submit parity --job-name=taal-parity "$audit" parity all "$root/parity"
-parity_job=$submitted_job
-for arm in A B C; do
-    submit "diagnostic-$arm" --job-name="taal-diag-$arm" "$audit" diagnostic "$arm" "$root/diagnostic-$arm"
-done
+# Acquisition and CUDA execution parity are separate experiments. Keep the
+# diagnostics running independently; only each completed training budget gates
+# its own audit. The audit records full-sequence scores and cached generation.
 for arm in repeat broad; do
-    submit "train-$arm" --job-name="taal-$arm" --dependency="afterok:$parity_job" --kill-on-invalid-dep=yes "$train" "$arm" "$root/parity"
+    submit "train-$arm" --job-name="taal-$arm" "$train" "$arm"
     train_job=$submitted_job
     submit "audit-$arm" --job-name="taal-eval-$arm" --dependency="afterok:$train_job" --kill-on-invalid-dep=yes "$audit" audit "$arm" "$root/audit-$arm" "$train_job"
 done

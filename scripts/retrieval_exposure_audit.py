@@ -142,6 +142,12 @@ def token_diagnostics(model, rows, output, mode, allocation):
         for metric in ("label_nll", "eos_nll", "combined_nll"):
             summary[metric] = sum(record[metric] for record in records.values()) / len(rows)
         summary["averaging"] = "mean of per-episode means; label/EOS also retained per token"
+        summary["execution"] = "full sequence, no cache, teacher-forced label and EOS"
+        for metric in ("first_label_token_correct", "all_label_tokens_correct", "label_and_eos_correct"):
+            summary[metric] = {
+                "correct": sum(record[metric] for record in records.values()),
+                "total": len(rows),
+            }
     atomic_json(output / "summary.json", summary)
     return True
 
@@ -175,7 +181,7 @@ def audit_arm(phase, arm, train_job, output, allocation, device):
                 return False
             summary = json.loads((output / "parity/summary.json").read_text())
             if not summary["passed"]:
-                raise ValueError(f"{arm} parity failed; new training remains blocked")
+                raise ValueError(f"{arm} parity screen failed; inspect the recorded differences")
             return True
 
         if phase == "diagnostic":

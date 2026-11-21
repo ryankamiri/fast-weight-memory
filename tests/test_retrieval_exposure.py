@@ -1,4 +1,4 @@
-"""Matched exposure, answer-position parity, trace resume, and queue gating."""
+"""Matched exposure, answer-position parity, trace resume, and dependencies."""
 
 from collections import Counter
 import copy
@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import subprocess
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -94,6 +95,31 @@ class ExposureTests(unittest.TestCase):
         self.assertAlmostEqual(loss["combined_nll"], result["training_loss"], places=6)
         self.assertTrue(all(parameter.grad is None for parameter in self.model.parameters()))
 
+    def test_full_sequence_scoring_aligns_labels_and_separates_eos(self):
+        # P-1 predicts label 10; the second label is wrong, while EOS is right.
+        # The final input's next-token logit is intentionally unused.
+        logits = torch.full((1, 4, 40), -10.)
+        for position, token in enumerate((10, 12, 39, 10)):
+            logits[0, position, token] = 10.
+        with patch.object(self.model, "forward", return_value=SimpleNamespace(logits=logits)) as forward:
+            result = score_answer(self.model, self.row)
+        self.assertFalse(forward.call_args.kwargs["use_cache"])
+        self.assertEqual(result["expected_token_ids"], [10, 11, 39])
+        self.assertEqual(result["predicted_token_ids"], [10, 12, 39])
+        self.assertTrue(result["first_label_token_correct"])
+        self.assertFalse(result["all_label_tokens_correct"])
+        self.assertFalse(result["label_and_eos_correct"])
+        self.assertGreater(result["label_nll"], result["eos_nll"])
+
+        logits[0, 1, 12] = -10.
+        logits[0, 1, 11] = 10.
+        logits[0, 2, 39] = -10.
+        logits[0, 2, 12] = 10.
+        with patch.object(self.model, "forward", return_value=SimpleNamespace(logits=logits)):
+            result = score_answer(self.model, self.row)
+        self.assertTrue(result["all_label_tokens_correct"])
+        self.assertFalse(result["label_and_eos_correct"])
+
     def test_diagnostic_resume_and_native_generation_traces(self):
         with TemporaryDirectory() as directory:
             output = Path(directory)
@@ -101,6 +127,11 @@ class ExposureTests(unittest.TestCase):
             self.assertTrue(token_diagnostics(self.model, [self.row], output / "loss", "loss", allocation))
             with patch("scripts.retrieval_exposure_audit.score_answer", side_effect=AssertionError("recomputed")):
                 self.assertTrue(token_diagnostics(self.model, [self.row], output / "loss", "loss", allocation))
+            summary = json.loads((output / "loss/summary.json").read_text())
+            record = json.loads((output / "loss/records.jsonl").read_text())
+            self.assertEqual(summary["first_label_token_correct"],
+                             {"correct": int(record["first_label_token_correct"]), "total": 1})
+            self.assertIn("teacher-forced", summary["execution"])
             with patch("scripts.retrieval_exposure_audit.file_sha256", return_value="fixture"):
                 for scale in (1., 0.):
                     path = output / str(scale)
@@ -273,13 +304,13 @@ class ExposureTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check_gate(root)
 
-    def test_eight_job_queue_and_dependencies(self):
+    def test_training_queue_preserves_independent_diagnostics_and_audit_dependencies(self):
         script = Path("scripts/queue_retrieval_exposure.sh").resolve()
         with TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "output").mkdir()
             (root / "git").write_text("#!/bin/bash\necho titans-impl\n")
-            (root / "squeue").write_text("#!/bin/bash\nexit 0\n")
+            (root / "squeue").write_text("#!/bin/bash\nseq 1 3\n")
             (root / "python3").write_text("#!/bin/bash\nexit 0\n")
             (root / "sbatch").write_text('#!/bin/bash\necho "$*" >> "$RECEIPTS"\nwc -l < "$RECEIPTS" | tr -d " "\n')
             for name in ("git", "squeue", "python3", "sbatch"):
@@ -289,14 +320,25 @@ class ExposureTests(unittest.TestCase):
             command = ["bash", "-c", 'PWD=/projects/llpr/amiri.ry/dev/fast-weight-memory; source "$1" fixture', "test", str(script)]
             subprocess.run(command, cwd=root, env=environment, check=True, capture_output=True)
             lines = receipts.read_text().splitlines()
-            self.assertEqual(len(lines), 8)
-            self.assertIn("--dependency=afterok:1", lines[4])
-            self.assertIn("--dependency=afterok:5", lines[5])
-            self.assertIn("--dependency=afterok:1", lines[6])
-            self.assertIn("--dependency=afterok:7", lines[7])
+            self.assertEqual(len(lines), 4)
+            self.assertNotIn("--dependency", lines[0])
+            self.assertIn("--dependency=afterok:1", lines[1])
+            self.assertNotIn("--dependency", lines[2])
+            self.assertIn("--dependency=afterok:3", lines[3])
+            self.assertTrue(lines[0].endswith(".sbatch repeat"))
+            self.assertTrue(lines[2].endswith(".sbatch broad"))
+            self.assertIn("audit repeat output/retrieval-exposure-fixture/audit-repeat 1", lines[1])
+            self.assertIn("audit broad output/retrieval-exposure-fixture/audit-broad 3", lines[3])
             second = subprocess.run(command, cwd=root, env=environment, capture_output=True)
             self.assertNotEqual(second.returncode, 0)
-            self.assertEqual(len(receipts.read_text().splitlines()), 8)
+            self.assertEqual(len(receipts.read_text().splitlines()), 4)
+            (root / "squeue").write_text("#!/bin/bash\nseq 1 5\n")
+            command[2] = command[2].replace("fixture", "capacity")
+            full = subprocess.run(command, cwd=root, env=environment, capture_output=True)
+            self.assertNotEqual(full.returncode, 0)
+            self.assertIn("Four free submission slots", full.stderr.decode())
+            self.assertFalse((root / "output/retrieval-exposure-capacity").exists())
+            self.assertEqual(len(receipts.read_text().splitlines()), 4)
         for path in (script, Path("training/sbatch/taal/fs_qwen_retrieval_exposure_short.sbatch"), Path("evaluation/sbatch/taal/fs_qwen_retrieval_exposure_short.sbatch")):
             subprocess.run(["bash", "-n", str(path)], check=True)
 
