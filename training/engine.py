@@ -10,6 +10,7 @@ from typing import Callable
 import torch
 
 from data.retrieval import RetrievalDataset
+from utils.precision import precision_context
 
 from .config import (
     BridgeMemoryLossConfig,
@@ -140,11 +141,6 @@ class CandidateScores:
         }
 
 
-def precision_context(device: torch.device):
-    # CPU is supported for small unit tests, not for the actual training command.
-    return torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
-
-
 def perplexity(loss: float) -> float:
     if math.isnan(loss):
         return math.nan
@@ -191,6 +187,10 @@ def forward_batch(
         )
     if not isinstance(loss_config, CausalLMLossConfig):
         raise TypeError(f"Unsupported loss config: {type(loss_config).__name__}")
+    if isinstance(model, TaalQwen3ForCausalLM):
+        inputs["eos_loss_weight"] = loss_config.eos_weight
+    elif loss_config.eos_weight != 1.0:
+        raise ValueError("EOS weighting currently requires the TaaL Qwen host")
     return model(**inputs, state=None, use_cache=False)
 
 
@@ -228,7 +228,7 @@ def _validate_pass(
                 return None
             batch = move_batch(batch, device)
             B, S = batch["input_ids"].shape
-            with precision_context(device):
+            with precision_context(device, getattr(getattr(model, "config", None), "execution_precision", "bf16")):
                 output = forward_batch(
                     model,
                     batch,
@@ -412,7 +412,7 @@ def train_loop(
 
             timer = None
             sampler = None
-            if timing_pending and isinstance(model, TaalQwen3ForCausalLM):
+            if timing_pending and isinstance(model, TaalQwen3ForCausalLM) and model.config.adapter_type == "memory":
                 timer = TaalMicrobatchTimer(model, device, S)
                 timing_pending = False
                 if device.type == "cuda":
@@ -426,7 +426,7 @@ def train_loop(
                 timer if timer is not None else nullcontext(),
                 sampler if sampler is not None else nullcontext(),
             ):
-                with precision_context(device):
+                with precision_context(device, getattr(getattr(model, "config", None), "execution_precision", "bf16")):
                     output = forward_batch(model, batch, config.loss)
                     loss = output.loss
                     if isinstance(config.loss, CausalLMLossConfig):
@@ -458,7 +458,13 @@ def train_loop(
 
             # Match TTCD: average the microbatch gradients over this update.
             backward_started_at = time.perf_counter() if timer is not None else None
-            (loss / config.training.gradient_accumulation_steps).backward()
+            # FP32 also covers backward matmuls; restoring TF32 immediately
+            # after forward would silently weaken the precision ablation.
+            backward_precision = nullcontext()
+            if getattr(config.model, "execution_precision", "bf16") == "fp32":
+                backward_precision = precision_context(device, "fp32")
+            with backward_precision:
+                (loss / config.training.gradient_accumulation_steps).backward()
             if backward_started_at is not None:
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)

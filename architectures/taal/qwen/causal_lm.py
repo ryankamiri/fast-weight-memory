@@ -10,6 +10,7 @@ from architectures.shared.qwen.causal_lm import (
     StatefulQwen3ForCausalLM,
 )
 from architectures.taal.layer import TaalLayer
+from architectures.taal.static_adapter import StaticResidualAdapter
 from architectures.titans.neural_memory import MemoryMLP, NeuralMemory
 from inference.generation import GenerationOutput
 
@@ -42,6 +43,8 @@ class TaalQwen3ForCausalLM(StatefulQwen3ForCausalLM):
     @torch.no_grad()
     def _init_weights(self, module):
         super()._init_weights(module)
+        if isinstance(module, StaticResidualAdapter):
+            module.residual_gate.zero_()
         if isinstance(module, TaalLayer):
             # Missing gates must start at zero after HF materializes meta
             # storage. Saved TaaL gates are loaded from the checkpoint as usual.
@@ -217,6 +220,7 @@ class TaalQwen3ForCausalLM(StatefulQwen3ForCausalLM):
         persistent_mask: Bool[torch.Tensor, "S"] | None = None,
         memory_read_scale: float = 1.0,
         prepend_memory_tokens: bool | None = None,
+        eos_loss_weight: float = 1.0,
     ) -> TaalQwen3CausalLMOutput:
         self._validate_lm_inputs(input_ids, labels, logits_to_keep)
         output = self.model(
@@ -234,6 +238,7 @@ class TaalQwen3ForCausalLM(StatefulQwen3ForCausalLM):
             output.last_hidden_state,
             labels,
             logits_to_keep,
+            eos_loss_weight,
         )
         return TaalQwen3CausalLMOutput(
             loss=loss,

@@ -12,6 +12,7 @@ from architectures.shared.qwen.cache import SlidingWindowKVCache
 from architectures.shared.qwen.masking import prepare_sliding_attention_mask
 from architectures.shared.qwen.model import StatefulQwen3Model
 from architectures.taal.layer import TaalLayer
+from architectures.taal.static_adapter import StaticResidualAdapter
 from architectures.titans.neural_memory import MemoryMLP, NeuralMemory
 
 from .configuration import TaalQwen3Config
@@ -41,6 +42,8 @@ class TaalQwen3Model(StatefulQwen3Model):
     @torch.no_grad()
     def _init_weights(self, module):
         super()._init_weights(module)
+        if isinstance(module, StaticResidualAdapter):
+            module.residual_gate.zero_()
         if isinstance(module, TaalLayer):
             # HF can replace missing meta parameters with empty storage, so
             # constructor zeros are not enough when loading ordinary Qwen.
@@ -74,19 +77,21 @@ class TaalQwen3Model(StatefulQwen3Model):
         return TaalQwen3DecoderLayer(
             config,
             layer_idx,
-            taal_config=config.taal_layer_config(),
+            taal_config=config.taal_layer_config() if config.adapter_type == "memory" else None,
         )
 
     def initial_memory_states(self, batch_size: int) -> NeuralMemoryStates:
         return {
             layer_index: layer.taal.neural_memory.initial_state(batch_size)
             for layer_index, layer in enumerate(self.layers)
+            if self.config.adapter_type == "memory"
         }
 
     def zero_memory_states(self, batch_size: int) -> NeuralMemoryStates:
         return {
             layer_index: layer.taal.neural_memory.zero_state(batch_size)
             for layer_index, layer in enumerate(self.layers)
+            if self.config.adapter_type == "memory"
         }
 
     @jaxtyped(typechecker=beartype)
@@ -162,7 +167,7 @@ class TaalQwen3Model(StatefulQwen3Model):
 
         tokens_seen = state.tokens_seen if state is not None else 0
         memory_states = {} if state is None else state.memory_states
-        expected_layers = set(range(len(self.layers)))
+        expected_layers = set(range(len(self.layers))) if self.config.adapter_type == "memory" else set()
         if past_key_values is not None and any(
             layer.get_seq_length() != tokens_seen
             for layer in past_key_values.layers
@@ -268,6 +273,8 @@ class TaalQwen3Model(StatefulQwen3Model):
                     prepend_memory_tokens=prepend_memory_tokens,
                 )
 
+        # Stateless controls keep only attention KV, never fabricated memory state.
+        next_memory_states = {index: memory for index, memory in next_memory_states.items() if memory is not None}
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
             all_hidden_states += (hidden_states,)

@@ -11,6 +11,9 @@ class TaalQwen3Config(Qwen3Config):
 
     def __init__(
         self,
+        adapter_type: str = "memory",
+        static_adapter_width: int = 169,
+        execution_precision: str = "bf16",
         working_memory_size: int = 4096,
         max_persistent_kv_tokens: int = 512,
         memory_dim: int = 256,
@@ -43,6 +46,18 @@ class TaalQwen3Config(Qwen3Config):
                 "max_persistent_kv_tokens must be a nonnegative integer"
             )
 
+        if adapter_type not in ("memory", "static"):
+            raise ValueError("adapter_type must be memory or static")
+        if type(static_adapter_width) is not int or static_adapter_width < 1:
+            raise ValueError("static_adapter_width must be positive")
+        if execution_precision not in ("bf16", "fp32"):
+            raise ValueError("execution_precision must be bf16 or fp32")
+        if adapter_type == "static" and num_persistent_tokens != 0:
+            raise ValueError("Static adapters have no persistent memory tokens")
+        self.adapter_type = adapter_type
+        self.static_adapter_width = static_adapter_width
+        self.execution_precision = execution_precision
+
         memory = NeuralMemoryConfig(
             dim=memory_dim,
             depth=memory_depth,
@@ -59,12 +74,12 @@ class TaalQwen3Config(Qwen3Config):
             normalization_eps=memory_normalization_eps,
             max_write_grad_norm=memory_max_write_grad_norm,
         )
-        taal = TaalLayerConfig(
-            model_dim=self.hidden_size,
-            memory=memory,
-            num_persistent_tokens=num_persistent_tokens,
-            persistent_init_std=persistent_init_std,
-        )
+        if adapter_type == "memory":
+            TaalLayerConfig(
+                model_dim=self.hidden_size, memory=memory,
+                num_persistent_tokens=num_persistent_tokens,
+                persistent_init_std=persistent_init_std,
+            )
 
         self.working_memory_size = working_memory_size
         # Qwen attention K/V retained outside the rolling working-memory
@@ -84,8 +99,8 @@ class TaalQwen3Config(Qwen3Config):
         self.memory_norm_residual = memory.norm_residual
         self.memory_normalization_eps = memory.normalization_eps
         self.memory_max_write_grad_norm = memory.max_write_grad_norm
-        self.num_persistent_tokens = taal.num_persistent_tokens
-        self.persistent_init_std = taal.persistent_init_std
+        self.num_persistent_tokens = num_persistent_tokens
+        self.persistent_init_std = persistent_init_std
 
     def taal_layer_config(self) -> TaalLayerConfig:
         return TaalLayerConfig(

@@ -9,6 +9,7 @@ from transformers.utils.generic import TransformersKwargs
 
 from architectures.taal.configuration import TaalLayerConfig
 from architectures.taal.layer import TaalLayer
+from architectures.taal.static_adapter import StaticResidualAdapter
 from architectures.titans.state import NeuralMemoryState
 
 
@@ -19,14 +20,19 @@ class TaalQwen3DecoderLayer(Qwen3DecoderLayer):
         self,
         config: Qwen3Config,
         layer_idx: int,
-        taal_config: TaalLayerConfig,
+        taal_config: TaalLayerConfig | None,
     ):
-        if taal_config.model_dim != config.hidden_size:
+        if taal_config is not None and taal_config.model_dim != config.hidden_size:
             raise ValueError(
                 "taal_config.model_dim must equal the Qwen hidden size"
             )
         super().__init__(config, layer_idx)
-        self.taal = TaalLayer(taal_config)
+        if config.adapter_type == "static":
+            self.taal = StaticResidualAdapter(config.hidden_size, config.static_adapter_width)
+        else:
+            if taal_config is None:
+                raise ValueError("Memory adapters require TaalLayerConfig")
+            self.taal = TaalLayer(taal_config)
 
     def forward_memory(
         self,
@@ -35,8 +41,12 @@ class TaalQwen3DecoderLayer(Qwen3DecoderLayer):
         write_mask: Bool[torch.Tensor, "B S"] | None = None,
         memory_read_scale: float = 1.0,
         prepend_memory_tokens: bool = True,
-    ) -> tuple[Float[torch.Tensor, "B S D_model"], NeuralMemoryState]:
+    ) -> tuple[Float[torch.Tensor, "B S D_model"], NeuralMemoryState | None]:
         """Keep torch.func.grad memory updates outside checkpoint saved-tensor hooks."""
+        if isinstance(self.taal, StaticResidualAdapter):
+            if memory_state is not None or write_mask is not None or memory_read_scale != 1.0:
+                raise ValueError("Static adapters do not support memory interventions")
+            return self.taal(hidden_states), None
         return self.taal(
             hidden_states,
             state=memory_state,
@@ -99,7 +109,7 @@ class TaalQwen3DecoderLayer(Qwen3DecoderLayer):
         memory_read_scale: float = 1.0,
         prepend_memory_tokens: bool = True,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> tuple[Float[torch.Tensor, "B S D_model"], NeuralMemoryState]:
+    ) -> tuple[Float[torch.Tensor, "B S D_model"], NeuralMemoryState | None]:
         # Memory changes the representation entering both the ordinary Qwen
         # residual path and attention. Its persistent tokens stay inside TaaL.
         hidden_states, next_memory_state = self.forward_memory(

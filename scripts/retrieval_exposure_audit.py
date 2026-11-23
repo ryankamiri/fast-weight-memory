@@ -160,7 +160,7 @@ def generation_audit(model, tokenizer, provenance, rows, output, allocation, rea
                          memory_read_scale=read_scale)
     backend.validate([example.prompt for example in examples], save_traces=True)
     device = next(model.parameters()).device
-    with precision_context(device):
+    with precision_context(device, getattr(model.config, "execution_precision", "bf16")):
         summary = run(backend, benchmark, examples, output,
                       {"cohort": str(output.name), "selection_sha256": file_sha256(COHORT / "selection.json")},
                       seed=42, save_traces=True, should_stop=allocation.stopped)

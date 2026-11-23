@@ -23,7 +23,7 @@ from .optimization import build_optimizer
 from .checkpoints import ModelCheckpoints
 from .stopping import reached_validation_target
 from .resume import TrainingState
-from .retrieval_validation import RetrievalValidation
+from .retrieval_validation import RetrievalValidation, trainable_fingerprint
 from evaluation.taal.training_trace import export_training_traces
 
 
@@ -219,6 +219,10 @@ def main():
     configure_trainable_parameters(
         model, config.training.trainable_parameters,
     )
+    if split_data:
+        precision = getattr(config.model, "execution_precision", "bf16")
+        print(f"RETRIEVAL_INITIAL_STATE precision={precision} "
+              f"trainable_sha256={trainable_fingerprint(model)} resume={args.resume}", flush=True)
     optimizer = build_optimizer(model, config)
     scheduler = build_scheduler(optimizer, config)
     train_loader = create_dataloader(

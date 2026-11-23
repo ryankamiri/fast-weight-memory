@@ -79,6 +79,7 @@ def run_segment(config_path, run_id, job_id, restart_count):
             # Exit nonzero if Slurm rejects it; never turn an incomplete run into success.
             subprocess.run(["scontrol", "requeue", job_id], check=True, timeout=60)
             raise SystemExit(75)
+        return timed_out
     finally:
         signal.signal(signal.SIGUSR1, prior_usr1)
         signal.signal(signal.SIGTERM, prior_term)

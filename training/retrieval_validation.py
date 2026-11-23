@@ -13,6 +13,7 @@ from evaluation.shared.benchmarks import ControlledBenchmark
 from evaluation.shared.runner import run
 from evaluation.storage import file_sha256
 from training.engine import precision_context, validate
+from training.config import CausalLMLossConfig
 from training.resume import restore_rng, rng_state
 
 
@@ -86,7 +87,7 @@ class RetrievalValidation:
             fingerprint = trainable_fingerprint(model)
             for split, rows in self.rows.items():
                 batches = [CausalLMCollator()([row]) for row in rows]
-                losses = validate(model, batches, device, should_stop, [1.0], self.config.loss)
+                losses = validate(model, batches, device, should_stop, [1.0], CausalLMLossConfig())
                 if losses is None:
                     return None
 
@@ -103,7 +104,7 @@ class RetrievalValidation:
                         "tokenizer": self.config.model.model_id,
                         "tokenizer_revision": self.config.model.revision,
                         "trainable_sha256": fingerprint,
-                        "precision": "FP32 parameters; BF16 CUDA autocast",
+                        "precision": self.config.model.execution_precision,
                     },
                     {
                         "do_sample": False,
@@ -111,7 +112,7 @@ class RetrievalValidation:
                         "eos_token_id": self.tokenizer.eos_token_id,
                     },
                 )
-                with precision_context(device):
+                with precision_context(device, self.config.model.execution_precision):
                     summary = run(
                         backend, self.benchmark, self.examples[split], output,
                         self.identity | {"split": split}, self.config.training.seed,

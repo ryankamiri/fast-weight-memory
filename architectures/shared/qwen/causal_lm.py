@@ -37,12 +37,29 @@ def causal_lm_loss(
     lm_head: nn.Linear,
     hidden_states: Float[torch.Tensor, "N D_model"],
     labels: Int[torch.Tensor, "B S"],
+    eos_token_id: int | None = None,
+    eos_weight: float = 1.0,
 ) -> Float[torch.Tensor, ""]:
     """Compute next-token loss without materializing full CUDA logits."""
     # N = B * (S - 1): every next-token prediction flattened across batch and sequence.
     targets: Int[torch.Tensor, "N"] = labels[:, 1:].reshape(-1).to(
         hidden_states.device
     )
+    if not math.isfinite(eos_weight) or eos_weight < 0:
+        raise ValueError("eos_weight must be finite and nonnegative")
+    if eos_weight != 1.0:
+        if eos_token_id is None:
+            raise ValueError("EOS weighting requires an EOS token ID")
+        # Use the same fused CUDA loss as the unweighted control. The EOS
+        # term changes coefficient, while the original token denominator stays.
+        base_loss = causal_lm_loss(lm_head, hidden_states, labels)
+        eos_mask = labels == eos_token_id
+        eos_count = (targets == eos_token_id).sum()
+        if not bool(eos_count):
+            return base_loss
+        eos_labels = labels.masked_fill(~eos_mask, -100)
+        eos_loss = causal_lm_loss(lm_head, hidden_states, eos_labels)
+        return base_loss + (eos_weight - 1.0) * eos_loss * eos_count / (targets != -100).sum()
     if hidden_states.is_cuda:
         if LigerFusedLinearCrossEntropyLoss is None:
             raise ImportError("CUDA loss requires Liger.")
@@ -89,6 +106,7 @@ class StatefulQwen3ForCausalLM(Qwen3PreTrainedModel, ABC):
         hidden_states: Float[torch.Tensor, "B S D_model"],
         labels: Int[torch.Tensor, "B S"] | None,
         logits_to_keep: int,
+        eos_loss_weight: float = 1.0,
     ) -> tuple[
         Float[torch.Tensor, ""] | None,
         Float[torch.Tensor, "B S_logits vocab_size"] | None,
@@ -99,7 +117,7 @@ class StatefulQwen3ForCausalLM(Qwen3PreTrainedModel, ABC):
             flattened: Float[torch.Tensor, "N D_model"] = (
                 hidden_states[:, :-1].reshape(-1, self.config.hidden_size)
             )
-            loss = causal_lm_loss(self.lm_head, flattened, labels)
+            loss = causal_lm_loss(self.lm_head, flattened, labels, self.config.eos_token_id, eos_loss_weight)
 
         logits = None
         if labels is None or logits_to_keep > 0:

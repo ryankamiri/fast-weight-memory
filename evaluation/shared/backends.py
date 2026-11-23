@@ -30,7 +30,7 @@ class QwenBackend(Backend):
         self.tokenizer = tokenizer
         self.provenance = provenance
         self.generation = dict(generation)
-        self.is_taal = isinstance(model.config, TaalQwen3Config)
+        self.is_taal = isinstance(model.config, TaalQwen3Config) and model.config.adapter_type == "memory"
         self.capabilities = Capabilities(
             memory_trace=self.is_taal, read_scale=self.is_taal
         )

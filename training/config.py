@@ -55,6 +55,9 @@ class TTCDModelConfig(ModelConfig):
 
 @dataclass
 class TaalModelConfig(ModelConfig):
+    adapter_type: str = "memory"
+    static_adapter_width: int = 169
+    execution_precision: str = "bf16"
     working_memory_size: int = 2048
     memory_dim: int = 128
     memory_depth: int = 2
@@ -133,6 +136,8 @@ class LossConfig(ABC):
 
 @dataclass
 class CausalLMLossConfig(LossConfig):
+    eos_weight: float = 1.0
+
     @property
     def objective(self) -> Literal["causal_lm"]:
         return "causal_lm"
@@ -258,12 +263,29 @@ class TrainingConfig:
             values["validation"].pop("probe_max_new_tokens")
         if isinstance(self.validation, TaalValidationConfig) and self.validation.context_access == "evicted":
             values["validation"].pop("context_access")
+        # Preserve the identity of historical recipes when new controls are unused.
+        for name, default in (("adapter_type", "memory"), ("static_adapter_width", 169), ("execution_precision", "bf16")):
+            if values["model"].get(name) == default:
+                values["model"].pop(name)
+        if values["loss"].get("eos_weight") == 1.0:
+            values["loss"].pop("eos_weight")
         values["model"]["architecture"] = self.model.architecture
         values["data"]["record_format"] = self.data.record_format
         values["loss"]["objective"] = self.loss.objective
         return values
 
     def validate(self):
+        if isinstance(self.loss, CausalLMLossConfig) and (not math.isfinite(self.loss.eos_weight) or self.loss.eos_weight < 0):
+            raise ValueError("eos_weight must be finite and nonnegative")
+        if isinstance(self.model, TaalModelConfig):
+            if type(self.model.static_adapter_width) is not int or self.model.static_adapter_width < 1:
+                raise ValueError("static_adapter_width must be a positive integer")
+            if self.model.execution_precision not in ("bf16", "fp32"):
+                raise ValueError("execution_precision must be bf16 or fp32")
+            if self.model.adapter_type not in ("memory", "static"):
+                raise ValueError("adapter_type must be memory or static")
+            if self.model.adapter_type == "static" and self.model.num_persistent_tokens != 0:
+                raise ValueError("Static adapters cannot have persistent tokens")
         checkpoint = self.training.initialize_from_checkpoint
         if checkpoint is not None:
             if not isinstance(checkpoint, str) or not checkpoint.strip():
@@ -377,6 +399,8 @@ class TrainingConfig:
                 "num_persistent_tokens",
             ):
                 value = getattr(self.model, name)
+                if name == "num_persistent_tokens" and self.model.adapter_type == "static" and value == 0:
+                    continue
                 if type(value) is not int or value < 1:
                     raise ValueError(f"{name} must be a positive integer")
             for name in (

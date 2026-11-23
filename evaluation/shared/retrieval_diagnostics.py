@@ -61,7 +61,7 @@ def score_answer(model, row):
     prompt_length = len(row["prompt_input_ids"])
     labels = ids[0, prompt_length:]
     model.eval()
-    with torch.inference_mode(), precision_context(device):
+    with torch.inference_mode(), precision_context(device, getattr(model.config, "execution_precision", "bf16")):
         output = model(ids, use_cache=False, logits_to_keep=len(labels) + 1)
         # Position P-1 predicts the first label; the final EOS input predicts nothing scored.
         logits = output.logits[0, :-1]
@@ -125,13 +125,13 @@ def path_parity(model, row):
         model.train()
         # Execute the actual grad-enabled training forward and CUDA fused loss.
         # No optimizer step or backward is performed in this read-only diagnostic.
-        with torch.enable_grad(), precision_context(device):
+        with torch.enable_grad(), precision_context(device, getattr(model.config, "execution_precision", "bf16")):
             output = model(ids, labels=labels, use_cache=False, logits_to_keep=len(answer) + 1)
             training_logits = output.logits[0, :-1].detach().float().clone()
             training_loss = float(output.loss.detach())
         del output
         model.eval()
-        with torch.inference_mode(), precision_context(device):
+        with torch.inference_mode(), precision_context(device, getattr(model.config, "execution_precision", "bf16")):
             output = model.prefill(ids[:, :prompt_length])
             decoding_logits = [output.logits[0, -1].float()]
             for token in answer[:-1]:
