@@ -36,7 +36,8 @@ OLD_ARMS = {
 
 
 class Allocation:
-    def __init__(self):
+    def __init__(self, max_allocations=6):
+        self.max_allocations = max_allocations
         self.timed_out = False
         self.cancelled = False
 
@@ -56,8 +57,8 @@ class Allocation:
             return
         if not self.timed_out:
             raise RuntimeError("Incomplete audit without allocation warning")
-        if int(os.environ.get("SLURM_RESTART_COUNT", "0")) >= 5:
-            raise RuntimeError("Six allocations exhausted; inspect partial diagnostics")
+        if int(os.environ.get("SLURM_RESTART_COUNT", "0")) >= self.max_allocations - 1:
+            raise RuntimeError(f"{self.max_allocations} allocations exhausted; inspect partial diagnostics")
         job_id = os.environ["SLURM_JOB_ID"]
         if not job_id.isdigit():
             raise ValueError("Expected numeric Slurm ID")

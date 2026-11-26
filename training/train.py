@@ -187,8 +187,12 @@ def main():
     args = parser.parse_args()
     config = load_config(args.config)
     if args.resume is not None:
-        if not config.checkpoints.save_training_state or config.training.initialize_from_checkpoint:
-            raise ValueError("Resume requires full checkpoint support and cannot be combined with warm start")
+        if not config.checkpoints.save_training_state:
+            raise ValueError("Resume requires full checkpoint support")
+
+        # A continuation may itself span allocations. Resume its optimizer/data/RNG
+        # state, rather than reloading its original parent and restarting training.
+        # TrainingState.restore still requires the identical warm-start recipe.
 
         if not (args.resume / "trainer_state.pt").is_file():
             raise ValueError("Resume requires trainer_state.pt; a weights-only checkpoint is a warm start")

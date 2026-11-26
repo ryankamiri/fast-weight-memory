@@ -80,9 +80,12 @@ def token_span(offsets, start: int, end: int) -> list[int]:
     return [indices[0], indices[-1] + 1]
 
 
-def render_example(tokenizer, config, family_id, keys, values, order, assignment, query_index):
+def render_example(tokenizer, config, family_id, keys, values, order, assignment, query_index,
+                   prefact_text="", filler_text=FILLER):
     instruction = "Return only the archive label for the requested record.\n\n"
-    prefix = instruction
+    prefix = instruction + prefact_text
+    if not filler_text:
+        raise ValueError("Filler must advance the source-to-query gap")
     fact_char_spans = []
     for index in order:
         start = len(prefix)
@@ -96,7 +99,7 @@ def render_example(tokenizer, config, family_id, keys, values, order, assignment
 
     # Re-tokenize the exact complete prompt; boundary merges must not fake eviction.
     for repetitions in range(config.max_sequence_tokens + 1):
-        context = prefix + FILLER * repetitions
+        context = prefix + filler_text * repetitions
         prompt = context + query
         encoded = tokenizer(prompt, add_special_tokens=False, return_offsets_mapping=True)
         prompt_ids = list(encoded["input_ids"])

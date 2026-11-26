@@ -1,0 +1,13 @@
+dataset:
+  path: data/single_fact/controls.jsonl
+execution_block_size: 128
+state_bank_batch_size: 1
+seed: 42
+save_traces: true
+swap_group_field: pair_group
+prefix_group_field: prefix_group
+audit_suite: standard
+memory_max_write_grad_norm: 1.0
+persistent_writes_enabled: true
+query_updates_enabled: true
+parameter_dtype: float32

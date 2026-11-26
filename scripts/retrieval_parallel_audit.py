@@ -105,7 +105,7 @@ def baseline_config(base, window):
     })
 
 
-def load_baseline(name, device, output):
+def load_baseline(name, device, output, parity_row=None):
     settings = load_config(recipe_path("r3")).model
     base = Qwen3Config.from_pretrained(settings.model_id, revision=settings.revision)
     window = 4096 if name == "u_full" else 128
@@ -127,7 +127,9 @@ def load_baseline(name, device, output):
         # Compare actual pretrained weights through original HF Qwen and our wrapper.
         original = Qwen3ForCausalLM.from_pretrained(settings.model_id, revision=settings.revision,
                     dtype=torch.float32, attn_implementation="sdpa").to(device).eval()
-        ids = torch.tensor([checked_rows("common-fit")[0]["prompt_input_ids"]], device=device)
+        if parity_row is None:
+            parity_row = checked_rows("common-fit")[0]
+        ids = torch.tensor([parity_row["prompt_input_ids"]], device=device)
         with torch.inference_mode(), precision_context(device, "fp32"):
             expected = original(ids, logits_to_keep=1).logits
             actual = model(ids, logits_to_keep=1).logits

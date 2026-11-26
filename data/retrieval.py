@@ -12,8 +12,8 @@ from evaluation.storage import file_sha256
 def load_retrieval_splits(config):
     manifest_path = Path(config.manifest_path)
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("generator_version") != "balanced-retrieval-v1":
-        raise ValueError("Expected a balanced-retrieval-v1 manifest")
+    if manifest.get("generator_version") not in ("balanced-retrieval-v1", "single-fact-retrieval-v1"):
+        raise ValueError("Expected a versioned retrieval manifest")
 
     if set(config.split_files) != {"train", "val"}:
         raise ValueError("Training loads only explicit train and val files; test stays locked")
