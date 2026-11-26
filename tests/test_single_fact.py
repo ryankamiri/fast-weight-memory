@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -19,7 +20,8 @@ from data.retrieval import load_retrieval_splits
 from data.single_fact import SingleFactConfig, build, prepare
 from evaluation.storage import atomic_json
 from scripts.retrieval_exposure_audit import Allocation
-from scripts.single_fact import generation, pipeline, prepare_recipes
+from scripts.single_fact import PHASE_ALLOCATIONS, finish_comparison, generation, pipeline, prepare_recipes
+from scripts.retrieval_training_segment import finish_segment
 from scripts.single_fact_scoring import SingleFactBenchmark, paired_comparison, predicted_label, wilson
 from tests.test_taal_qwen_causal_lm import TaalQwen3CausalLMTests
 from tests.test_retrieval_exposure import TinyTokenizer
@@ -184,6 +186,106 @@ class SingleFactTests(unittest.TestCase):
                     self.assertTrue(generation(model, TinyTokenizer(), {"checkpoint": "tiny", "tokenizer": "tiny"},
                                                [row], output, Allocation()))
             self.assertEqual(len(list((output / "memory_traces/episodes").glob("*.json.gz"))), 1)
+
+    def test_split_acquisition_does_not_wait_for_baselines_or_train_children(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch("scripts.single_fact.check_inputs"), \
+                 patch("scripts.single_fact.needs_training", return_value=True), \
+                 patch("scripts.single_fact.run_segment", return_value=False) as train, \
+                 patch("scripts.single_fact.audit_checkpoint", return_value=True) as audit, \
+                 patch("scripts.single_fact.load_baseline") as baseline:
+                pipeline(root, "123", 0, torch.device("cpu"), "acquisition")
+            baseline.assert_not_called()
+            train.assert_called_once()
+            self.assertEqual(train.call_args.args[-1], 6)
+            self.assertEqual(audit.call_args.args[-1], False)
+            self.assertTrue((root / "jobs/acquisition/complete.json").is_file())
+            self.assertEqual([p.name for p in (root / "recipes").glob("*.yaml")], ["acquisition.yaml"])
+            self.assertFalse((root / "complete.json").exists())
+
+    def test_split_continuation_requires_complete_parent_and_runs_only_its_arm(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch("scripts.single_fact.check_inputs"):
+                with self.assertRaisesRegex(ValueError, "acquisition has not completed"):
+                    pipeline(root, "124", 0, torch.device("cpu"), "narrow")
+            atomic_json(root / "jobs/acquisition/complete.json", {"complete": True})
+            with patch("scripts.single_fact.check_inputs"), \
+                 patch("scripts.single_fact.validate_checkpoint") as parent, \
+                 patch("scripts.single_fact.needs_training", return_value=True), \
+                 patch("scripts.single_fact.run_segment", return_value=False) as train, \
+                 patch("scripts.single_fact.audit_checkpoint", return_value=True), \
+                 patch("scripts.single_fact.run_controls", return_value=True) as controls:
+                pipeline(root, "124", 0, torch.device("cpu"), "narrow")
+            parent.assert_called_once()
+            self.assertEqual(parent.call_args.args[0], root / "recipes/acquisition.yaml")
+            train.assert_called_once()
+            self.assertEqual(train.call_args.args[1], f"{root.name}-narrow")
+            self.assertEqual(train.call_args.args[-1], 4)
+            controls.assert_called_once()
+            self.assertTrue((root / "jobs/narrow/complete.json").is_file())
+            self.assertFalse((root / "mixed").exists())
+
+    def test_parallel_completion_waits_for_all_receipts_and_compares_once(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch("scripts.single_fact.compare") as compare:
+                for phase in ("mixed", "narrow", "acquisition"):
+                    atomic_json(root / "jobs" / phase / "complete.json", {"complete": True})
+                    finish_comparison(root)
+                compare.assert_not_called()
+                atomic_json(root / "jobs/baselines/complete.json", {"complete": True})
+                finish_comparison(root)
+                finish_comparison(root)
+                compare.assert_called_once_with(root)
+                self.assertTrue((root / "complete.json").is_file())
+
+    def test_split_budget_stops_training_requeue_at_its_own_limit(self):
+        self.assertEqual(sum(PHASE_ALLOCATIONS.values()), 16)
+        with TemporaryDirectory() as directory:
+            checkpoint = Path(directory)
+            (checkpoint / "trainer_state.pt").touch()
+            atomic_json(checkpoint / "training_metadata.json", {"progress": {"step": 256}, "reason": "signal"})
+            self.assertEqual(finish_segment(checkpoint, 128, 512, True, 2, 4), "requeue")
+            with self.assertRaisesRegex(ValueError, "4 allocations exhausted"):
+                finish_segment(checkpoint, 128, 512, True, 3, 4)
+
+    def test_parallel_launcher_partitions_dependencies_and_full_queue_guard(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "output").mkdir()
+            commands = root / "bin"
+            commands.mkdir()
+            (commands / "git").write_text("#!/bin/bash\necho titans-impl\n")
+            (commands / "python3").write_text("#!/bin/bash\nexit 0\n")
+            (commands / "squeue").write_text(
+                '#!/bin/bash\nif [[ "$*" == *gpu-short* ]]; then\nfor ((i=0;i<${TEST_SHORT_COUNT:-7};i++)); do echo old; done\nfi\n')
+            (commands / "sbatch").write_text(
+                '#!/bin/bash\necho "$*" >> calls.txt\necho $((900 + $(wc -l < calls.txt)))\n')
+            for command in commands.iterdir():
+                command.chmod(0o755)
+            source = Path("scripts/queue_single_fact.sh").read_text()
+            script = root / "queue.sh"
+            script.write_text(source.replace("/projects/llpr/amiri.ry/dev/fast-weight-memory", str(root)))
+            environment = dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}")
+            submitted = subprocess.run(["bash", str(script), "fixture", "gpu"], cwd=root, env=environment, capture_output=True, text=True)
+            self.assertEqual(submitted.returncode, 0, submitted.stderr)
+            calls = (root / "calls.txt").read_text().splitlines()
+            self.assertEqual(len(calls), 4)
+            self.assertIn("--partition=gpu-short", calls[0])
+            for call in calls[1:]:
+                self.assertIn("--partition=gpu ", call)
+            self.assertNotIn("--dependency", calls[0] + calls[1])
+            for call in calls[2:]:
+                self.assertIn("--dependency=afterok:902", call)
+                self.assertIn("--kill-on-invalid-dep=yes", call)
+            self.assertEqual(len((root / "output/single-fact-fixture/jobs.tsv").read_text().splitlines()), 4)
+            failed = subprocess.run(["bash", str(script), "full", "gpu"], cwd=root,
+                                    env=dict(environment, TEST_SHORT_COUNT="8"), capture_output=True)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertFalse((root / "output/single-fact-full").exists())
+            self.assertEqual(len((root / "calls.txt").read_text().splitlines()), 4)
 
 
 if __name__ == "__main__":

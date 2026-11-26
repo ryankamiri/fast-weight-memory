@@ -14,10 +14,10 @@
 #SBATCH --output=logs/taal-single-fact-%j.log
 #SBATCH --error=logs/taal-single-fact-%j.log
 
-if (( $# != 1 )); then
-    echo "Expected one unique output directory" >&2
+if (( $# < 1 || $# > 2 )); then
+    echo "Expected output directory and optional phase" >&2
     exit 2
 fi
 source "${SLURM_SUBMIT_DIR}/scripts/explorer_retrieval_env.sh" lr3e4
 python -m scripts.single_fact_preflight
-exec python -m scripts.single_fact --output-dir "$1"
+exec python -m scripts.single_fact --output-dir "$1" --phase "${2:-all}"

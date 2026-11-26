@@ -1,6 +1,7 @@
 """Resumable acquisition, matched continuations and predeclared single-fact audits."""
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -32,13 +33,14 @@ from utils.seed import seed_everything
 
 ROOT = Path("data/single_fact")
 MAX_ALLOCATIONS = 16
+PHASE_ALLOCATIONS = {"baselines": 2, "acquisition": 6, "narrow": 4, "mixed": 4}
 
 
-def prepare_recipes(output):
+def prepare_recipes(output, arms=("acquisition", "narrow", "mixed")):
     common = yaml.safe_load(Path("training/configs/taal/single_fact.yaml").read_text())
     parent = Path("checkpoints") / f"{output.name}-acquisition" / "final"
     recipes = {}
-    for arm in ("acquisition", "narrow", "mixed"):
+    for arm in arms:
         config = json.loads(json.dumps(common))
         if arm != "acquisition":
             config["data"]["dataset_id"] = f"data/single_fact/{arm}"
@@ -161,17 +163,47 @@ def compare(output):
     atomic_json(output / "comparisons.json", summaries)
 
 
-def pipeline(output, job_id, restart, device):
+def finish_comparison(output):
+    # Independent jobs publish their own receipts first. The last finisher
+    # computes the comparison under a lock, without occupying a fifth Slurm slot.
+    with (output / "comparison.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not all((output / "jobs" / phase / "complete.json").is_file() for phase in PHASE_ALLOCATIONS):
+            return
+        if not (output / "complete.json").is_file():
+            compare(output)
+            atomic_json(output / "complete.json", {"complete": True, "save_traces": True})
+
+
+def pipeline(output, job_id, restart, device, phase="all"):
+    if phase != "all" and phase not in PHASE_ALLOCATIONS:
+        raise ValueError(f"Unknown single-fact phase: {phase}")
     check_inputs()
     output.mkdir(parents=True, exist_ok=True)
-    ensure_manifest(output / "job.json", {"job_id": job_id, "max_allocations": MAX_ALLOCATIONS,
+    budget = MAX_ALLOCATIONS if phase == "all" else PHASE_ALLOCATIONS[phase]
+    job_output = output if phase == "all" else output / "jobs" / phase
+    ensure_manifest(job_output / "job.json", {"job_id": job_id, "max_allocations": budget,
                     "hours_per_allocation": 2, "save_traces": True,
                     "selection": "fixed final checkpoints; no test-guided tuning or checkpoint selection"})
-    recipes = prepare_recipes(output)
-    allocation = Allocation(MAX_ALLOCATIONS)
+    if phase == "all":
+        arms = ("acquisition", "narrow", "mixed")
+    elif phase == "baselines":
+        arms = ()
+    else:
+        arms = (phase,)
+    if phase in ("narrow", "mixed"):
+        # afterok is the scheduler dependency; these receipts also prevent a
+        # manually launched continuation from accepting a partial parent.
+        if not (output / "jobs/acquisition/complete.json").is_file():
+            raise ValueError("Shared acquisition has not completed")
+        validate_checkpoint(output / "recipes/acquisition.yaml",
+                            Path("checkpoints") / f"{output.name}-acquisition" / "final")
+    recipes = prepare_recipes(output, arms)
+    allocation = Allocation(budget)
+    baseline_arms = ("u_full", "u_sw128") if phase in ("all", "baselines") else ()
     previous = {signum: signal.signal(signum, allocation.signal) for signum in (signal.SIGUSR1, signal.SIGTERM)}
     try:
-        for arm in ("u_full", "u_sw128"):
+        for arm in baseline_arms:
             marker = output / arm / "complete.json"
             if marker.is_file():
                 continue
@@ -186,7 +218,7 @@ def pipeline(output, job_id, restart, device):
                 release()
             allocation.finish(complete)
             atomic_json(marker, {"complete": True, "test_questions": 512})
-        for arm in ("acquisition", "narrow", "mixed"):
+        for arm in arms:
             run_id = f"{output.name}-{arm}"
             checkpoint = Path("checkpoints") / run_id / "final"
             target = 768 if arm == "acquisition" else 512
@@ -197,7 +229,8 @@ def pipeline(output, job_id, restart, device):
             if allocation.stopped():
                 allocation.finish(False)
             if needs_training(checkpoint, target):
-                warned = run_segment(recipes[arm], run_id, job_id, restart - start)
+                training_budget = min(6, budget - start)
+                warned = run_segment(recipes[arm], run_id, job_id, restart - start, training_budget)
                 allocation.timed_out = allocation.timed_out or warned
             if allocation.stopped():
                 allocation.finish(False)
@@ -209,8 +242,12 @@ def pipeline(output, job_id, restart, device):
             if arm != "acquisition":
                 complete = run_controls(checkpoint, output / arm / "controls", allocation)
                 allocation.finish(complete)
-        compare(output)
-        atomic_json(output / "complete.json", {"complete": True, "save_traces": True})
+        if phase == "all":
+            compare(output)
+            atomic_json(output / "complete.json", {"complete": True, "save_traces": True})
+        else:
+            atomic_json(job_output / "complete.json", {"complete": True, "save_traces": True})
+            finish_comparison(output)
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
@@ -219,15 +256,17 @@ def pipeline(output, job_id, restart, device):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--phase", choices=["all", *PHASE_ALLOCATIONS], default="all")
     args = parser.parse_args()
     job_id = os.environ["SLURM_JOB_ID"]
     restart = int(os.environ.get("SLURM_RESTART_COUNT", "0"))
     if not job_id.isdigit() or not torch.cuda.is_available():
         raise ValueError("Expected a CUDA Slurm allocation")
-    if restart >= MAX_ALLOCATIONS:
+    budget = MAX_ALLOCATIONS if args.phase == "all" else PHASE_ALLOCATIONS[args.phase]
+    if restart >= budget:
         raise ValueError("Pipeline allocation budget exhausted")
     seed_everything(42)
-    pipeline(args.output_dir, job_id, restart, torch.device("cuda"))
+    pipeline(args.output_dir, job_id, restart, torch.device("cuda"), args.phase)
 
 
 if __name__ == "__main__":

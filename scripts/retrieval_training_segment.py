@@ -18,7 +18,7 @@ def checkpoint_progress(checkpoint):
     return metadata
 
 
-def finish_segment(checkpoint, previous_step, target_step, timed_out, restart_count):
+def finish_segment(checkpoint, previous_step, target_step, timed_out, restart_count, max_allocations=6):
     metadata = checkpoint_progress(checkpoint)
     step = metadata["progress"]["step"]
     if step == target_step:
@@ -27,12 +27,12 @@ def finish_segment(checkpoint, previous_step, target_step, timed_out, restart_co
         raise ValueError("Training did not make valid forward progress")
     if not timed_out or metadata["reason"] != "signal":
         raise ValueError("Incomplete training without the allocation warning; refusing success")
-    if restart_count >= 5:
-        raise ValueError("Six allocations exhausted; inspect progress before continuing")
+    if restart_count >= max_allocations - 1:
+        raise ValueError(f"{max_allocations} allocations exhausted; inspect progress before continuing")
     return "requeue"
 
 
-def run_segment(config_path, run_id, job_id, restart_count):
+def run_segment(config_path, run_id, job_id, restart_count, max_allocations=6):
     config = load_config(config_path)
     checkpoint = Path(config.checkpoints.output_dir) / run_id / "final"
     previous_step = 0
@@ -72,7 +72,7 @@ def run_segment(config_path, run_id, job_id, restart_count):
             raise subprocess.CalledProcessError(returncode, command)
         if cancelled:
             raise RuntimeError("Training cancelled; no automatic continuation")
-        action = finish_segment(checkpoint, previous_step, config.training.max_steps, timed_out, restart_count)
+        action = finish_segment(checkpoint, previous_step, config.training.max_steps, timed_out, restart_count, max_allocations)
         print(f"RETRIEVAL_SEGMENT action={action}", flush=True)
         if action == "requeue":
             # Requeue the still-running job: afterok remains blocked on this same ID.
