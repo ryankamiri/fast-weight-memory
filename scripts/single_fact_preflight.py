@@ -79,10 +79,35 @@ def check_precision_recipe(reference=Path("training/configs/taal/single_fact.yam
             "changed_fields": ["model.execution_precision", "wandb.name"], "updates": 768}
 
 
+def check_parent_submission(parent, parent_job):
+    if not parent_job.isdigit():
+        raise ValueError("Expected a numeric acquisition job ID")
+
+    acquisitions = []
+    for line in (parent / "jobs.tsv").read_text().splitlines():
+        fields = line.split("\t")
+        if fields[0] == "acquisition":
+            acquisitions.append(fields)
+    if len(acquisitions) != 1 or len(acquisitions[0]) != 4:
+        raise ValueError("Expected exactly one acquisition submission receipt")
+
+    phase, job_id, partition, output = acquisitions[0]
+    if job_id != parent_job or Path(output).resolve() != parent.resolve():
+        raise ValueError("Acquisition dependency does not match its output directory")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fp32", action="store_true")
+    parser.add_argument("--parent-output", type=Path)
+    parser.add_argument("--parent-job")
     args = parser.parse_args()
+    if (args.parent_output is None) != (args.parent_job is None):
+        parser.error("Parent output and job ID must be supplied together")
+
     check_inputs()
     if args.fp32:
         print("SINGLE_FACT_FP32_MATCH_VALID " + json.dumps(check_precision_recipe()), flush=True)
+    if args.parent_output is not None:
+        check_parent_submission(args.parent_output, args.parent_job)
+        print(f"SINGLE_FACT_PARENT_VALID job={args.parent_job} output={args.parent_output}", flush=True)

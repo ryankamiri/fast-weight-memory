@@ -25,13 +25,16 @@ RECIPE = Path("training/configs/taal/single_fact_fp32.yaml")
 PHASE_ALLOCATIONS = {"train": 6, "audit": 4}
 
 
-def compare_precisions(output):
+def compare_precisions(output, bf16_output=None, training_precision="fp32"):
+    if bf16_output is None:
+        bf16_output = output / "bf16"
+    directories = {"fp32": output / "fp32", "bf16": bf16_output}
     comparisons = {}
     for cohort in ("narrow", "val"):
         rows = load_rows(ROOT / f"{cohort}.jsonl")
         predictions = {}
         for precision in ("fp32", "bf16"):
-            predictions[precision] = read_results(output / precision / cohort / "predictions.jsonl", "example_id")
+            predictions[precision] = read_results(directories[precision] / cohort / "predictions.jsonl", "example_id")
             if set(predictions[precision]) != {row["example_id"] for row in rows}:
                 raise ValueError("Precision comparison needs both complete cohorts")
 
@@ -53,7 +56,7 @@ def compare_precisions(output):
         comparisons[cohort] = {
             "questions": len(rows), "fp32_gains": gains, "fp32_losses": losses,
             "changed_label": changed, "records": records,
-            "scope": "Same FP32-trained checkpoint; change evaluation precision only.",
+            "scope": f"Same {training_precision.upper()}-trained checkpoint; change evaluation precision only.",
         }
     atomic_json(output / "precision-comparison.json", comparisons)
 

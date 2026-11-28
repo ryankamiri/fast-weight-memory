@@ -143,6 +143,32 @@ class SingleFactPrecisionTests(unittest.TestCase):
                 audit.assert_not_called()
             self.assertFalse((output / "jobs/train/complete.json").exists())
 
+    def test_bf16_checkpoint_fp32_override_is_temporary_and_exports_traces(self):
+        config = TaalQwen3CausalLMTests().config(execution_precision="bf16", memory_max_write_grad_norm=1.0)
+        model = TaalQwen3ForCausalLM(config)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkpoint = root / "checkpoint"
+            model.save_pretrained(checkpoint)
+            saved = {path.name: path.read_bytes() for path in checkpoint.iterdir()}
+            for cohort in ("narrow", "val"):
+                (root / f"{cohort}.jsonl").write_text(json.dumps(self.row) + "\n")
+            atomic_json(root / "manifest.json", {"fixture": True})
+            with patch("scripts.single_fact.ROOT", root), \
+                 patch("scripts.single_fact.validate_checkpoint", return_value={"progress": {"step": 768}}), \
+                 patch("scripts.single_fact.AutoTokenizer.from_pretrained", return_value=TinyTokenizer()), \
+                 patch("scripts.single_fact.tokenizer_fingerprint", return_value="fixture"):
+                self.assertTrue(audit_checkpoint("recipe", checkpoint, root / "audit", Allocation(),
+                                                 torch.device("cpu"), False, "fp32"))
+            for cohort in ("narrow", "val"):
+                output = root / "audit" / cohort
+                execution = json.loads((output / "execution.json").read_text())
+                self.assertEqual(execution["precision"], "fp32")
+                self.assertFalse(execution["autocast_enabled"])
+                self.assertFalse(execution["matmul_tf32"])
+                self.assertEqual(len(list((output / "memory_traces/episodes").glob("*.json.gz"))), 1)
+            self.assertEqual(saved, {path.name: path.read_bytes() for path in checkpoint.iterdir()})
+
     def test_dependent_audit_requires_training_and_records_both_policies(self):
         with TemporaryDirectory() as directory:
             output = Path(directory)
