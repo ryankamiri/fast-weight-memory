@@ -26,7 +26,7 @@ from scripts.retrieval_parallel import needs_training
 from scripts.retrieval_parallel_audit import load_baseline, release
 from scripts.retrieval_training_segment import run_segment
 from scripts.single_fact_preflight import check_inputs
-from scripts.single_fact_scoring import SingleFactBenchmark, accuracy_summary, paired_comparison
+from scripts.single_fact_scoring import SingleFactBenchmark, accuracy_summary, assignment_summary, paired_comparison
 from utils.precision import precision_context
 from utils.seed import seed_everything
 
@@ -62,13 +62,26 @@ def prepare_recipes(output, arms=("acquisition", "narrow", "mixed")):
 
 
 def generation(model, tokenizer, provenance, rows, output, allocation, read_scale=1.0):
+    precision = getattr(model.config, "execution_precision", "bf16")
+    if provenance.get("precision", precision) != precision:
+        raise ValueError("Generation precision disagrees with its provenance")
+
     benchmark = SingleFactBenchmark()
     examples = [benchmark.prepare(row, tokenizer) for row in rows]
     backend = QwenBackend(model, tokenizer, provenance,
                          {"do_sample": False, "max_new_tokens": 8, "eos_token_id": tokenizer.eos_token_id},
                          memory_read_scale=read_scale)
     device = next(model.parameters()).device
-    with precision_context(device, "bf16"):
+    with precision_context(device, precision):
+        # Record the active policy, rather than inferring execution from parameter dtype.
+        execution = {
+            "precision": precision, "device_type": device.type,
+            "autocast_enabled": torch.is_autocast_enabled(device.type),
+            "matmul_tf32": torch.backends.cuda.matmul.allow_tf32,
+            "cudnn_tf32": torch.backends.cudnn.allow_tf32,
+            "float32_matmul_precision": torch.get_float32_matmul_precision(),
+        }
+        ensure_manifest(output / "execution.json", execution)
         summary = run(backend, benchmark, examples, output,
                       {"manifest_sha256": file_sha256(ROOT / "manifest.json")},
                       seed=42, save_traces=True, should_stop=allocation.stopped)
@@ -76,26 +89,35 @@ def generation(model, tokenizer, provenance, rows, output, allocation, read_scal
         return False
     predictions = read_results(output / "predictions.jsonl", "example_id")
     atomic_json(output / "accuracy.json", accuracy_summary(rows, predictions))
+    atomic_json(output / "assignments.json", assignment_summary(rows, predictions))
     return True
 
 
-def audit_checkpoint(recipe, checkpoint, output, allocation, device, final):
+def audit_checkpoint(recipe, checkpoint, output, allocation, device, final, precision=None):
     metadata = validate_checkpoint(recipe, checkpoint)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
-    model = load_model(str(checkpoint), TaalQwen3Config.from_pretrained(checkpoint), dtype=torch.float32).to(device)
+    config = TaalQwen3Config.from_pretrained(checkpoint)
+    if precision is not None:
+        if precision not in ("bf16", "fp32"):
+            raise ValueError("Expected bf16 or fp32 evaluation precision")
+
+        config.execution_precision = precision
+    model = load_model(str(checkpoint), config, dtype=torch.float32).to(device)
     provenance = {
         "checkpoint": str(checkpoint), "checkpoint_sha256": checkpoint_fingerprint(checkpoint),
         "tokenizer": str(checkpoint), "tokenizer_sha256": tokenizer_fingerprint(tokenizer),
-        "source_sha256": source_fingerprint(), "precision": "bf16", "progress": metadata["progress"],
+        "source_sha256": source_fingerprint(), "precision": config.execution_precision, "progress": metadata["progress"],
     }
     try:
+        # Loss-only resumes must also refuse a different checkpoint or precision.
+        ensure_manifest(output / "checkpoint.json", provenance)
         for cohort in ("narrow", "val"):
             rows = load_rows(ROOT / f"{cohort}.jsonl")
             if not generation(model, tokenizer, provenance, rows, output / cohort, allocation):
                 return False
-        # Label-only and EOS likelihood remain distinct from free-answer accuracy.
-        if not token_diagnostics(model, load_rows(ROOT / "val.jsonl"), output / "val-loss", "loss", allocation):
-            return False
+            # Label-only and EOS likelihood remain distinct from free-answer accuracy.
+            if not token_diagnostics(model, rows, output / f"{cohort}-loss", "loss", allocation):
+                return False
         if final:
             rows = load_rows(ROOT / "test.jsonl")
             if not generation(model, tokenizer, provenance, rows, output / "test", allocation):

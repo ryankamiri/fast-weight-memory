@@ -63,6 +63,48 @@ def accuracy_summary(rows, predictions):
     return result
 
 
+def assignment_summary(rows, predictions):
+    if {row["example_id"] for row in rows} != set(predictions):
+        raise ValueError("Assignment scoring requires every planned prediction")
+
+    groups = {}
+    for row in rows:
+        metadata = row["metadata"]
+        if "query_key" not in metadata:
+            continue
+        key = (metadata["regime"], metadata["query_key"])
+        groups.setdefault(key, []).append(row)
+
+    pairs = []
+    incomplete = 0
+    for (regime, key), alternatives in groups.items():
+        # A single held-out assignment cannot demonstrate following a label change.
+        answers = {row["answer"] for row in alternatives}
+        if len(alternatives) != 2 or len(answers) != 2:
+            incomplete += 1
+            continue
+
+        labels = []
+        expected = []
+        for row in alternatives:
+            labels.append(predicted_label(predictions[row["example_id"]]["hypothesis"]))
+            expected.append(row["answer"])
+        pairs.append({
+            "regime": regime, "query_key": key,
+            "example_ids": [row["example_id"] for row in alternatives],
+            "expected_labels": expected, "predicted_labels": labels,
+            "both_correct": labels == expected,
+            "same_valid_label": labels[0] is not None and labels[0] == labels[1],
+        })
+
+    return {
+        "pairs": len(pairs), "both_correct": sum(pair["both_correct"] for pair in pairs),
+        "same_valid_label": sum(pair["same_valid_label"] for pair in pairs),
+        "incomplete_groups": incomplete, "records": pairs,
+        "scope": "Two distinct labels for the same key and regime; singleton validation keys are not pairs.",
+    }
+
+
 def paired_comparison(rows, intervention, baseline):
     keys = {r["example_id"] for r in rows}
     if set(intervention) != keys or set(baseline) != keys:

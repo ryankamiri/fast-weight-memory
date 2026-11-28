@@ -1,8 +1,11 @@
 """Hash and cohort checks safe to run on an Explorer login node."""
 
+import argparse
 from collections import Counter
 import json
 from pathlib import Path
+
+import yaml
 
 from evaluation.storage import file_sha256
 
@@ -56,5 +59,30 @@ def check_inputs(root=Path("data/single_fact")):
     return manifest
 
 
+def check_precision_recipe(reference=Path("training/configs/taal/single_fact.yaml"),
+                           candidate=Path("training/configs/taal/single_fact_fp32.yaml")):
+    baseline = yaml.safe_load(reference.read_text())
+    fp32 = yaml.safe_load(candidate.read_text())
+    if baseline["model"].get("execution_precision", "bf16") != "bf16":
+        raise ValueError("The matched acquisition reference must remain BF16")
+    if fp32["model"].get("execution_precision") != "fp32":
+        raise ValueError("The new acquisition arm must request FP32")
+
+    baseline["model"]["execution_precision"] = "fp32"
+    baseline["wandb"]["name"] = fp32["wandb"]["name"]
+    if baseline != fp32:
+        raise ValueError("FP32 acquisition must differ only in precision and run name")
+    if fp32["training"]["max_steps"] != 768 or not fp32["training"]["save_traces"]:
+        raise ValueError("Expected 768 updates and saved traces")
+
+    return {"reference_sha256": file_sha256(reference), "fp32_sha256": file_sha256(candidate),
+            "changed_fields": ["model.execution_precision", "wandb.name"], "updates": 768}
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fp32", action="store_true")
+    args = parser.parse_args()
     check_inputs()
+    if args.fp32:
+        print("SINGLE_FACT_FP32_MATCH_VALID " + json.dumps(check_precision_recipe()), flush=True)
